@@ -161,6 +161,28 @@ class TestCommandClassify(unittest.TestCase):
         self.deny("sudo rm -rf /")
         self.deny("xargs git push")
 
+    def test_denies_general_purpose_interpreters(self):
+        # python3/node etc. are arbitrary-code-execution escape hatches: they
+        # can write files (bypassing Edit/Write/redirect denial) and shell
+        # out to git/gh/headless-agent CLIs (bypassing every other rule).
+        for cmd in [
+            "python3 -c \"open('evil.py','w').write('x')\"",
+            "python3 malicious_script.py --push --commit",
+            "python -c 'import os; os.system(\"git push\")'",
+            "node -e \"require('fs').writeFileSync('x','y')\"",
+            "node script.js",
+            "deno run script.ts",
+            "perl -e 'print 1'",
+            "ruby -e 'puts 1'",
+            "php -r 'echo 1;'",
+        ]:
+            self.deny(cmd)
+
+    def test_denies_interpreter_via_wrapper_bypass(self):
+        self.deny("env FOO=bar python3 -c 'import os; os.system(\"git push\")'")
+        self.deny("sh -c \"python3 -c 'os.system(\\\"git push\\\")'\"")
+        self.deny("/usr/bin/python3 -c 'pass'")
+
 
 # --- claude_secretary_guard.py: pane/tool decision ---------------------------
 

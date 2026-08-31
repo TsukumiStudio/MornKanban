@@ -31,6 +31,11 @@ _HARD_DENY_BINARIES = {
     "ssh", "scp", "rsync",
     "make", "cargo", "go", "pytest", "jest", "vitest", "rake", "gradle",
     "xargs", "eval",
+    # general-purpose interpreters: arg-independent allow here would let
+    # `python3 -c "..."` / `node -e "..."` write files or shell out to
+    # git/gh/headless-agent CLIs, defeating every other rule in this file.
+    "python3", "python", "python2", "node", "nodejs", "deno",
+    "perl", "ruby", "php", "lua", "irb", "pry",
 }
 
 _GIT_READONLY_SUBCOMMANDS = {
@@ -56,7 +61,7 @@ _KANBAN_SECRETARY_SUBCOMMANDS = {"bootstrap", "dispatch", "end"}
 _READONLY_UTILITIES = {
     "cat", "ls", "grep", "egrep", "fgrep", "head", "tail", "wc", "pwd",
     "echo", "date", "true", "printf", "which", "type", "basename",
-    "dirname", "realpath", "python3", "node", "jq", "tree", "file", "diff",
+    "dirname", "realpath", "jq", "tree", "file", "diff",
     "stat", "env",
 }
 # find(1) doubles as a file-mutation tool via -delete/-exec/-fprintf; only
