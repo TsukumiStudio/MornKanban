@@ -85,6 +85,73 @@ When the user assigns implementation work in a project that has `.kanban/`:
 
 Leave `model` empty to use the backend's own default. Model names are backend-specific — never pass a Claude model name to a codex card.
 
+## Secretary Guard (technical enforcement, not just instructions)
+
+A bootstrapped secretary pane is restricted to *filing and dispatching
+cards*, and this is enforced technically, not only by the contract text
+above — self-reported "I know I shouldn't" is not enough:
+
+| Allowed in a secretary pane | Forbidden in a secretary pane |
+| --- | --- |
+| Read `.kanban/KANBAN.md`, the README contract, board/card files | File write/edit/delete (Edit/Write/NotebookEdit tools, `apply_patch`-equivalents) |
+| Read-only git (`status`/`log`/`diff`/`show`/`branch`/`remote`/...) | Any git mutation (`add`/`commit`/`push`/`pull`/`fetch`/`merge`/`rebase`/`cherry-pick`/`revert`/`reset`/`checkout`/`switch`/branch or tag create-delete/`worktree`/...) |
+| `kanban add`/`show`/`list`/`init`/`send` (card creation and board confirmation) | Build/test/lint/formatter/server commands; bare `kanban run`; `kanban monitor`/`install`/`update`/`uninstall` |
+| `kanban-secretary.sh bootstrap`/`dispatch`/`end` | Headless agent CLIs (`claude -p`, `codex exec`) |
+| Replying to the user | Claude Code's in-process Agent/Task subagent tool, and any equivalent Codex collaboration/subagent tool |
+| | External changes: GitHub/GitLab (`gh`/`glab`/`hub`, PR/issue/release/tag publish), package publish, deploy |
+
+**How it's enforced today:**
+
+- **Claude Code: `enforced`** (when installed — see below) via a `PreToolUse`
+  hook (`guard/claude_secretary_guard.py`, matcher
+  `Task|Agent|Edit|Write|NotebookEdit|Bash`) that fail-closed denies Task/
+  Agent/Edit/Write/NotebookEdit outright, and classifies every `Bash`
+  command through `guard/command_classify.py` — an **allowlist**, not a
+  denylist, so shell chaining (`;`/`&&`/`||`/`|`), absolute paths, `env`/
+  `sh -c` wrappers, and unrecognized wrapper scripts fall through to deny
+  rather than bypassing it. The guard only fires when the current pane is
+  the recorded active secretary for the current project (see below) —
+  visible Herdr workers, reviewers, resolvers, ordinary Claude sessions, and
+  other projects' secretaries are never affected.
+- **Codex: `partial`.** As of this writing Codex CLI has no confirmed
+  pre-tool-call deny hook (`~/.codex/hooks` and `~/.codex/rules` are an
+  approval-memory/notify surface, not a deny gate) — enforcement there is
+  the skill/contract text (this file, `skills/kanban-dispatch/SKILL.md`,
+  `.kanban/KANBAN.md`) only. This is reported honestly, never displayed as
+  `enforced`.
+
+`kanban version`/`kanban --version`/`kanban-setup.sh` status output and
+`kanban-secretary.sh bootstrap`'s one-line reply both show the current
+`claude=<state>,codex=<state>` guard status (`enforced` / `not-installed` /
+`misconfigured` for Claude; `partial` for Codex — never a false
+`enforced`). `kanban install`/`update` idempotently add or repair the
+Claude hook in `~/.claude/settings.json` without touching unrelated hooks
+or keys (a one-time `.mornkanban-guard.bak` backup is made on first
+install); `kanban uninstall` removes only the managed entry.
+
+**Scope and lifecycle:** `kanban-secretary.sh bootstrap` atomically records
+the current Herdr pane id as the project's active secretary marker
+(`.kanban/.secretary-guard/marker.json`, keyed by project root realpath); a
+re-bootstrap in a new pane silently supersedes a stale marker left by a
+dead pane, and `kanban-secretary.sh end` clears it explicitly. The guard
+denies a tool only when the invoking pane id matches that marker for the
+resolved project root — it never blocks a worker/reviewer/resolver pane, a
+plain Claude/Codex session, or another project's secretary, and a missing
+or unreadable marker fails open toward *allowing* the tool.
+
+**When a deny fires**, the message tells the agent to file a card and
+dispatch instead of asking the user to re-confirm the boundary. A capped,
+secret-free audit log (`.kanban/.secretary-guard/audit.log`, timestamp +
+tool + category + reason only — never the command text or conversation
+body) records what was denied.
+
+**If a direct action already happened before this was noticed** (or
+happened through Codex, where enforcement is contract-level only): stop
+immediately. Do not self-roll-back, commit further, push, or delete a tag.
+Report the fact — including any push/tag that already reached a remote — to
+the user, and file a follow-up card to audit and recover the result;
+recovery is delegated work too.
+
 ## Backends
 
 | Backend | Worker command | Reviewer command |
