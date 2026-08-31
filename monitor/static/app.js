@@ -131,6 +131,9 @@
       for (const c of data.columns[s]) {
         const item = el("div", "card-item");
         item.appendChild(el("div", null, c.title || c.filename));
+        if (s === "blocked" && c.blocked_kind === "review_infra") {
+          item.appendChild(el("div", "card-sub badge-infra-blocked", "review infrastructure stopped (not a code failure)"));
+        }
         item.appendChild(el("div", "card-sub", [c.backend, c.model, "attempts " + c.attempts + "/" + c.max_attempts].filter(Boolean).join(" · ")));
         item.addEventListener("click", () => openCard(state.selectedSlug, s, c.filename));
         col.appendChild(item);

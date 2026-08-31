@@ -135,6 +135,11 @@ h2 { font-size: 1rem; color: var(--muted); margin: 24px 0 10px; }
 .board-column h4 .badge-done { color: var(--done); }
 .board-column h4 .badge-failed { color: var(--failed); }
 
+.badge-infra-blocked {
+  color: var(--blocked);
+  font-weight: 600;
+}
+
 .card-item {
   background: var(--bg);
   border: 1px solid var(--border);

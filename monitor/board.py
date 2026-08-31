@@ -62,6 +62,14 @@ def card_summary(kanban_dir, state, filename):
         "threshold": fm.get("threshold", ""),
         "attempts": fm.get("attempts", ""),
         "max_attempts": fm.get("max_attempts", ""),
+        # A "blocked" card reached via exhausted review/worker infrastructure
+        # retries (agent_not_found, pane lost, timeout, ...) is a stopped
+        # pipeline, not a code-quality failure -- surface that distinction
+        # instead of leaving it indistinguishable from the older "worker
+        # reported an ordering dependency" blocked kind.
+        "blocked_kind": fm.get("blocked_kind", ""),
+        "review_infra_retries": fm.get("review_infra_retries", ""),
+        "worker_infra_retries": fm.get("worker_infra_retries", ""),
         "mtime": mtime,
     }
 
