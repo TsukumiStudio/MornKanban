@@ -1135,15 +1135,26 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
 }
 
 cmd_run() {
+  # Capture a real environment override before require_root loads project
+  # defaults into KANBAN_JOBS. Environment and -j intentionally pin the
+  # dispatcher; otherwise KANBAN.md's jobs value is re-read while running.
+  local jobs_env=${KANBAN_JOBS:-}
   require_root
-  local once=false jobs_max=${KANBAN_JOBS:-1}
+  local once=false jobs_pinned=false jobs_max
+  if [[ -n $jobs_env ]]; then
+    jobs_max=$jobs_env
+    jobs_pinned=true
+  else
+    jobs_max=$(fm_get "$KB/KANBAN.md" jobs 1)
+  fi
   while [[ $# -gt 0 ]]; do
     case $1 in
       --once) once=true; shift ;;
-      -j|--jobs) jobs_max=$2; shift 2 ;;
+      -j|--jobs) jobs_max=$2; jobs_pinned=true; shift 2 ;;
       *) die "usage: kanban run [--once] [-j N]" ;;
     esac
   done
+  [[ $jobs_max =~ ^[1-9][0-9]*$ ]] || die "jobs must be a positive integer (got: $jobs_max)"
   local lock=$KB/.lock
   if [[ -f $lock ]] && kill -0 "$(cat "$lock")" 2>/dev/null; then
     die "dispatcher already running (pid $(cat "$lock"))"
@@ -1164,6 +1175,11 @@ cmd_run() {
     echo "kanban: Review: ON (project default; cards may opt out with --no-review)"
   else
     echo "kanban: Review: OFF (fast iteration; project default; cards may opt in with --review)"
+  fi
+  if $jobs_pinned; then
+    echo "kanban: Jobs: $jobs_max (pinned by -j or KANBAN_JOBS)"
+  else
+    echo "kanban: Jobs: $jobs_max (live from .kanban/KANBAN.md; edit jobs: to resize safely)"
   fi
   echo "[UNRESTRICTED] worker/reviewer permission policy: claude=$(claude_perm_flag) codex=$(codex_sandbox_flag)" >&2
   # Reclaim cards stranded by a crashed dispatcher (lock guarantees exclusivity).
@@ -1227,6 +1243,18 @@ cmd_run() {
     die "detached HEAD; check out a branch first"
   local spawned=0
   while :; do
+    if ! $jobs_pinned; then
+      local configured_jobs
+      configured_jobs=$(fm_get "$KB/KANBAN.md" jobs "$jobs_max")
+      if [[ $configured_jobs =~ ^[1-9][0-9]*$ ]]; then
+        if [[ $configured_jobs -ne $jobs_max ]]; then
+          echo "kanban: Jobs resized $jobs_max -> $configured_jobs (running jobs are kept)"
+          jobs_max=$configured_jobs
+        fi
+      else
+        echo "kanban: ignoring invalid live jobs value '$configured_jobs'; keeping $jobs_max" >&2
+      fi
+    fi
     local running
     running=$(jobs -rp | wc -l | tr -d ' ')
     local cards=("$KB"/todo/*.md)

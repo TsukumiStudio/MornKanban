@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -1365,6 +1366,68 @@ class DispatcherWorkflowTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already running", result.stdout + result.stderr)
+
+    def _run_live_jobs_case(self, *, pinned):
+        cfg = self.project / ".kanban" / "KANBAN.md"
+        text = cfg.read_text(encoding="utf-8")
+        text = text.replace("jobs: 2", "jobs: 1")
+        text = text.replace("review_enabled: true", "review_enabled: false")
+        cfg.write_text(text, encoding="utf-8")
+        events = Path(self.temp.name) / ("pinned-events" if pinned else "live-events")
+        worker = self._write_script(
+            "slow-worker.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                echo "start $KANBAN_CARD_TITLE" >> "{events}"
+                sleep 4
+                echo "end $KANBAN_CARD_TITLE" >> "{events}"
+                """
+            ),
+        )
+        for n in range(3):
+            self._add_card(f"live jobs {n}")
+        env = self.env.copy()
+        env.pop("KANBAN_JOBS", None)
+        env.update({"KANBAN_WORKER_CMD": str(worker)})
+        args = [str(KANBAN_SH), "run"]
+        if pinned:
+            args += ["-j", "1"]
+        proc = subprocess.Popen(
+            args, cwd=self.project, env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if events.exists() and "start " in events.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.1)
+        else:
+            proc.kill()
+            self.fail("first live-jobs worker never started")
+        cfg.write_text(cfg.read_text(encoding="utf-8").replace("jobs: 1", "jobs: 3"), encoding="utf-8")
+        stdout, stderr = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 0, stdout + stderr)
+        return events.read_text(encoding="utf-8").splitlines(), stdout
+
+    def test_running_dispatcher_increases_parallelism_from_live_project_config(self):
+        events, stdout = self._run_live_jobs_case(pinned=False)
+        first_end = next(i for i, event in enumerate(events) if event.startswith("end "))
+        starts_before_first_end = sum(event.startswith("start ") for event in events[:first_end])
+        self.assertGreaterEqual(starts_before_first_end, 2, events)
+        self.assertIn("Jobs resized 1 -> 3", stdout)
+
+    def test_explicit_jobs_flag_pins_running_dispatcher(self):
+        events, stdout = self._run_live_jobs_case(pinned=True)
+        active = 0
+        peak = 0
+        for event in events:
+            active += 1 if event.startswith("start ") else -1
+            peak = max(peak, active)
+        self.assertEqual(peak, 1, events)
+        self.assertIn("Jobs: 1 (pinned", stdout)
 
     @FULL_ONLY
     def test_resolving_orphan_is_reclaimed_and_not_double_processed(self):

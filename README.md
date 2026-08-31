@@ -214,7 +214,7 @@ A project's own explicit `claude_perms`/`codex_sandbox`/`codex_full_bypass`/`cod
 
 ## Dispatcher Behavior
 
-`kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel (default 1). In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:
+`kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel. Without `-j` or `KANBAN_JOBS`, the dispatcher uses `.kanban/KANBAN.md`'s `jobs:` value and re-reads it while running. Raising it fills new slots; lowering it keeps current jobs alive and only pauses new starts. In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:
 
 1. Create branch `kanban/<id>` and worktree `.kanban/wt/<id>` from the branch checked out at dispatch start.
 2. Pipe the card body (task + accumulated rework instructions) into the worker backend (a headless CLI or the visible Herdr wrapper) inside the worktree; commit the result on the card's branch.
