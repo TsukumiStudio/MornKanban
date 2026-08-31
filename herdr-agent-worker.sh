@@ -73,7 +73,13 @@ herdr pane rename "$pane" "$(echo "$label" | cut -c1-48)" >/dev/null 2>&1 || tru
 # Start the interactive agent. A brand-new worktree triggers Claude's
 # folder-trust dialog, which surfaces as agent_not_ready; the worktree is
 # our own checkout, so accept it and wait for idle.
-if ! herdr agent start "$name" --kind claude --pane "$pane" --timeout 45000 -- --permission-mode acceptEdits --model "$model" >/dev/null 2>&1; then
+# KANBAN_ALLOWED_TOOLS: extra pre-approved tools (e.g. "mcp__claude-in-chrome"
+# for a browser-role card) so the unattended worker doesn't stall on the
+# tool-permission dialog.
+extra_args=()
+if [[ -n ${KANBAN_ALLOWED_TOOLS:-} ]]; then extra_args=(--allowedTools "$KANBAN_ALLOWED_TOOLS"); fi
+
+if ! herdr agent start "$name" --kind claude --pane "$pane" --timeout 45000 -- --permission-mode acceptEdits --model "$model" ${extra_args[@]+"${extra_args[@]}"} >/dev/null 2>&1; then
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     ui=$(herdr agent read "$name" --source visible --lines 30 2>/dev/null || true)
     if grep -q "trust this folder" <<<"$ui"; then
