@@ -68,7 +68,7 @@ $kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/a
 
 `KANBAN.md` is the project's kanban contract, in two layers:
 
-- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `resolver`, `resolve_model`, `threshold`, `max_attempts`, `resolve_max_attempts`, `review_infra_max_retries`, `review_infra_backoff_seconds`, `jobs`, `claude_perms`, `codex_sandbox`, `secretary_agent`. Precedence: environment variable > `KANBAN.md` > built-in default.
+- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `resolver`, `resolve_model`, `threshold`, `max_attempts`, `resolve_max_attempts`, `review_infra_max_retries`, `review_infra_backoff_seconds`, `jobs`, `claude_perms`, `codex_sandbox`, `codex_full_bypass`, `codex_approval`, `secretary_agent`. Precedence: environment variable > `KANBAN.md` > built-in default. The `claude_perms`/`codex_*` keys default to an **unrestricted** worker/reviewer/resolver permission policy — see **UNRESTRICTED permission policy**.
 - **Body** (secretary policy): how to split cards, which backend/model to route each kind of task to, whether to auto-start the dispatcher, escalation rules. The dialogue agent must read and follow it before cutting cards.
 
 `secretary_agent` overrides the per-project Herdr secretary name (see **Secretary Bootstrap** below); it is read only by `kanban-secretary.sh`, not by `kanban run` itself.
@@ -161,8 +161,10 @@ recovery is delegated work too.
 
 | Backend | Worker command | Reviewer command |
 | --- | --- | --- |
-| `claude` | `claude -p [--model M] --permission-mode <claude_perms>` | `claude -p [--model M]` |
-| `codex` | `codex exec --skip-git-repo-check -s <codex_sandbox> [-m M]` | `codex exec --skip-git-repo-check -s read-only [-m M]` |
+| `claude` | `claude -p [--model M] <claude perm flag>` | `claude -p [--model M] <claude perm flag>` |
+| `codex` | `codex exec --skip-git-repo-check <codex perm flag> [-m M]` | `codex exec --skip-git-repo-check <codex perm flag> [-m M]` |
+
+Worker and reviewer use the **same** permission policy — nothing forces the reviewer to a safer mode. `<claude perm flag>` is `--dangerously-skip-permissions` when `claude_perms` (default `bypassPermissions`) is `bypassPermissions`, else `--permission-mode <claude_perms>`. `<codex perm flag>` is `--dangerously-bypass-approvals-and-sandbox` when `codex_full_bypass` (default `true`) is `true`, else `-s <codex_sandbox> -a <codex_approval>`. See **UNRESTRICTED permission policy** below for the risk and how to dial it back.
 
 `auto` (default for both worker and reviewer) resolves to the first installed CLI in `backend_order` (built-in default `claude codex`), so machines with only one CLI keep working unchanged. Codex does not run tests by default; state the test command in the card.
 
@@ -184,7 +186,31 @@ The helper verifies that it is called from the current Herdr pane, keeps focus o
 
 The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, which `dispatch` always sets to that project's resolved secretary name — see **Secretary agent naming** above; a standalone invocation with no `KANBAN_HERDR_SECRETARY` resolves the same name itself from its own project root) to inspect and report, so `failed/` cards reach the user through the correct project's secretary instead of dying silently or reaching a different project's agent.
 
-The wrapper splits a pane below the dispatcher and starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, resolver backend from `KANBAN_RESOLVER`, `auto` resolved via `KANBAN_BACKEND_ORDER` exactly like the headless path. A Claude worker or resolver gets `--permission-mode acceptEdits` and a model (`KANBAN_CARD_MODEL` for workers, `KANBAN_RESOLVE_MODEL` for resolvers; default `sonnet`); a Claude reviewer gets no permission-mode override, keeping it read-only-ish. A Codex worker or resolver gets `-s <codex_sandbox> -a never`; a Codex reviewer gets `-s read-only -a never`; either only adds `-m <model>` when one is set — Codex never inherits the Claude default of `sonnet`. It accepts the folder-trust dialog for the card's own worktree, prompts it with the card body (or, for a resolver, the conflict-resolution prompt described below), and waits. Because both Claude Code and Codex render on the terminal's alternate screen, the final answer cannot be read back from scrollback — the wrapper instructs the agent to also write its answer (the review JSON included) to `.kanban-answer.md` in the worktree, reads that, and deletes it before the card is committed. Panes are closed when the attempt ends.
+The wrapper splits a pane below the dispatcher and starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, resolver backend from `KANBAN_RESOLVER`, and `auto` resolved via `KANBAN_BACKEND_ORDER`. Worker, reviewer, and resolver panes get the **same** full-trust permission policy (see **UNRESTRICTED permission policy** below): Claude gets `--dangerously-skip-permissions` (or `--permission-mode <claude_perms>` when overridden away from `bypassPermissions`), while Codex gets `--dangerously-bypass-approvals-and-sandbox` (or `-s <codex_sandbox> -a <codex_approval>` when `codex_full_bypass` is `false`). Model selection remains role-specific and Codex never inherits the Claude default of `sonnet`. The pane title and wrapper diagnostic identify the role and `UNRESTRICTED` policy. It accepts the folder-trust dialog for the card worktree, sends the worker/reviewer/resolver prompt, and waits for a stable `.kanban-answer.md`; terminal chrome is never substituted for a missing answer. Panes are closed when the attempt ends.
+
+### UNRESTRICTED permission policy
+
+Worker and reviewer agents (Claude and Codex, all roles) run **without any permission prompt or sandbox restriction** by default: Claude gets `--dangerously-skip-permissions`, Codex gets `--dangerously-bypass-approvals-and-sandbox`. This is a deliberate default, not a bug — the dispatcher still runs inside a **visible** Herdr pane so a human can watch or interrupt it (see Herdr Integration above), and every attempt is confined to its own git worktree/branch.
+
+**Risk**: an unrestricted agent can read/write files outside the worktree, read credentials on disk, make arbitrary network requests, and run any local process or git/GitHub command — including against a card body that carries a prompt injection. Treat every card as if its instructions could be adversarial.
+
+**Dial it back per project** by overriding these in `.kanban/KANBAN.md` frontmatter (or the matching env var, which always wins):
+
+```yaml
+claude_perms: acceptEdits        # or manual / plan / dontAsk — see `claude --help`
+codex_full_bypass: false
+codex_sandbox: workspace-write   # or read-only
+codex_approval: on-request       # or untrusted
+```
+
+| Variable | KANBAN.md key | Meaning |
+| --- | --- | --- |
+| `KANBAN_CLAUDE_PERMS` | `claude_perms` | Claude permission mode (default `bypassPermissions` → `--dangerously-skip-permissions`; any other value maps to `--permission-mode <value>`) |
+| `KANBAN_CODEX_SANDBOX` | `codex_sandbox` | Codex `-s` sandbox mode, used only when `codex_full_bypass` is `false` (default `danger-full-access`) |
+| `KANBAN_CODEX_FULL_BYPASS` | `codex_full_bypass` | `true` (default) uses `--dangerously-bypass-approvals-and-sandbox`; `false` falls back to `-s <codex_sandbox> -a <codex_approval>` |
+| `KANBAN_CODEX_APPROVAL` | `codex_approval` | Codex `-a` approval policy, used only when `codex_full_bypass` is `false` (default `never`) |
+
+A project's own explicit `claude_perms`/`codex_sandbox`/`codex_full_bypass`/`codex_approval` (or the matching env var) is always honored as-is. A project that never set these keys picks up the new unrestricted default the next time it runs `kanban run` with this version of `kanban.sh` — migrate to a safer mode explicitly with the YAML block above if that project's board processes untrusted card content.
 
 ## Dispatcher Behavior
 
@@ -237,8 +263,10 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_REVIEW_MODEL` | Reviewer model (empty = backend default) |
 | `KANBAN_RESOLVER` | Resolver backend for merge-conflict handling: `auto`, `claude`, or `codex` (default: the card's own backend) |
 | `KANBAN_RESOLVE_MODEL` | Resolver model (empty = card's own model / backend default) |
-| `KANBAN_CLAUDE_PERMS` | claude worker/resolver `--permission-mode` (default `acceptEdits`; use `bypassPermissions` only for fully unattended runs in trusted repositories) |
-| `KANBAN_CODEX_SANDBOX` | codex worker/resolver `-s` mode (default `workspace-write`) |
+| `KANBAN_CLAUDE_PERMS` | Claude worker/reviewer/resolver permission mode (default `bypassPermissions` → `--dangerously-skip-permissions`; see **UNRESTRICTED permission policy**) |
+| `KANBAN_CODEX_SANDBOX` | Codex worker/reviewer/resolver `-s` mode, used only when `KANBAN_CODEX_FULL_BYPASS=false` (default `danger-full-access`) |
+| `KANBAN_CODEX_FULL_BYPASS` | `true` (default) → `--dangerously-bypass-approvals-and-sandbox`; `false` → `-s <sandbox> -a <approval>` |
+| `KANBAN_CODEX_APPROVAL` | Codex worker/reviewer/resolver `-a` approval policy, used only when `KANBAN_CODEX_FULL_BYPASS=false` (default `never`) |
 | `KANBAN_JOBS` | Default parallelism for `kanban run` (overridden by `-j`) |
 | `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` / `KANBAN_RESOLVE_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |
