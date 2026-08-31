@@ -22,6 +22,16 @@ KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
 # .kanban/wt/<id> worktree by design).
 DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
 
+# `KANBAN_TEST_TIER=fast` skips the handful of tests that drive a real
+# `kanban.sh run --once` end to end (real git worktree/branch/merge
+# subprocesses, ~2s each). They stay in the default/full run; fast is for
+# tight worker/rework iteration where the rest of the suite already covers
+# the touched unit. See gui/VERIFY.md "テストの段階 (fast / full)".
+FULL_ONLY = unittest.skipIf(
+    os.environ.get("KANBAN_TEST_TIER") == "fast",
+    "full tier only: real kanban.sh run --once git worktree/merge integration",
+)
+
 
 def _copy_dist(dest):
     dest = Path(dest)
@@ -1060,6 +1070,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         """
     )
 
+    @FULL_ONLY
     def test_no_conflict_merge_still_works(self):
         worker = self._write_script(
             "worker.sh",
@@ -1088,6 +1099,10 @@ class DispatcherWorkflowTests(unittest.TestCase):
         done = list((self.project / ".kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         self.assertEqual((self.project / "new_file.txt").read_text(encoding="utf-8"), "from worker\n")
+        card_text = done[0].read_text(encoding="utf-8")
+        self.assertRegex(card_text, r"last_timings: worker=\d+s review=\d+s")
+        self.assertIn("phase durations: worker=", card_text)
+        self.assertIn("phase durations: merge=", card_text)
 
     def _seed_conflict(self):
         (self.project / "file.txt").write_text("base\n", encoding="utf-8")
@@ -1115,6 +1130,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
             ),
         )
 
+    @FULL_ONLY
     def test_merge_conflict_after_review_goes_to_resolver_then_done(self):
         self._seed_conflict()
         worker = self._conflicting_worker()
@@ -1169,6 +1185,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertNotIn("kanban/", branches)
         self.assertNotIn("kanban-resolve/", branches)
 
+    @FULL_ONLY
     def test_resolver_retries_on_low_review_score_then_passes(self):
         self._seed_conflict()
         worker = self._conflicting_worker()
@@ -1225,7 +1242,11 @@ class DispatcherWorkflowTests(unittest.TestCase):
         card_text = done[0].read_text(encoding="utf-8")
         self.assertIn("still conflicted", card_text)
         self.assertEqual(count_file.read_text(encoding="utf-8").strip(), "2")
+        self.assertRegex(card_text, r"last_timings: resolver=\d+s review=\d+s")
+        self.assertIn("phase durations: resolver=", card_text)
+        self.assertIn("phase durations: merge=", card_text)
 
+    @FULL_ONLY
     def test_resolve_max_attempts_exceeded_moves_to_failed_with_history(self):
         cfg = self.project / ".kanban" / "KANBAN.md"
         text = cfg.read_text(encoding="utf-8")
@@ -1285,6 +1306,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         # branches must actually still exist on disk, not just claimed
         self.assertTrue((self.project / ".git").exists())
 
+    @FULL_ONLY
     def test_resolve_cmd_receives_card_routing_and_conflict_context(self):
         self._seed_conflict()
         worker = self._conflicting_worker()
@@ -1339,6 +1361,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already running", result.stdout + result.stderr)
 
+    @FULL_ONLY
     def test_resolving_orphan_is_reclaimed_and_not_double_processed(self):
         card = self._add_card("orphan card")
         card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
@@ -1442,6 +1465,53 @@ class SecretaryForbidsInProcessDelegationContractTests(unittest.TestCase):
         self.assertIn("collaboration/subagent 起動 (Codex)", text)
         self.assertIn("kanban add", text)
         self.assertIn("kanban-secretary.sh dispatch", text)
+
+
+class TestTierContractTests(unittest.TestCase):
+    """Locks which tests are FULL_ONLY (real `kanban.sh run --once` git
+    worktree/merge integration) so fast/full membership can only change via a
+    deliberate edit to this test, not silently. See gui/VERIFY.md "テストの
+    段階 (fast / full)"."""
+
+    EXPECTED_FULL_ONLY = {
+        "test_no_conflict_merge_still_works",
+        "test_merge_conflict_after_review_goes_to_resolver_then_done",
+        "test_resolver_retries_on_low_review_score_then_passes",
+        "test_resolve_max_attempts_exceeded_moves_to_failed_with_history",
+        "test_resolve_cmd_receives_card_routing_and_conflict_context",
+        "test_resolving_orphan_is_reclaimed_and_not_double_processed",
+    }
+
+    def test_full_only_membership_is_exactly_the_documented_six(self):
+        # FULL_ONLY's skipIf condition is frozen at decoration time (module
+        # import), so re-patching KANBAN_TEST_TIER at test time cannot
+        # retroactively toggle __unittest_skip__. Read the source instead:
+        # every `@FULL_ONLY` must immediately precede a `def test_...`.
+        src = Path(__file__).read_text(encoding="utf-8")
+        marked = set(re.findall(r"@FULL_ONLY\s*\n\s*def (test_\w+)", src))
+        self.assertEqual(marked, self.EXPECTED_FULL_ONLY)
+
+    def test_full_only_actually_skips_under_fast_tier(self):
+        # Confirms the decorator, not just its source annotation, honors
+        # KANBAN_TEST_TIER=fast (fresh subprocess: skip decision is baked in
+        # at import time, so this must reimport in a clean interpreter).
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest", "-v", "tests.test_kanban_secretary.DispatcherWorkflowTests"],
+            cwd=REPO, env={**os.environ, "KANBAN_TEST_TIER": "fast"},
+            capture_output=True, text=True,
+        )
+        skipped_names = set(re.findall(r"^(test_\w+) \([^)]+\) \.\.\. skipped ", result.stderr, re.M))
+        self.assertEqual(skipped_names, self.EXPECTED_FULL_ONLY, result.stderr)
+
+    def test_full_only_tests_only_exist_in_dispatcher_workflow_tests(self):
+        # FULL_ONLY marks real end-to-end git worktree/merge tests; keeping
+        # them confined to one class stops fast/full drift from spreading
+        # across unrelated unit-test classes.
+        for name in self.EXPECTED_FULL_ONLY:
+            self.assertTrue(
+                hasattr(DispatcherWorkflowTests, name),
+                f"{name} expected on DispatcherWorkflowTests but not found",
+            )
 
 
 if __name__ == "__main__":
