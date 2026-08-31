@@ -464,12 +464,25 @@ cmd_run() {
     if [[ -e ${cards[0]} && $running -lt $jobs_max ]] && { ! $once || [[ $spawned -eq 0 ]]; }; then
       local picked
       picked=$(move_card "${cards[0]}" doing)   # claim synchronously before spawning
+      # Crash net: an unexpected error inside the job (set -e) must not strand
+      # the card in doing/ silently — record it and move the card to failed.
+      job_crash_net() { # job_crash_net <status> <picked>
+        local st=$1 f=$KB/doing/$(basename "$2")
+        if [[ $st -ne 0 && -f $f ]]; then
+          local t
+          t=$(fm_get "$f" title "?" 2>/dev/null || basename "$2")
+          echo "job crashed unexpectedly (exit $st); see dispatcher output" | append_history "$f"
+          mv "$f" "$KB/failed/"
+          echo "[$t] CRASH exit=$st -> failed"
+        fi
+      }
       if [[ -n ${KANBAN_DEBUG:-} ]]; then
         ( exec 2>"$KB/wt/job.$(basename "$picked").trace"; set -x
-          trap 'echo "JOB EXIT status=$?" >&2' EXIT
+          trap 'job_crash_net $? "$picked"; echo "JOB EXIT status=$?" >&2' EXIT
           process_card_wt "$picked" "$base_branch" ) &
       else
-        process_card_wt "$picked" "$base_branch" &
+        ( trap 'job_crash_net $? "$picked"' EXIT
+          process_card_wt "$picked" "$base_branch" ) &
       fi
       spawned=$((spawned + 1))
       continue
