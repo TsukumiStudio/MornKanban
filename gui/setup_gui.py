@@ -11,13 +11,9 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from setup_core import (  # noqa: E402
-    add_project,
     check_deps,
     cli_installed,
-    init_project,
-    install_cli,
-    install_skill,
-    load_projects,
+    run_setup,
     skill_installed,
 )
 
@@ -34,12 +30,12 @@ def main():
 
     root = tk.Tk()
     root.title("MornKanban Setup")
-    root.minsize(520, 480)
+    root.minsize(480, 360)
 
     deps_var = tk.StringVar()
     step1_var = tk.StringVar()
     step2_var = tk.StringVar()
-    path_var = tk.StringVar()
+    result_var = tk.StringVar()
 
     def refresh():
         deps = check_deps()
@@ -53,87 +49,46 @@ def main():
         )
         step1_var.set("kanban CLI: %s" % ("導入済み" if cli_installed() else "未導入"))
         step2_var.set("Claude Code スキル: %s" % ("導入済み" if skill_installed() else "未導入"))
-        refresh_projects()
 
-    def refresh_projects():
-        listbox.delete(0, tk.END)
-        for p in load_projects():
-            mark = "✓" if p["has_kanban"] else "✗"
-            listbox.insert(tk.END, "[%s] %s (%s)" % (mark, p["name"], p["path"]))
-
-    def on_install_cli():
-        ok, msg = install_cli()
-        if ok:
-            messagebox.showinfo("kanban CLI", msg)
-        else:
-            messagebox.showerror("kanban CLI", msg)
-        refresh()
-
-    def on_install_skill():
-        force = False
-        if skill_installed():
-            force = messagebox.askyesno("Claude Code スキル", "既に導入済みです。上書きしますか?")
-            if not force:
-                return
-        ok, msg = install_skill(force=force)
-        if ok:
-            messagebox.showinfo("Claude Code スキル", msg)
-        else:
-            messagebox.showerror("Claude Code スキル", msg)
-        refresh()
-
-    def on_add_project():
-        ok, msg = add_project(path_var.get())
-        if ok:
-            path_var.set("")
-        else:
-            messagebox.showerror("プロジェクト追加", msg)
-        refresh_projects()
-
-    def on_init_selected():
-        sel = listbox.curselection()
-        if not sel:
-            messagebox.showerror("kanban init", "プロジェクトを選択してください")
+    def on_run_setup():
+        try:
+            messages = run_setup()
+        except OSError as exc:
+            messagebox.showerror("セットアップ実行", str(exc))
             return
-        projects = load_projects()
-        p = projects[sel[0]]
-        ok, msg = init_project(p["path"])
-        if ok:
-            messagebox.showinfo("kanban init", msg)
-        else:
-            messagebox.showerror("kanban init", msg)
-        refresh_projects()
+        result_var.set("\n".join(messages))
+        refresh()
 
     frame = tk.Frame(root, padx=12, pady=12)
     frame.pack(fill=tk.BOTH, expand=True)
 
     tk.Label(frame, textvariable=deps_var, anchor="w").pack(fill=tk.X, pady=(0, 8))
 
-    tk.Label(frame, text="Step 1: kanban CLI", anchor="w", font=("", 10, "bold")).pack(fill=tk.X)
-    tk.Label(frame, textvariable=step1_var, anchor="w").pack(fill=tk.X)
-    tk.Button(frame, text="kanban CLI をインストール", command=on_install_cli).pack(fill=tk.X, pady=(0, 8))
+    tk.Label(frame, text="kanban CLI", anchor="w", font=("", 10, "bold")).pack(fill=tk.X)
+    tk.Label(frame, textvariable=step1_var, anchor="w").pack(fill=tk.X, pady=(0, 8))
 
-    tk.Label(frame, text="Step 2: Claude Code スキル", anchor="w", font=("", 10, "bold")).pack(fill=tk.X)
-    tk.Label(frame, textvariable=step2_var, anchor="w").pack(fill=tk.X)
-    tk.Button(frame, text="Claude Code スキルを導入", command=on_install_skill).pack(fill=tk.X, pady=(0, 8))
+    tk.Label(frame, text="Claude Code スキル", anchor="w", font=("", 10, "bold")).pack(fill=tk.X)
+    tk.Label(frame, textvariable=step2_var, anchor="w").pack(fill=tk.X, pady=(0, 8))
 
-    tk.Label(frame, text="Step 3: プロジェクト", anchor="w", font=("", 10, "bold")).pack(fill=tk.X)
-    path_frame = tk.Frame(frame)
-    path_frame.pack(fill=tk.X)
-    tk.Entry(path_frame, textvariable=path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-    tk.Button(path_frame, text="追加", command=on_add_project).pack(side=tk.LEFT, padx=(4, 0))
-
-    listbox = tk.Listbox(frame, height=8)
-    listbox.pack(fill=tk.BOTH, expand=True, pady=(4, 4))
-    tk.Button(frame, text="選択を kanban init", command=on_init_selected).pack(fill=tk.X, pady=(0, 8))
+    tk.Button(frame, text="セットアップ実行", command=on_run_setup).pack(fill=tk.X, pady=(0, 8))
 
     tk.Label(
         frame,
-        text="導入後は Herdr のペインで claude を起動し「kanban の秘書として待機して」と一言",
+        textvariable=result_var,
         anchor="w",
-        wraplength=480,
+        wraplength=440,
         justify=tk.LEFT,
-    ).pack(fill=tk.X, pady=(8, 0))
+    ).pack(fill=tk.X, pady=(0, 8))
+
+    tk.Label(
+        frame,
+        text="導入後はプロジェクトのペインで claude に「kanban の秘書として待機して」",
+        anchor="w",
+        wraplength=440,
+        justify=tk.LEFT,
+    ).pack(fill=tk.X, pady=(8, 8))
+
+    tk.Button(frame, text="閉じる", command=root.destroy).pack(fill=tk.X)
 
     refresh()
     root.mainloop()
