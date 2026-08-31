@@ -168,22 +168,26 @@ def main():
     status = dashboard.collect_status()
     print(dashboard.render_status(status, caps))
     print()
-    print(dashboard.render_guide(caps))
-    print()
 
     if not sys.stdin.isatty():
         sys.exit(0)
 
-    ans = prompt("[y=セットアップ / s=更新 / u=アンインストール / N=何もしない]: ")
-    if ans is None:
-        sys.exit(0)
-    choice = ans.strip().lower()
-    if choice == "y":
-        _interactive_install(status)
-    elif choice == "s":
-        _interactive_update(status)
-    elif choice == "u":
-        _interactive_uninstall(status)
+    while True:
+        ans = prompt("[h=ヘルプ / y=セットアップ / s=更新 / u=アンインストール / N=何もしない]: ")
+        if ans is None:
+            break
+        choice = ans.strip().lower()
+        if choice == "h":
+            print(dashboard.render_guide(caps))
+            print()
+            continue
+        if choice == "y":
+            _interactive_install(status)
+        elif choice == "s":
+            _interactive_update(status)
+        elif choice == "u":
+            _interactive_uninstall(status)
+        break
     sys.exit(0)
 
 

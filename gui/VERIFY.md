@@ -7,7 +7,7 @@
 `fetch_latest_version()` / `compare_versions()` / `run_update()` が担う。
 
 `dashboard.py` はそのロジックを読み取り専用で使い、引数なしの
-`kanban-setup.sh` に枠付きの状態カードと操作ガイドを描画する。TTYでは色とUnicode、
+`kanban-setup.sh` に枠付きの状態カードを描画し、`h`入力時だけ操作ガイドを開く。TTYでは色とUnicode、
 非TTY・`NO_COLOR`・`TERM=dumb`ではASCII・色なしへ切り替え、現在の`VERSION`を
 常に明記する。`y`/`s`/`u` は変更プレビューと再確認後にだけ実行される。
 
@@ -73,8 +73,9 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
   dirty checkout の拒否
 - `kanban-setup.sh` が引数を `gui/setup_cli.py` へ確実に転送する
   (転送漏れは対話ウィザードへ黙って落ちる既知の失敗モード)
-- セットアップダッシュボードが枠と現在VERSIONを表示し、TTY/非TTY・色・狭幅の
-  fallback、導入状態、変更プレビュー、確認拒否時の無変更を維持する
+- セットアップダッシュボードが枠と現在VERSIONだけを起動表示し、`h`入力後にだけ
+  操作ガイドを表示してメニューへ戻る。TTY/非TTY・色・狭幅のfallback、導入状態、
+  変更プレビュー、確認拒否時の無変更も維持する
 
 セットアップ画面の非TTY経路は次で確認する。ASCII枠付きダッシュボードと
 `VERSION:`を表示後、変更せず終了する。
@@ -83,8 +84,9 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
 python3 gui/setup_cli.py </dev/null
 ```
 
-TTYでは引数なしで起動し、`y`=install / `s`=update / `u`=uninstall /
-`N`=何もしない、を選ぶ。各変更操作はプレビュー後にもう一度`[y/N]`で確認する。
+TTYでは引数なしで起動し、`h`=help / `y`=install / `s`=update /
+`u`=uninstall / `N`=何もしない、を選ぶ。helpは操作ガイドを表示してメニューへ戻る。
+各変更操作はプレビュー後にもう一度`[y/N]`で確認する。
 
 `install` / `update` / `uninstall` / `version` は非対話でも直接呼べる:
 

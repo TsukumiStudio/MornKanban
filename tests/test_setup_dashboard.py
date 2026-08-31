@@ -464,6 +464,13 @@ class InteractiveWizardPtyTests(unittest.TestCase):
     def test_plain_n_does_nothing(self):
         output = self._run_wizard(["N"])
         self.assertNotIn("これから行う変更", output)
+        self.assertNotIn("どこで・何をすると", output)
+        self.assertFalse((self.home / ".local" / "bin" / "kanban").exists())
+
+    def test_help_is_on_demand_and_returns_to_menu(self):
+        output = self._run_wizard(["h", "N"])
+        self.assertIn("どこで・何をすると・何が起こるか", output)
+        self.assertEqual(output.count("h=ヘルプ"), 2)
         self.assertFalse((self.home / ".local" / "bin" / "kanban").exists())
 
 
@@ -488,6 +495,7 @@ class NonInteractiveCompatTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("MornKanban", result.stdout)
+        self.assertNotIn("どこで・何をすると", result.stdout)
         # no changes made
         self.assertFalse((Path(self.env["HOME"]) / ".local" / "bin" / "kanban").exists())
 

@@ -11,7 +11,7 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 ## Setup Wizard
 
 - `./kanban-setup.sh` (引数なし・TTY) は、現在の `VERSION` と最新版、CLIリンク、Claude Code/Codexスキル、秘書ガード、monitor LaunchAgent、project registry、現在のproject状態を、枠・色・記号付きのダッシュボードで表示する。
-- 続けて `y`=install、`s`=update、`u`=uninstall、`N`=何もしない、を選べる。変更前に対象を表示して再確認し、完了後は結果と次のコマンドを表示する。
+- 起動時は現在の導入状況だけを表示する。操作説明は `h`=help で必要な時だけ開き、表示後はメニューへ戻る。`y`=install、`s`=update、`u`=uninstall、`N`=何もしない、を選べる。変更前に対象を表示して再確認し、完了後は結果と次のコマンドを表示する。
 - `./kanban-setup.sh {install|update|uninstall|version}` はダッシュボードと確認を省いて非対話実行する。初回install前はこの入口を使い、導入後は `kanban {install|update|uninstall|version}` でも同じ操作ができる。`update` は確認なしでも変更プレビューと結果サマリーを表示する。
 - Project onboarding is **not** part of the wizard: open a Herdr pane in the project and invoke **`$kanban-dispatch 秘書として開始`**. The skill initializes the board, verifies visible Herdr execution, and makes the current conversation the secretary (see Secretary Bootstrap below).
 - 非TTY、`NO_COLOR`、`TERM=dumb` ではASCII・色なしへフォールバックする。狭い端末や日本語を含む長いpathも表示幅に合わせて折り返し、状態は色だけに依存しない。
