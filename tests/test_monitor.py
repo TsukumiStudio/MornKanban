@@ -213,9 +213,20 @@ class ServerTest(unittest.TestCase):
         _, self.kb = make_project(self.tmp, "proj")
         write_card(self.kb, "todo", "a.md", {"id": "1", "title": "サンプル <b>x</b>"})
 
+        # Without this, make_server()'s registry falls back to
+        # discovery.DEFAULT_ROOTS ("~/git") whenever no env/config override is
+        # set, so every request walks the real user's ~/git tree (seconds per
+        # test on a populated checkout) instead of just this tmp fixture.
+        os.environ["KANBAN_MONITOR_ROOTS"] = self.tmp
+        self.addCleanup(os.environ.pop, "KANBAN_MONITOR_ROOTS", None)
+
         self.httpd = server.make_server(host="127.0.0.1", port=0, extra_roots=[self.tmp])
         self.host, self.port = self.httpd.server_address[:2]
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        # serve_forever()'s default poll_interval is 0.5s, and shutdown()
+        # blocks for up to one interval waiting for the loop to notice --
+        # a short interval keeps each test's teardown near-instant instead of
+        # paying a fixed ~0.5s per test regardless of what it does.
+        self.thread = threading.Thread(target=self.httpd.serve_forever, args=(0.02,), daemon=True)
         self.thread.start()
         self.addCleanup(self._shutdown)
 

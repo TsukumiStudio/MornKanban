@@ -62,6 +62,8 @@ def card_summary(kanban_dir, state, filename):
         "threshold": fm.get("threshold", ""),
         "attempts": fm.get("attempts", ""),
         "max_attempts": fm.get("max_attempts", ""),
+        "last_timings": fm.get("last_timings", ""),
+        "created": fm.get("created", ""),
         "mtime": mtime,
     }
 

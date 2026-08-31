@@ -212,6 +212,8 @@ A card that passed review can still conflict with `main` at merge time if anothe
 
 If a worker or resolver discovers mid-run that it genuinely needs another card's result first (its stdout's first line starts with `BLOCKED: <reason>`), the dispatcher — never the dialogue secretary — handles it: the attempt doesn't count against `attempts`, its worktree/branch are discarded, the reason is recorded in History, and the card moves to `blocked`. A restarted dispatcher (and a normal `kanban run` startup) reclaims every `blocked` card back to `todo` for a fresh attempt from a clean worktree.
 
+Every worker/review/resolver/merge phase's wall-clock duration is appended to History as a `phase durations: worker=Ns review=Ns` (or `resolver=Ns`, `merge=Ns`) line and mirrored into the card's `last_timings` frontmatter key, so a slow card can be diagnosed as test time vs. agent/review wait without re-running it — see the Monitor section below.
+
 Outside a git repository the dispatcher falls back to sequential in-place execution (`-j` > 1 is refused; `resolving` never applies since there is nothing to merge). Worker/resolver output tail, every review score, and rework instructions are appended to the card's History section. A restarted dispatcher reclaims cards stranded in `doing/`, `review/`, `resolving/`, or `blocked/` — folding back any leftover worktree/branch first so the card can restart cleanly, and the dispatcher's single-instance lock (`.kanban/.lock`) guarantees no card is ever picked up twice.
 
 ## Configuration (environment variables)
@@ -235,7 +237,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 
 ## Monitor (read-only, multi-project)
 
-`kanban monitor` is a **read-only** localhost web viewer that shows every `.kanban` board on this machine — Kanban columns, card frontmatter/body/History, dispatcher running/stopped state, and recent activity — across multiple projects at once. It never adds cards, changes card state, or touches any process; every write HTTP method (`POST`/`PUT`/`PATCH`/`DELETE`) is rejected with `405`, and there is no UI control that mutates anything.
+`kanban monitor` is a **read-only** localhost web viewer that shows every `.kanban` board on this machine — Kanban columns, card frontmatter/body/History, dispatcher running/stopped state, and recent activity — across multiple projects at once. It never adds cards, changes card state, or touches any process; every write HTTP method (`POST`/`PUT`/`PATCH`/`DELETE`) is rejected with `405`, and there is no UI control that mutates anything. The card detail modal renders every frontmatter key verbatim, including `last_timings` (the most recent phase-duration line) and `created` (so `mtime - created` gives a card's total elapsed time) — no dedicated UI code is needed to surface new frontmatter fields.
 
 - Start in the foreground: `kanban monitor` (equivalent to `kanban monitor run`). Open `http://127.0.0.1:8787/` (default port `8787`). Stop with Ctrl+C.
 - Flags: `--host` (default `127.0.0.1`; only change this if you intentionally want to expose the viewer beyond localhost — a warning is printed), `--port` (default `8787`), `--root <path>` (repeatable; adds a search root for this run only).
@@ -309,6 +311,10 @@ kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-t threshold] [--
 - The card's frontmatter records `source_alias` (set only when the current directory — or `--from PATH` — is itself inside a registered project), `source_path` (always, the realpath of where the send was issued from), and `dispatched_via: send`, so a worker or reviewer can see where a card came from without leaking any secret/env-var values.
 - Card IDs are allocated with a random suffix and written via a temp-file-then-hardlink swap inside the destination's `todo/`, so concurrent `kanban send` calls from multiple sessions into the same project never collide on an id or leave a partially-written card visible to the dispatcher.
 - `kanban send` never starts or touches a dispatcher. If the destination's `.kanban/.lock` shows no live process, it prints (to stderr, after the created card's path on stdout) that the card is filed but nothing will run it until `kanban run` or the visible Herdr dispatcher is started there — it does not silently fall back to a headless worker.
+
+## Testing MornKanban Itself
+
+This repo's own suite has two tiers — see `gui/VERIFY.md` "テストの段階 (fast / full)" for the exact commands and what each excludes. **fast** (`KANBAN_TEST_TIER=fast`) skips the 6 tests that drive a real `kanban.sh run --once` through actual git worktrees/merges (~2s each) and is for a worker's normal iteration/rework loop. **full** (the default, no env var) runs everything and is the required gate immediately before any commit that merges into `main` — fast passing is not evidence against a git-worktree/merge/resolver regression. (MornKanban's own dispatcher currently always runs a reviewer; there is no `review_enabled: false` mode to skip it.)
 
 ## Constraints
 
