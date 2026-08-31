@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MornKanban local web GUI backend.
+"""MornKanban environment setup GUI backend.
 
 Standard library only. Serves gui/static/ at / and a JSON API under /api/.
 Binds to 127.0.0.1 only; port comes from MORNKANBAN_GUI_PORT (default 8765).
@@ -8,7 +8,6 @@ import json
 import mimetypes
 import os
 import posixpath
-import random
 import shutil
 import subprocess
 import sys
@@ -19,10 +18,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 STATIC = os.path.join(HERE, "static")
 KANBAN_SH = os.path.join(REPO, "kanban.sh")
-WORKER_SH = os.path.join(REPO, "herdr-agent-worker.sh")
 CONFIG = os.path.expanduser("~/.config/mornkanban/gui.json")
-STATES = ("todo", "doing", "review", "done", "failed")
+LOCAL_BIN = os.path.expanduser("~/.local/bin")
+KANBAN_LINK = os.path.join(LOCAL_BIN, "kanban")
+SKILL_DIR = os.path.expanduser("~/.claude/skills/kanban-dispatch")
+SKILL_PATH = os.path.join(SKILL_DIR, "SKILL.md")
 TIMEOUT = 30
+
+SKILL_TEMPLATE = """---
+name: kanban-dispatch
+description: "File-based kanban dispatch: card every implementation request and run the background dispatcher. Use when assigned implementation work in a project with .kanban/, or when asked to set up or operate kanban dispatch."
+user_invocable: true
+---
+# kanban-dispatch
+The kanban CLI and the full workflow contract live in {repo}.
+**Read {repo}/README.md and follow it** (Secretary Bootstrap, Dialogue-Agent Contract, Model Policy, Herdr Integration).
+"""
 
 
 class ApiError(Exception):
@@ -92,78 +103,19 @@ def project_entry(path):
     }
 
 
-def read_frontmatter(path):
-    """Read id/title/attempts from the leading --- ... --- block."""
-    fm = {}
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            first = fh.readline().rstrip("\n")
-            if first.strip() != "---":
-                return fm
-            for line in fh:
-                if line.strip() == "---":
-                    break
-                for key in ("id", "title", "attempts"):
-                    prefix = key + ": "
-                    if line.startswith(prefix):
-                        fm[key] = line[len(prefix):].strip()
-    except OSError:
-        pass
-    return fm
+def cli_installed():
+    return bool(shutil.which("kanban")) or os.path.exists(KANBAN_LINK)
 
 
-def board_for(project):
-    states = {}
-    for state in STATES:
-        cards = []
-        directory = os.path.join(project, ".kanban", state)
-        try:
-            names = os.listdir(directory)
-        except OSError:
-            names = []
-        files = []
-        for name in names:
-            if not name.endswith(".md"):
-                continue
-            full = os.path.join(directory, name)
-            if not os.path.isfile(full):
-                continue
-            try:
-                files.append((os.path.getmtime(full), full))
-            except OSError:
-                continue
-        for _, full in sorted(files, key=lambda item: item[0]):
-            fm = read_frontmatter(full)
-            cards.append({
-                "id": fm.get("id", ""),
-                "title": fm.get("title", os.path.basename(full)),
-                "attempts": fm.get("attempts", "0"),
-                "file": full,
-            })
-        states[state] = cards
-    return states
+def skill_installed():
+    return os.path.isfile(SKILL_PATH)
 
 
-def pane_id_from(stdout):
-    try:
-        data = json.loads(stdout)
-    except ValueError:
-        raise ApiError("herdr returned non-JSON output: %s" % stdout.strip()[:200], 500)
-    try:
-        pane_id = data["result"]["pane"]["pane_id"]
-    except (KeyError, TypeError):
-        raise ApiError("herdr response missing result.pane.pane_id", 500)
-    if not pane_id:
-        raise ApiError("herdr returned an empty pane_id", 500)
-    return pane_id
-
-
-def split_pane(direction, cwd):
-    out = run([
-        "herdr", "pane", "split", "--current",
-        "--direction", direction, "--cwd", cwd, "--no-focus",
-    ])
-    return pane_id_from(out)
+def path_contains(directory):
+    path_env = os.environ.get("PATH", "")
+    parts = path_env.split(os.pathsep)
+    directory = directory.rstrip(os.sep)
+    return any(os.path.normpath(p) == os.path.normpath(directory) for p in parts if p)
 
 
 # --- API handlers ----------------------------------------------------------
@@ -175,11 +127,36 @@ def api_status():
             "herdr": bool(which("herdr")),
             "claude": bool(which("claude")),
             "codex": bool(which("codex")),
-            "kanban": bool(which("kanban")) or os.path.exists(KANBAN_SH),
+            "python3": True,
         },
-        "herdr_env": herdr_env(),
+        "install": {
+            "cli": cli_installed(),
+            "skill": skill_installed(),
+        },
         "repo": REPO,
+        "herdr_env": herdr_env(),
     }
+
+
+def api_install_cli():
+    os.makedirs(LOCAL_BIN, exist_ok=True)
+    if os.path.lexists(KANBAN_LINK):
+        if not os.path.islink(KANBAN_LINK):
+            raise ApiError("%s exists and is not a symlink" % KANBAN_LINK)
+        os.remove(KANBAN_LINK)
+    os.symlink(KANBAN_SH, KANBAN_LINK)
+    return {"ok": True, "in_path": path_contains(LOCAL_BIN)}
+
+
+def api_install_skill(body):
+    force = bool(body.get("force"))
+    if os.path.isfile(SKILL_PATH) and not force:
+        raise ApiError("already installed (force で上書き)", 409)
+    os.makedirs(SKILL_DIR, exist_ok=True)
+    content = SKILL_TEMPLATE.format(repo=REPO)
+    with open(SKILL_PATH, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return {"ok": True, "path": SKILL_PATH}
 
 
 def api_projects_get():
@@ -204,113 +181,6 @@ def api_init(body):
         raise ApiError("not a directory: %s" % path)
     run(["bash", KANBAN_SH, "init", path])
     return {"ok": True}
-
-
-def policy_path(project):
-    return os.path.join(project, ".kanban", "KANBAN.md")
-
-
-def api_policy_get(query):
-    project = norm_path(query.get("path", [None])[0])
-    target = policy_path(project)
-    if not os.path.isfile(target):
-        raise ApiError("policy not found: %s" % target, 404)
-    with open(target, encoding="utf-8", errors="replace") as fh:
-        return {"content": fh.read()}
-
-
-def api_policy_put(body):
-    project = norm_path(body.get("path"))
-    content = body.get("content")
-    if not isinstance(content, str):
-        raise ApiError("content is required")
-    target = policy_path(project)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    return {"ok": True}
-
-
-def api_board(query):
-    project = norm_path(query.get("path", [None])[0])
-    return {"states": board_for(project)}
-
-
-def api_card_get(query):
-    raw = query.get("file", [None])[0]
-    if not raw:
-        raise ApiError("file is required")
-    target = os.path.realpath(raw)
-    allowed = False
-    for project in load_config()["projects"]:
-        root = os.path.realpath(os.path.join(project, ".kanban")) + os.sep
-        if target.startswith(root):
-            allowed = True
-            break
-    if not allowed:
-        raise ApiError("file is outside registered projects", 403)
-    if not os.path.isfile(target):
-        raise ApiError("card not found: %s" % target, 404)
-    with open(target, encoding="utf-8", errors="replace") as fh:
-        return {"content": fh.read()}
-
-
-def api_card_post(body):
-    project = norm_path(body.get("path"))
-    title = body.get("title") or ""
-    if not isinstance(title, str) or not title.strip():
-        raise ApiError("title is required")
-    if not os.path.isdir(project):
-        raise ApiError("not a directory: %s" % project)
-    args = ["bash", KANBAN_SH, "add", title]
-    backend = body.get("backend")
-    model = body.get("model")
-    threshold = body.get("threshold")
-    if backend:
-        args += ["-b", str(backend)]
-    if model:
-        args += ["-m", str(model)]
-    if threshold not in (None, ""):
-        args += ["-t", str(threshold)]
-    out = run(args, cwd=project, stdin=body.get("body") or "")
-    return {"ok": True, "file": out.strip()}
-
-
-def api_secretary(body):
-    if not herdr_env():
-        raise ApiError("not running inside a herdr session (HERDR_ENV != 1)")
-    project = norm_path(body.get("path"))
-    pane = split_pane("right", project)
-    name = "kanban-sec-%04x" % random.randrange(0x10000)
-    try:
-        run([
-            "herdr", "agent", "start", name,
-            "--kind", "claude", "--pane", pane, "--timeout", "60000",
-        ])
-    except ApiError:
-        try:
-            run(["herdr", "agent", "wait", name, "--timeout", "30000"])
-        except ApiError:
-            pass
-    run(["herdr", "agent", "prompt", name, "kanban の秘書として待機して"])
-    return {"ok": True, "pane": pane, "name": name}
-
-
-def api_dispatch(body):
-    if not herdr_env():
-        raise ApiError("not running inside a herdr session (HERDR_ENV != 1)")
-    project = norm_path(body.get("path"))
-    jobs = body.get("jobs")
-    if jobs in (None, ""):
-        jobs = 2
-    pane = split_pane("down", project)
-    cmd = (
-        "KANBAN_WORKER_CMD=%s "
-        "KANBAN_REVIEW_CMD='env KANBAN_HERDR_ROLE=reviewer %s' "
-        "bash %s run -j %s; exit" % (WORKER_SH, WORKER_SH, KANBAN_SH, jobs)
-    )
-    run(["herdr", "pane", "run", pane, cmd])
-    return {"ok": True, "pane": pane}
 
 
 # --- HTTP ------------------------------------------------------------------
@@ -373,28 +243,16 @@ class Handler(BaseHTTPRequestHandler):
                 return api_status()
             if path == "/api/projects":
                 return api_projects_get()
-            if path == "/api/policy":
-                return api_policy_get(query)
-            if path == "/api/board":
-                return api_board(query)
-            if path == "/api/card":
-                return api_card_get(query)
         elif method == "POST":
             body = self.read_body()
+            if path == "/api/install/cli":
+                return api_install_cli()
+            if path == "/api/install/skill":
+                return api_install_skill(body)
             if path == "/api/projects":
                 return api_projects_post(body)
             if path == "/api/init":
                 return api_init(body)
-            if path == "/api/card":
-                return api_card_post(body)
-            if path == "/api/secretary":
-                return api_secretary(body)
-            if path == "/api/dispatch":
-                return api_dispatch(body)
-        elif method == "PUT":
-            body = self.read_body()
-            if path == "/api/policy":
-                return api_policy_put(body)
         raise ApiError("no such endpoint: %s %s" % (method, path), 404)
 
     def serve_static(self, path):
@@ -425,9 +283,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.dispatch("POST")
-
-    def do_PUT(self):
-        self.dispatch("PUT")
 
 
 def main():
