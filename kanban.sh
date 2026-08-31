@@ -712,7 +712,10 @@ record_attempt() { # record_attempt <card> <threshold> -> increments attempts
 
 notify_result() { # notify_result <done|failed> <title> ; optional hook, never fatal
   if [[ -n ${KANBAN_NOTIFY_CMD:-} ]]; then
-    $KANBAN_NOTIFY_CMD "$1" "$2" >/dev/null 2>&1 || true
+    local out
+    if ! out=$($KANBAN_NOTIFY_CMD "$1" "$2" 2>&1); then
+      echo "kanban: notification hook failed for state=$1 title=$2: ${out:-no detail}" >&2
+    fi
   fi
 }
 

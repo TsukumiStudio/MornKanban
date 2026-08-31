@@ -28,4 +28,7 @@ if [[ $state == failed ]]; then
 else
   msg="カード「${title}」が done (マージ済み) になった。盤面が全て決着していれば結果を簡潔に報告して。"
 fi
-herdr agent prompt "$sec" "$msg" >/dev/null 2>&1 || true
+if ! err=$(herdr agent prompt "$sec" "$msg" 2>&1 >/dev/null); then
+  echo "herdr-notify-secretary: failed to notify '$sec': ${err:-herdr agent prompt failed}" >&2
+  exit 1
+fi

@@ -85,6 +85,12 @@ class SecretaryScriptTests(unittest.TestCase):
                   "pane split")
                     printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}'
                     ;;
+                  "agent get")
+                    printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p1","name":"secretary"}}}'
+                    ;;
+                  "agent list")
+                    printf '%s\n' '{"result":{"agents":[{"pane_id":"w1:p1","name":"secretary"}]}}'
+                    ;;
                   *) printf '%s\n' '{"result":{}}' ;;
                 esac
                 """
@@ -276,6 +282,38 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("herdr-notify-secretary.sh", log)
         self.assertIn("KANBAN_HERDR_SECRETARY=secretary-project", log)
         self.assertIn("kanban.sh run; exit", log)
+        self.assertIn("agent get w1:p1", log)
+        self.assertIn("agent rename w1:p1 secretary-project", log)
+
+    def test_dispatch_refuses_to_steal_secretary_name_owned_by_another_pane(self):
+        self.run_secretary("bootstrap", self.project)
+        conflict_bin = self.root / "dispatch-conflict-bin"
+        conflict_bin.mkdir()
+        herdr = conflict_bin / "herdr"
+        herdr.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                case "$1 $2" in
+                  "pane layout") printf '%s\n' '{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":160,"height":40}}]}}}' ;;
+                  "agent get") printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p1","name":"secretary"}}}' ;;
+                  "agent list") printf '%s\n' '{"result":{"agents":[{"pane_id":"w1:p9","name":"secretary-project"},{"pane_id":"w1:p1","name":"secretary"}]}}' ;;
+                  *) printf '%s\n' '{"result":{}}' ;;
+                esac
+                """
+            ),
+            encoding="utf-8",
+        )
+        herdr.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = str(conflict_bin) + os.pathsep + env["PATH"]
+
+        result = self.run_secretary("dispatch", self.project, env=env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already owned by pane w1:p9", result.stderr)
+        self.assertIn("refusing to steal", result.stderr)
 
     def test_dispatch_and_bootstrap_resolve_the_same_name_across_separate_invocations(self):
         # bootstrap and dispatch never share process/state; the name must
@@ -443,6 +481,10 @@ class NotifySecretaryRoutingTests(unittest.TestCase):
                 #!/usr/bin/env bash
                 set -eu
                 echo "$*" >>"$HERDR_TEST_LOG"
+                if [[ ${HERDR_TEST_FAIL:-0} == 1 ]]; then
+                  echo "agent not found" >&2
+                  exit 9
+                fi
                 printf '%s\n' '{"result":{}}'
                 """
             ),
@@ -486,6 +528,17 @@ class NotifySecretaryRoutingTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("agent prompt secretary-project-a", self.log.read_text(encoding="utf-8"))
+
+    def test_notification_failure_is_not_silently_reported_as_success(self):
+        env = self.base_env.copy()
+        env["KANBAN_HERDR_SECRETARY"] = "secretary-project-a"
+        env["HERDR_TEST_FAIL"] = "1"
+
+        result = self.run_notify("done", "card title", env=env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("failed to notify", result.stderr)
+        self.assertIn("agent not found", result.stderr)
 
     def test_falls_back_to_resolved_name_from_cwd_when_env_unset(self):
         project = self._project("standalone-app")
