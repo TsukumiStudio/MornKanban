@@ -147,6 +147,7 @@ max_attempts: 3
 jobs: 2
 claude_perms: acceptEdits
 codex_sandbox: workspace-write
+# secretary_agent: secretary-my-project
 ---
 
 # このプロジェクトのカンバン運用ポリシー
@@ -164,6 +165,14 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 
 - (例) ファイル境界で分割し、同一ファイルを触るカードは同時に投入しない
 - (例) 完了条件と検証コマンドを必ずカード本文に書く
+
+## 秘書エージェント名
+
+- 既定の Herdr 秘書名は `secretary-<project-slug>` (project-slug は登録済みエイリアスまたは
+  リポジトリ basename から生成、プロジェクトごとに固有・再現可能)。優先順位:
+  環境変数 `KANBAN_HERDR_SECRETARY` > 上記 frontmatter の `secretary_agent:` > 生成された既定値
+- 同じ basename の別プロジェクトなど名前が衝突する場合は `secretary_agent: <name>` を
+  ここに書いて上書きする (詳細は README の Secretary Bootstrap / Herdr Integration)
 
 ## ディスパッチャ運用
 

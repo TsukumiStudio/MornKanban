@@ -37,12 +37,39 @@ A secretary agent is started with **`$kanban-dispatch 秘書として開始`** (
 
 Visible Herdr workers are the secretary default. The bootstrap must test `HERDR_ENV`, `HERDR_PANE_ID`, and the current pane through the Herdr CLI. It must not infer availability from the prompt, and it must not silently fall back to headless workers. Headless secretary mode requires an explicit user request.
 
+### Secretary agent naming (per project, not a fixed shared name)
+
+Every project used to default its secretary's Herdr agent name to the same fixed `secretary`, so two projects bootstrapped in the same Herdr environment fought over one agent name — in practice this forced hand-picking a second name like `secretary-kimekyawa` and keeping every later `dispatch` in sync by hand. `kanban-secretary.sh` now resolves a stable, project-specific name instead, with this precedence:
+
+1. **`KANBAN_HERDR_SECRETARY` environment variable** — highest priority; also how a user who already relies on the old fixed `secretary` name keeps it (`KANBAN_HERDR_SECRETARY=secretary` still works unchanged).
+2. **`secretary_agent:` in this project's `.kanban/KANBAN.md` frontmatter** — a persistent, committed override, e.g. `secretary_agent: secretary-kimekyawa`.
+3. **Generated default** — `secretary-<project-slug>`. The slug prefers this exact project's alias in the PC-wide registry (`kanban projects add <alias> <path>`, see **Cross-Project Send**) when one is registered; otherwise it slugifies the project root's directory name. The project's root is identified by its **realpath**, so bootstrapping/dispatching from a subdirectory — or even from inside one of the project's own `.kanban/wt/<id>` card worktrees — always resolves to the same name as bootstrapping from the root itself.
+
+An explicit override (environment or `KANBAN.md`) that isn't a valid Herdr agent name (`^[a-z][a-z0-9_-]{0,63}$`) is rejected outright with a clear error — it is never silently replaced by a different name. A basename that is empty, symbol-only, or entirely non-ASCII (e.g. fully Unicode), or long enough to need truncation, gets a short stable hash suffix appended so unrelated projects in those categories don't collapse onto the same placeholder name; a plain ASCII basename that happens to match another *different* project's basename is **not** auto-disambiguated this way (two projects legitimately named `app` both default to `secretary-app`) — see the next paragraph for how that case is actually handled.
+
+If `herdr agent rename` fails during bootstrap (most likely because another project's secretary is already running under that exact name), bootstrap fails loudly: it reports the project's identity, the candidate name, and how to pick a different one (`KANBAN_HERDR_SECRETARY=<name>` for a one-off, or `secretary_agent: <name>` in `KANBAN.md` for a persistent fix). It never takes over or renames another project's running agent. A successful bootstrap's one-line reply always includes `secretary=<resolved-name>` so the resolved name is visible immediately.
+
+`kanban-secretary.sh dispatch` resolves the same name the same way and passes it to the dispatcher pane as `KANBAN_HERDR_SECRETARY`, which `herdr-notify-secretary.sh` then uses verbatim — so bootstrap, dispatch, and every done/failed notification for a project always address the same secretary, and a notification never reaches a different project's agent. Running two projects' secretaries and dispatchers side by side looks like:
+
+```
+# Project A (~/git/app-a)
+$kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/app-a secretary=secretary-app-a ..."
+... later, after cards are cut ...
+~/git/MornKanban/kanban-secretary.sh dispatch   # notifications go to secretary-app-a only
+
+# Project B (~/git/app-b), a separate Herdr pane
+$kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/app-b secretary=secretary-app-b ..."
+~/git/MornKanban/kanban-secretary.sh dispatch   # notifications go to secretary-app-b only
+```
+
 ## Per-Project Policy: .kanban/KANBAN.md
 
 `KANBAN.md` is the project's kanban contract, in two layers:
 
-- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `threshold`, `max_attempts`, `jobs`, `claude_perms`, `codex_sandbox`. Precedence: environment variable > `KANBAN.md` > built-in default.
+- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `threshold`, `max_attempts`, `jobs`, `claude_perms`, `codex_sandbox`, `secretary_agent`. Precedence: environment variable > `KANBAN.md` > built-in default.
 - **Body** (secretary policy): how to split cards, which backend/model to route each kind of task to, whether to auto-start the dispatcher, escalation rules. The dialogue agent must read and follow it before cutting cards.
+
+`secretary_agent` overrides the per-project Herdr secretary name (see **Secretary Bootstrap** below); it is read only by `kanban-secretary.sh`, not by `kanban run` itself.
 
 ## Dialogue-Agent Contract
 
@@ -83,7 +110,7 @@ Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and d
 
 The helper verifies that it is called from the current Herdr pane, keeps focus on the secretary, uses the project's `jobs` setting, and closes the dispatcher's pane when the run finishes. `dispatch --once` preserves the browser-role exclusivity contract.
 
-The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, default `secretary`) to inspect and report, so `failed/` cards reach the user through the secretary instead of dying silently.
+The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, which `dispatch` always sets to that project's resolved secretary name — see **Secretary agent naming** above; a standalone invocation with no `KANBAN_HERDR_SECRETARY` resolves the same name itself from its own project root) to inspect and report, so `failed/` cards reach the user through the correct project's secretary instead of dying silently or reaching a different project's agent.
 
 The wrapper splits a pane below the dispatcher and starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, `auto` resolved via `KANBAN_BACKEND_ORDER` exactly like the headless path. A Claude worker gets `--permission-mode acceptEdits` and a model (from `KANBAN_CARD_MODEL`, default `sonnet`); a Claude reviewer gets no permission-mode override, keeping it read-only-ish. A Codex worker gets `-s <codex_sandbox> -a never`; a Codex reviewer gets `-s read-only -a never`; either only adds `-m <model>` when one is set — Codex never inherits the Claude default of `sonnet`. It accepts the folder-trust dialog for the card's own worktree, prompts it with the card body, and waits. Because both Claude Code and Codex render on the terminal's alternate screen, the final answer cannot be read back from scrollback — the wrapper instructs the agent to also write its answer (the review JSON included) to `.kanban-answer.md` in the worktree, reads that, and deletes it before the card is committed. Panes are closed when the attempt ends.
 
@@ -114,6 +141,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |
 | `KANBAN_DEBUG` | Write per-job xtrace logs to `.kanban/wt/job.*.trace` |
+| `KANBAN_HERDR_SECRETARY` | Overrides the resolved per-project Herdr secretary agent name (see **Secretary agent naming**); no `KANBAN.md` counterpart of the same name — use the `secretary_agent:` frontmatter key for a persistent override instead |
 
 ## Monitor (read-only, multi-project)
 

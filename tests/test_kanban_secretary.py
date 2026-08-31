@@ -88,8 +88,12 @@ class SecretaryScriptTests(unittest.TestCase):
                 "HERDR_PANE_ID": "w1:p1",
                 "HERDR_TEST_LOG": str(self.log),
                 "KANBAN_BIN": str(REPO / "kanban.sh"),
+                # Isolate the PC-wide project registry so these tests never
+                # read/write the real machine's ~/.config/mornkanban.
+                "KANBAN_CONFIG_DIR": str(self.root / "registry-config"),
             }
         )
+        self.env.pop("KANBAN_HERDR_SECRETARY", None)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -103,13 +107,141 @@ class SecretaryScriptTests(unittest.TestCase):
             check=False,
         )
 
-    def test_bootstrap_initializes_board_and_registers_secretary(self):
+    def test_bootstrap_initializes_board_and_registers_project_specific_secretary(self):
         result = self.run_secretary("bootstrap", self.project)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.project / ".kanban" / "KANBAN.md").is_file())
         self.assertIn("execution=visible-herdr", result.stdout)
+        # No project-wide fixed "secretary" default any more: the basename
+        # of self.project is "project", so the generated default is
+        # "secretary-project", not the bare "secretary" every project used
+        # to collide on.
+        self.assertIn("secretary=secretary-project", result.stdout)
+        self.assertIn("agent rename w1:p1 secretary-project", self.log.read_text(encoding="utf-8"))
+
+    def test_bootstrap_resolved_name_is_stable_from_a_subdirectory(self):
+        sub = self.project / "sub" / "dir"
+        sub.mkdir(parents=True)
+
+        root_result = self.run_secretary("bootstrap", self.project)
+        self.assertEqual(root_result.returncode, 0, root_result.stderr)
+        self.log.write_text("", encoding="utf-8")
+        sub_result = self.run_secretary("bootstrap", sub)
+
+        self.assertEqual(sub_result.returncode, 0, sub_result.stderr)
+        self.assertIn("secretary=secretary-project", sub_result.stdout)
+
+    def test_bootstrap_resolved_name_is_stable_from_inside_a_card_worktree(self):
+        # .kanban/wt/<id> checkouts carry their own tracked .kanban/ subtree
+        # (todo/doing/... are committed); bootstrapping from inside one must
+        # still resolve the outer project's identity, not the worktree's own.
+        wt = self.project / ".kanban" / "wt" / "20260101-000000-1"
+        wt.mkdir(parents=True)
+        (wt / ".kanban").mkdir()
+
+        root_result = self.run_secretary("bootstrap", self.project)
+        self.assertEqual(root_result.returncode, 0, root_result.stderr)
+        self.log.write_text("", encoding="utf-8")
+        wt_result = self.run_secretary("bootstrap", wt)
+
+        self.assertEqual(wt_result.returncode, 0, wt_result.stderr)
+        self.assertIn("secretary=secretary-project", wt_result.stdout)
+
+    def test_bootstrap_honors_kanban_md_secretary_agent_override(self):
+        result = self.run_secretary("bootstrap", self.project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kanban_md = self.project / ".kanban" / "KANBAN.md"
+        content = kanban_md.read_text(encoding="utf-8")
+        kanban_md.write_text(
+            content.replace("codex_sandbox: workspace-write", "codex_sandbox: workspace-write\nsecretary_agent: secretary-override"),
+            encoding="utf-8",
+        )
+        self.log.write_text("", encoding="utf-8")
+
+        result = self.run_secretary("bootstrap", self.project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("secretary=secretary-override", result.stdout)
+        self.assertIn("agent rename w1:p1 secretary-override", self.log.read_text(encoding="utf-8"))
+
+    def test_bootstrap_environment_override_beats_kanban_md(self):
+        result = self.run_secretary("bootstrap", self.project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kanban_md = self.project / ".kanban" / "KANBAN.md"
+        content = kanban_md.read_text(encoding="utf-8")
+        kanban_md.write_text(
+            content.replace("codex_sandbox: workspace-write", "codex_sandbox: workspace-write\nsecretary_agent: secretary-from-md"),
+            encoding="utf-8",
+        )
+        env = self.env.copy()
+        env["KANBAN_HERDR_SECRETARY"] = "secretary-from-env"
+
+        result = self.run_secretary("bootstrap", self.project, env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("secretary=secretary-from-env", result.stdout)
+
+    def test_bootstrap_accepts_legacy_explicit_secretary_env_value(self):
+        # Users who already set KANBAN_HERDR_SECRETARY=secretary explicitly
+        # (the old project-wide fixed default) keep working unchanged - only
+        # the *unset* case gets the new project-specific default.
+        env = self.env.copy()
+        env["KANBAN_HERDR_SECRETARY"] = "secretary"
+
+        result = self.run_secretary("bootstrap", self.project, env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("secretary=secretary", result.stdout)
         self.assertIn("agent rename w1:p1 secretary", self.log.read_text(encoding="utf-8"))
+
+    def test_bootstrap_rejects_invalid_override_with_clear_guidance(self):
+        env = self.env.copy()
+        env["KANBAN_HERDR_SECRETARY"] = "Not Valid!"
+
+        result = self.run_secretary("bootstrap", self.project, env=env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid", result.stderr)
+        self.assertIn("Not Valid!", result.stderr)
+        # Must not silently pick a different name and proceed.
+        self.assertNotIn("secretary ready", result.stdout)
+
+    def test_bootstrap_rename_failure_reports_identity_and_override_guidance_without_stdout_success(self):
+        conflict_bin = self.root / "conflict-bin"
+        conflict_bin.mkdir()
+        herdr = conflict_bin / "herdr"
+        herdr.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                echo "$*" >>"$HERDR_TEST_LOG"
+                case "$1 $2" in
+                  "pane layout")
+                    printf '%s\n' '{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":160,"height":40}}]}}}'
+                    ;;
+                  "agent rename")
+                    exit 1
+                    ;;
+                  *) printf '%s\n' '{"result":{}}' ;;
+                esac
+                """
+            ),
+            encoding="utf-8",
+        )
+        herdr.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = str(conflict_bin) + os.pathsep + env["PATH"]
+
+        result = self.run_secretary("bootstrap", self.project, env=env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("secretary-project", result.stderr)
+        self.assertIn("secretary_agent", result.stderr)
+        self.assertIn("KANBAN_HERDR_SECRETARY", result.stderr)
+        self.assertIn("not renamed", result.stderr.lower())
+        self.assertNotIn("secretary ready", result.stdout)
 
     def test_dispatch_binds_visible_worker_reviewer_and_notification(self):
         bootstrap = self.run_secretary("bootstrap", self.project)
@@ -120,6 +252,7 @@ class SecretaryScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("pane=w1:p2", result.stdout)
+        self.assertIn("secretary=secretary-project", result.stdout)
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("pane split --current --direction right", log)
         self.assertIn("KANBAN_WORKER_CMD=", log)
@@ -127,7 +260,21 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("KANBAN_REVIEW_CMD=", log)
         self.assertIn("KANBAN_NOTIFY_CMD=", log)
         self.assertIn("herdr-notify-secretary.sh", log)
+        self.assertIn("KANBAN_HERDR_SECRETARY=secretary-project", log)
         self.assertIn("kanban.sh run; exit", log)
+
+    def test_dispatch_and_bootstrap_resolve_the_same_name_across_separate_invocations(self):
+        # bootstrap and dispatch never share process/state; the name must
+        # come out identical purely from deterministic resolution.
+        bootstrap = self.run_secretary("bootstrap", self.project)
+        self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
+        self.log.write_text("", encoding="utf-8")
+
+        dispatch = self.run_secretary("dispatch", self.project)
+
+        self.assertEqual(dispatch.returncode, 0, dispatch.stderr)
+        self.assertIn("secretary=secretary-project", bootstrap.stdout)
+        self.assertIn("secretary=secretary-project", dispatch.stdout)
 
     def test_bootstrap_refuses_hidden_headless_fallback(self):
         env = self.env.copy()
@@ -138,6 +285,224 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("refusing a hidden headless fallback", result.stderr)
         self.assertFalse((self.project / ".kanban").exists())
+
+
+class SecretaryNameResolutionTests(unittest.TestCase):
+    """Unit coverage for registry/secretary.py's pure name-resolution logic
+    (slugging, hashing, override precedence, validation) independent of the
+    Herdr-facing shell scripts."""
+
+    def setUp(self):
+        sys.path.insert(0, str(REPO))
+        self.secretary = importlib.import_module("registry.secretary")
+        importlib.reload(self.secretary)
+        self.store = importlib.import_module("registry.store")
+        importlib.reload(self.store)
+        self.temp = tempfile.TemporaryDirectory()
+        self.env_patch = mock.patch.dict(
+            os.environ, {"KANBAN_CONFIG_DIR": str(Path(self.temp.name) / "config")}
+        )
+        self.env_patch.start()
+
+    def tearDown(self):
+        self.env_patch.stop()
+        self.temp.cleanup()
+
+    def _project(self, name):
+        root = Path(self.temp.name) / name
+        (root / ".kanban").mkdir(parents=True)
+        return root
+
+    def test_default_name_is_project_specific_not_the_old_fixed_secretary(self):
+        root = self._project("my-app")
+        name, source = self.secretary.resolve(str(root))
+        self.assertEqual(name, "secretary-my-app")
+        self.assertEqual(source, "generated")
+
+    def test_registry_alias_is_preferred_over_basename(self):
+        root = self._project("checkout-dir-name")
+        self.store.add("kimekyawa", str(root))
+        name, source = self.secretary.resolve(str(root))
+        self.assertEqual(name, "secretary-kimekyawa")
+        self.assertEqual(source, "generated")
+
+    def test_same_basename_different_path_collides_by_documented_design(self):
+        # Both a/app and b/app get the identical default; disambiguation is
+        # documented to happen at Herdr registration time (see
+        # kanban-secretary.sh bootstrap), not here.
+        root_a = self._project("group-a/app")
+        root_b = self._project("group-b/app")
+        name_a, _ = self.secretary.resolve(str(root_a))
+        name_b, _ = self.secretary.resolve(str(root_b))
+        self.assertEqual(name_a, name_b)
+        self.assertEqual(name_a, "secretary-app")
+
+    def test_unicode_basename_gets_a_stable_hash_suffix(self):
+        root = self._project("カフェ")
+        name1, _ = self.secretary.resolve(str(root))
+        name2, _ = self.secretary.resolve(str(root))
+        self.assertEqual(name1, name2)
+        self.assertTrue(self.secretary._NAME_RE.match(name1))
+        self.assertNotEqual(name1, "secretary-project")  # not a bare placeholder collision
+
+    def test_symbol_only_basename_falls_back_to_hashed_placeholder(self):
+        root = self._project("___")
+        name, _ = self.secretary.resolve(str(root))
+        self.assertTrue(self.secretary._NAME_RE.match(name))
+        self.assertTrue(name.startswith("secretary-project-"))
+
+    def test_two_unicode_only_projects_get_distinct_hashed_names(self):
+        root1 = self._project("あ" * 3)
+        root2 = self._project("い" * 3)
+        name1, _ = self.secretary.resolve(str(root1))
+        name2, _ = self.secretary.resolve(str(root2))
+        self.assertNotEqual(name1, name2)
+
+    def test_long_basename_is_truncated_and_hashed(self):
+        root = self._project("a" * 100)
+        name, _ = self.secretary.resolve(str(root))
+        self.assertLessEqual(len(name), 48)
+        self.assertTrue(self.secretary._NAME_RE.match(name))
+
+    def test_env_override_wins_over_kanban_md_override(self):
+        root = self._project("app")
+        (root / ".kanban" / "KANBAN.md").write_text(
+            "---\nsecretary_agent: secretary-from-md\n---\n", encoding="utf-8"
+        )
+        name, source = self.secretary.resolve(str(root), env_override="secretary-from-env")
+        self.assertEqual(name, "secretary-from-env")
+        self.assertEqual(source, "environment")
+
+    def test_kanban_md_override_wins_over_generated_default(self):
+        root = self._project("app")
+        (root / ".kanban" / "KANBAN.md").write_text(
+            "---\nsecretary_agent: secretary-from-md\n---\n", encoding="utf-8"
+        )
+        name, source = self.secretary.resolve(str(root))
+        self.assertEqual(name, "secretary-from-md")
+        self.assertEqual(source, "kanban_md")
+
+    def test_legacy_explicit_secretary_env_value_is_accepted_as_override(self):
+        root = self._project("app")
+        name, source = self.secretary.resolve(str(root), env_override="secretary")
+        self.assertEqual(name, "secretary")
+        self.assertEqual(source, "environment")
+
+    def test_invalid_env_override_raises_instead_of_silently_substituting(self):
+        root = self._project("app")
+        with self.assertRaises(self.secretary.SecretaryNameError):
+            self.secretary.resolve(str(root), env_override="Not Valid!")
+
+    def test_invalid_kanban_md_override_raises_instead_of_silently_substituting(self):
+        root = self._project("app")
+        (root / ".kanban" / "KANBAN.md").write_text(
+            "---\nsecretary_agent: Not Valid!\n---\n", encoding="utf-8"
+        )
+        with self.assertRaises(self.secretary.SecretaryNameError):
+            self.secretary.resolve(str(root))
+
+    def test_resolve_rejects_a_root_without_dot_kanban(self):
+        bare = Path(self.temp.name) / "no-kanban-here"
+        bare.mkdir()
+        with self.assertRaises(self.secretary.SecretaryNameError):
+            self.secretary.resolve(str(bare))
+
+
+class NotifySecretaryRoutingTests(unittest.TestCase):
+    """herdr-notify-secretary.sh must prompt the correct project's secretary,
+    never a different project's (whether that project uses the fixed legacy
+    'secretary' name or a generated project-specific one), including when
+    two projects' dispatchers notify concurrently."""
+
+    NOTIFY = REPO / "herdr-notify-secretary.sh"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.log = self.root / "herdr.log"
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        herdr = fake_bin / "herdr"
+        herdr.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                echo "$*" >>"$HERDR_TEST_LOG"
+                printf '%s\n' '{"result":{}}'
+                """
+            ),
+            encoding="utf-8",
+        )
+        herdr.chmod(0o755)
+        self.base_env = os.environ.copy()
+        self.base_env.update(
+            {
+                "PATH": str(fake_bin) + os.pathsep + self.base_env.get("PATH", ""),
+                "HERDR_ENV": "1",
+                "HERDR_TEST_LOG": str(self.log),
+                "KANBAN_CONFIG_DIR": str(self.root / "registry-config"),
+            }
+        )
+        self.base_env.pop("KANBAN_HERDR_SECRETARY", None)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _project(self, name):
+        root = self.root / name
+        (root / ".kanban").mkdir(parents=True)
+        return root
+
+    def run_notify(self, state, title, cwd=None, env=None):
+        return subprocess.run(
+            [str(self.NOTIFY), state, title],
+            text=True,
+            capture_output=True,
+            cwd=str(cwd) if cwd else None,
+            env=env or self.base_env,
+            check=False,
+        )
+
+    def test_uses_env_secretary_name_verbatim(self):
+        env = self.base_env.copy()
+        env["KANBAN_HERDR_SECRETARY"] = "secretary-project-a"
+
+        result = self.run_notify("done", "card title", env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent prompt secretary-project-a", self.log.read_text(encoding="utf-8"))
+
+    def test_falls_back_to_resolved_name_from_cwd_when_env_unset(self):
+        project = self._project("standalone-app")
+
+        result = self.run_notify("done", "card title", cwd=project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "agent prompt secretary-standalone-app", self.log.read_text(encoding="utf-8")
+        )
+
+    def test_two_projects_notify_distinct_secretaries_without_cross_talk(self):
+        env_a = self.base_env.copy()
+        env_a["KANBAN_HERDR_SECRETARY"] = "secretary-project-a"
+        env_b = self.base_env.copy()
+        env_b["KANBAN_HERDR_SECRETARY"] = "secretary-project-b"
+
+        result_a = self.run_notify("done", "card A", env=env_a)
+        result_b = self.run_notify("failed", "card B", env=env_b)
+
+        self.assertEqual(result_a.returncode, 0, result_a.stderr)
+        self.assertEqual(result_b.returncode, 0, result_b.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("agent prompt secretary-project-a", log)
+        self.assertIn("agent prompt secretary-project-b", log)
+        # Neither call must have addressed the other project's name.
+        for line in log.splitlines():
+            if "card A" in line or "A」" in line:
+                self.assertNotIn("secretary-project-b", line)
+            if "card B" in line or "B」" in line:
+                self.assertNotIn("secretary-project-a", line)
 
 
 class SkillInstallerTests(unittest.TestCase):
