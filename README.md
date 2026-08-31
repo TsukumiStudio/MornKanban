@@ -8,6 +8,14 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 - Per project: `kanban init` creates `.kanban/{todo,doing,review,done,failed}/` plus a `KANBAN.md` policy template (commit them; cards are git history).
 - When asked to set up kanban for a project, run `kanban init`, then fill `.kanban/KANBAN.md` with the project's agent/model composition and card policy through dialogue with the user. A second `kanban init` never overwrites an existing `KANBAN.md`.
 
+## GUI
+
+- Clone the repo, then run `./kanban-gui.sh` from inside a Herdr pane; it starts a local web server and opens your browser automatically.
+- The GUI lets you add projects, run `kanban init`, edit the policy file, add cards, and start the secretary or dispatcher — all with a click.
+- No terminal commands needed for day-to-day use once the server is running.
+- Set `MORNKANBAN_GUI_PORT` to change the port (default `8765`).
+- Running outside a Herdr pane still works, but the secretary/dispatcher launch buttons need a Herdr pane to attach to.
+
 ## Secretary Bootstrap (one-liner)
 
 A secretary agent is started with a single short phrase — e.g. 「**kanban の秘書として待機して**」 (or `/kanban-dispatch 秘書`). Everything else lives in this README and the project's `.kanban/KANBAN.md`, not in the prompt. On that phrase the agent must:
