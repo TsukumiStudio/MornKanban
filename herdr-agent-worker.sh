@@ -49,7 +49,21 @@ printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェク�
 
 jget() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"; }
 
-pane=$(herdr pane split --current --direction down --cwd "$PWD" --no-focus |
+# Split along the longer visual axis (terminal cells are ~2:1 tall, so a
+# pane is "wide" when width exceeds twice its row count). Stacking every
+# worker downward makes rows unusably short.
+dir=$(herdr pane layout --current | python3 -c '
+import json, os, sys
+lay = json.load(sys.stdin)["result"]["layout"]
+me = os.environ.get("HERDR_PANE_ID", "")
+for p in lay["panes"]:
+    if p["pane_id"] == me:
+        r = p["rect"]
+        print("right" if r["width"] > 2 * r["height"] else "down")
+        break
+else:
+    print("down")')
+pane=$(herdr pane split --current --direction "$dir" --cwd "$PWD" --no-focus |
   jget 'd["result"]["pane"]["pane_id"]')
 
 # Start the interactive agent. A brand-new worktree triggers Claude's
