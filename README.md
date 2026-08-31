@@ -52,6 +52,8 @@ KANBAN_REVIEW_CMD='env KANBAN_HERDR_ROLE=reviewer /Users/<you>/git/MornKanban/he
 kanban run -j 2
 ```
 
+The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, default `secretary`) to inspect and report, so `failed/` cards reach the user through the secretary instead of dying silently.
+
 The wrapper splits a pane below the dispatcher, starts an interactive claude (`--permission-mode acceptEdits`, model from the card via `KANBAN_CARD_MODEL`, default `sonnet`), accepts the folder-trust dialog for the card's own worktree, prompts it with the card body, and waits. Because Claude Code renders on the terminal's alternate screen, the final answer cannot be read back from scrollback — the wrapper instructs the agent to also write its answer (the review JSON included) to `.kanban-answer.md` in the worktree, reads that, and deletes it before the card is committed. Panes are closed when the attempt ends.
 
 ## Dispatcher Behavior
@@ -79,6 +81,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_CODEX_SANDBOX` | codex worker `-s` mode (default `workspace-write`) |
 | `KANBAN_JOBS` | Default parallelism for `kanban run` (overridden by `-j`) |
 | `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
+| `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |
 | `KANBAN_DEBUG` | Write per-job xtrace logs to `.kanban/wt/job.*.trace` |
 
 ## Constraints

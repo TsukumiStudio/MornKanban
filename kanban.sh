@@ -142,6 +142,8 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 ## ディスパッチャ運用
 
 - (例) カード追加後、秘書が kanban run -j 2 をバックグラウンド起動する
+- (例) Herdr 環境では KANBAN_NOTIFY_CMD=~/git/MornKanban/herdr-notify-secretary.sh を付けて起動し、
+  カード決着が秘書へ push されるようにする
 - (例) failed カードは秘書がユーザーへ即報告する
 EOF
   fi
@@ -298,6 +300,12 @@ record_attempt() { # record_attempt <card> <threshold> -> increments attempts
     append_history "$file" "review"
 }
 
+notify_result() { # notify_result <done|failed> <title> ; optional hook, never fatal
+  if [[ -n ${KANBAN_NOTIFY_CMD:-} ]]; then
+    $KANBAN_NOTIFY_CMD "$1" "$2" >/dev/null 2>&1 || true
+  fi
+}
+
 merge_lock() { # merge_lock <acquire|release>
   local lock=$KB/.merge.lock
   if [[ $1 == acquire ]]; then
@@ -329,9 +337,11 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
   if [[ $ATT_SCORE -ge $threshold ]]; then
     move_card "$file" done >/dev/null
     echo "    PASS score=$ATT_SCORE -> done"
+    notify_result done "$title"
   elif [[ $attempts -ge $max_attempts ]]; then
     move_card "$file" failed >/dev/null
     echo "    FAIL score=$ATT_SCORE attempts exhausted -> failed (needs human)"
+    notify_result failed "$title"
   else
     printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
     move_card "$file" todo >/dev/null
@@ -354,6 +364,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     echo "worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
     move_card "$file" failed >/dev/null
     echo "$tag FAIL worktree add failed -> failed"
+    notify_result failed "$title"
     return
   fi
 
@@ -375,6 +386,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
     move_card "$file" failed >/dev/null
     echo "$tag FAIL score=$ATT_SCORE attempts exhausted -> failed (branch $branch kept)"
+    notify_result failed "$title"
     return
   fi
 
@@ -386,6 +398,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     rm -f "$KB/wt/$id.log"
     move_card "$file" done >/dev/null
     echo "$tag PASS score=$ATT_SCORE -> done (merged into $base_branch)"
+    notify_result done "$title"
   else
     git -C "$ROOT" merge --abort 2>/dev/null || true
     merge_lock release
@@ -394,6 +407,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
       "$ATT_SCORE" "$branch" "$base_branch" | append_history "$file" "merge conflict"
     move_card "$file" failed >/dev/null
     echo "$tag CONFLICT -> failed (branch $branch kept; merge manually)"
+    notify_result failed "$title"
   fi
 }
 
