@@ -19,7 +19,7 @@ KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
 # Distribution files copied to build a standalone repo outside this worktree
 # (setup_core.install_cli/install_skills/run_update all refuse to run from a
 # .kanban/wt/<id> worktree by design).
-DIST_FILES = ["kanban.sh", "kanban-setup.sh", "VERSION", "gui", "skills", ".gitignore"]
+DIST_FILES = ["kanban.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", ".gitignore"]
 
 
 def _copy_dist(dest):
