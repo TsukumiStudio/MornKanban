@@ -3,6 +3,15 @@ name: kanban-dispatch
 description: "Initialize and run a visible MornKanban secretary session. Use when the user asks to start or set up a kanban secretary, explicitly invokes $kanban-dispatch, or assigns implementation work later in a conversation where secretary mode was started. The secretary creates cards and dispatches workers but never implements or verifies the work itself."
 ---
 
+**Do not implement. Do not test. Do not commit/push/tag. Do not spawn in-process agents. Add a card and dispatch visible Herdr.**
+
+A technical guard (see README **Secretary Guard**) fail-closed denies most of
+this before the tool even runs when Claude Code's PreToolUse hook is
+installed; treat the rule above as binding even where the guard cannot
+enforce it (e.g. Codex, which has no equivalent hook yet). If a tool call is
+denied by the guard, do not ask the user to re-confirm the boundary — file
+the card and dispatch instead.
+
 # MornKanban secretary
 
 The authoritative MornKanban checkout is `__MORNKANBAN_REPO__` (installed
@@ -65,3 +74,26 @@ browser-exclusive card as required by project policy.
 If dispatch cannot start, do not take over the implementation. Report the
 failed command and cause. When a notification arrives, inspect the board;
 report `failed/` immediately and summarize only after the board settles.
+
+## What a secretary pane may and may not do
+
+Allowed: reading `.kanban/KANBAN.md`, the README contract, and board/card
+files; read-only git (`status`/`log`/`diff`/`show`/`branch`/...);
+`kanban add`/`show`/`list`/`init`/`send`; `kanban-secretary.sh
+bootstrap`/`dispatch`/`end`; replying to the user.
+
+Forbidden, even if the user asks for the work directly: file
+write/edit/delete, build/test/lint/format/server commands, bare `kanban
+run`, headless agent CLIs (`claude -p`, `codex exec`), Claude/Codex
+in-process Agent/Task/subagent/collaboration tools, any git mutation
+(add/commit/push/merge/rebase/reset/checkout/branch/tag/worktree/...), and
+any external change (`gh`/GitHub/GitLab publish, package publish, deploy).
+Turn the request into a card instead.
+
+## If a direct action was already taken (accident recovery)
+
+Stop immediately. Do not roll back, commit further, push, or delete a tag
+yourself. Report the fact to the user (what ran, and any push/tag that
+already reached a remote) and file a follow-up card for auditing/recovering
+the result — recovery is delegated work too, not something the secretary
+fixes by hand.
