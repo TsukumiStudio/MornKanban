@@ -10,11 +10,10 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 
 ## GUI
 
-- Clone the repo, then run `./kanban-gui.sh` from inside a Herdr pane; it starts a local web server and opens your browser automatically.
-- The GUI lets you add projects, run `kanban init`, edit the policy file, add cards, and start the secretary or dispatcher — all with a click.
-- No terminal commands needed for day-to-day use once the server is running.
+- Clone the repo and run `./kanban-gui.sh` — a local setup wizard opens in the browser.
+- One click each: install the `kanban` CLI (symlink into `~/.local/bin`), install the Claude Code skill (`~/.claude/skills/kanban-dispatch`), register projects and run `kanban init` on them.
+- Day-to-day operation is **not** in the GUI: open a Herdr pane in the project and tell Claude 「**kanban の秘書として待機して**」 (see Secretary Bootstrap below).
 - Set `MORNKANBAN_GUI_PORT` to change the port (default `8765`).
-- Running outside a Herdr pane still works, but the secretary/dispatcher launch buttons need a Herdr pane to attach to.
 
 ## Secretary Bootstrap (one-liner)
 
