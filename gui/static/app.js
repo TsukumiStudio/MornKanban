@@ -1,32 +1,17 @@
 (() => {
   'use strict';
 
-  const STATUSES = ['todo', 'doing', 'review', 'done', 'failed'];
-  const BOARD_POLL_MS = 3000;
-
-  const state = {
-    projects: [],
-    selectedPath: '',
-    dispatchAllowed: true,
-    boardTimer: null,
-  };
-
   const el = {};
 
   function cacheEls() {
     const ids = [
-      'dep-badges', 'project-list', 'project-path', 'btn-add-project', 'btn-init',
-      'btn-secretary', 'jobs-input', 'btn-dispatch', 'tab-board', 'tab-policy',
-      'view-board', 'view-policy', 'card-title', 'card-body', 'card-backend',
-      'card-model', 'btn-add-card', 'policy-editor', 'btn-save-policy',
-      'card-modal', 'modal-content', 'modal-close', 'toast',
+      'dep-badges', 'step-cli', 'install-cli-status', 'btn-install-cli',
+      'step-skill', 'install-skill-status', 'btn-install-skill',
+      'step-projects', 'project-path', 'btn-add-project', 'project-list',
+      'step-next', 'toast',
     ];
     for (const id of ids) {
       el[id] = document.getElementById(id);
-    }
-    el.columns = {};
-    for (const s of STATUSES) {
-      el.columns[s] = document.getElementById(`col-${s}`);
     }
   }
 
@@ -60,8 +45,13 @@
     }
     if (!res.ok || (data && data.ok === false)) {
       const errMsg = (data && data.error) || `HTTP ${res.status}`;
-      toast(errMsg);
-      throw new Error(errMsg);
+      const err = new Error(errMsg);
+      err.status = res.status;
+      err.data = data;
+      if (!(res.status === 409)) {
+        toast(errMsg);
+      }
+      throw err;
     }
     return data;
   }
@@ -73,91 +63,109 @@
     return span;
   }
 
+  let lastStatus = null;
+
+  function updateDoneState() {
+    if (!lastStatus) return;
+    const install = lastStatus.install || {};
+    if (install.cli) {
+      el['step-cli'].classList.add('done');
+    } else {
+      el['step-cli'].classList.remove('done');
+    }
+    if (install.skill) {
+      el['step-skill'].classList.add('done');
+    } else {
+      el['step-skill'].classList.remove('done');
+    }
+  }
+
+  async function refresh() {
+    await loadStatus();
+    await loadProjects();
+  }
+
   async function loadStatus() {
     const data = await api('GET', '/api/status');
+    lastStatus = data;
+
     el['dep-badges'].innerHTML = '';
-    for (const [name, ok] of Object.entries(data.deps || {})) {
+    const deps = data.deps || {};
+    for (const [name, ok] of Object.entries(deps)) {
       el['dep-badges'].appendChild(depBadge(name, ok));
     }
-    state.dispatchAllowed = !!data.herdr_env;
-    if (!state.dispatchAllowed) {
-      toast('Herdr ペイン内で起動してください (秘書/ディスパッチャ操作不可)');
-      el['btn-secretary'].disabled = true;
-      el['btn-dispatch'].disabled = true;
+    if (!deps.herdr || !deps.claude) {
+      toast('herdr / claude が見つかりません');
+    }
+
+    const install = data.install || {};
+    if (install.cli) {
+      el['install-cli-status'].textContent = '導入済み';
+      el['install-cli-status'].className = 'ok';
     } else {
-      el['btn-secretary'].disabled = false;
-      el['btn-dispatch'].disabled = false;
+      el['install-cli-status'].textContent = '未導入';
+      el['install-cli-status'].className = 'ng';
     }
+    if (install.skill) {
+      el['install-skill-status'].textContent = '導入済み';
+      el['install-skill-status'].className = 'ok';
+    } else {
+      el['install-skill-status'].textContent = '未導入';
+      el['install-skill-status'].className = 'ng';
+    }
+
+    updateDoneState();
   }
 
-  async function loadProjects(selectPath) {
-    const data = await api('GET', '/api/projects');
-    state.projects = data.projects || [];
+  function renderProjects(projects) {
     el['project-list'].innerHTML = '';
-    for (const p of state.projects) {
-      const opt = document.createElement('option');
-      opt.value = p.path;
-      opt.textContent = p.has_kanban ? p.name : `${p.name} (未init)`;
-      el['project-list'].appendChild(opt);
-    }
-    const target = selectPath || state.selectedPath || (state.projects[0] && state.projects[0].path) || '';
-    if (target) {
-      el['project-list'].value = target;
-    }
-    state.selectedPath = el['project-list'].value || '';
-    await onProjectChanged();
-  }
-
-  async function onProjectChanged() {
-    state.selectedPath = el['project-list'].value || '';
-    if (!state.selectedPath) return;
-    await loadBoard();
-    if (!el['view-policy'].hidden) {
-      await loadPolicy();
-    }
-  }
-
-  function renderBoard(states) {
-    for (const s of STATUSES) {
-      const ul = el.columns[s];
-      ul.innerHTML = '';
-      const cards = (states && states[s]) || [];
-      for (const card of cards) {
-        const li = document.createElement('li');
-        li.textContent = `${card.title} (${card.attempts})`;
-        li.dataset.file = card.file;
-        li.addEventListener('click', () => openCard(card.file));
-        ul.appendChild(li);
+    for (const p of projects) {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.textContent = `${p.name} (${p.path})`;
+      li.appendChild(label);
+      if (p.has_kanban) {
+        const badge = document.createElement('span');
+        badge.className = 'ok';
+        badge.textContent = '導入済み';
+        li.appendChild(badge);
+      } else {
+        const btn = document.createElement('button');
+        btn.textContent = 'kanban init';
+        btn.addEventListener('click', () => initProject(p.path));
+        li.appendChild(btn);
       }
+      el['project-list'].appendChild(li);
     }
   }
 
-  async function loadBoard() {
-    if (!state.selectedPath) return;
-    const data = await api('GET', `/api/board?path=${encodeURIComponent(state.selectedPath)}`);
-    renderBoard(data.states || {});
+  async function loadProjects() {
+    const data = await api('GET', '/api/projects');
+    renderProjects(data.projects || []);
   }
 
-  async function openCard(file) {
-    const data = await api('GET', `/api/card?file=${encodeURIComponent(file)}`);
-    el['modal-content'].textContent = data.content || '';
-    el['card-modal'].hidden = false;
+  async function installCli() {
+    const data = await api('POST', '/api/install/cli');
+    if (data && data.in_path === false) {
+      toast('~/.local/bin に PATH を通してください');
+    }
+    await refresh();
   }
 
-  function closeCard() {
-    el['card-modal'].hidden = true;
-  }
-
-  async function loadPolicy() {
-    if (!state.selectedPath) return;
-    const data = await api('GET', `/api/policy?path=${encodeURIComponent(state.selectedPath)}`);
-    el['policy-editor'].value = data.content || '';
-  }
-
-  async function savePolicy() {
-    if (!state.selectedPath) return;
-    await api('PUT', '/api/policy', { path: state.selectedPath, content: el['policy-editor'].value });
-    toast('ポリシーを保存しました');
+  async function installSkill(force) {
+    try {
+      const data = await api('POST', '/api/install/skill', force ? { force: true } : {});
+      await refresh();
+      return data;
+    } catch (e) {
+      if (e.status === 409) {
+        if (confirm('上書きしますか')) {
+          await installSkill(true);
+        }
+        return null;
+      }
+      throw e;
+    }
   }
 
   async function addProject() {
@@ -165,98 +173,28 @@
     if (!path) return;
     await api('POST', '/api/projects', { path });
     el['project-path'].value = '';
-    await loadProjects(path);
+    await refresh();
   }
 
-  async function initProject() {
-    if (!state.selectedPath) return;
-    await api('POST', '/api/init', { path: state.selectedPath });
-    await loadProjects(state.selectedPath);
-  }
-
-  async function addCard() {
-    const title = el['card-title'].value.trim();
-    if (!title) return;
-    if (!state.selectedPath) return;
-    await api('POST', '/api/card', {
-      path: state.selectedPath,
-      title,
-      body: el['card-body'].value,
-      backend: el['card-backend'].value,
-      model: el['card-model'].value,
-      threshold: '',
-    });
-    el['card-title'].value = '';
-    el['card-body'].value = '';
-    el['card-backend'].value = '';
-    el['card-model'].value = '';
-    await loadBoard();
-  }
-
-  async function startSecretary() {
-    if (!state.selectedPath) return;
-    const data = await api('POST', '/api/secretary', { path: state.selectedPath });
-    toast(`秘書を起動しました: ${(data && data.pane) || ''}`);
-  }
-
-  async function startDispatch() {
-    if (!state.selectedPath) return;
-    const data = await api('POST', '/api/dispatch', {
-      path: state.selectedPath,
-      jobs: el['jobs-input'].value,
-    });
-    toast(`ディスパッチャを起動しました: ${(data && data.pane) || ''}`);
-  }
-
-  function showBoardTab() {
-    el['view-board'].hidden = false;
-    el['view-policy'].hidden = true;
-  }
-
-  function showPolicyTab() {
-    el['view-board'].hidden = true;
-    el['view-policy'].hidden = false;
-    loadPolicy();
-  }
-
-  function startBoardPolling() {
-    if (state.boardTimer) clearInterval(state.boardTimer);
-    state.boardTimer = setInterval(() => {
-      loadBoard().catch(() => {});
-    }, BOARD_POLL_MS);
+  async function initProject(path) {
+    await api('POST', '/api/init', { path });
+    await refresh();
   }
 
   function bindEvents() {
-    el['project-list'].addEventListener('change', onProjectChanged);
+    el['btn-install-cli'].addEventListener('click', installCli);
+    el['btn-install-skill'].addEventListener('click', () => installSkill(false));
     el['btn-add-project'].addEventListener('click', addProject);
-    el['btn-init'].addEventListener('click', initProject);
-    el['btn-add-card'].addEventListener('click', addCard);
-    el['btn-secretary'].addEventListener('click', startSecretary);
-    el['btn-dispatch'].addEventListener('click', startDispatch);
-    el['btn-save-policy'].addEventListener('click', savePolicy);
-    el['tab-board'].addEventListener('click', showBoardTab);
-    el['tab-policy'].addEventListener('click', showPolicyTab);
-    el['modal-close'].addEventListener('click', closeCard);
-    el['card-modal'].addEventListener('click', (e) => {
-      if (e.target === el['card-modal']) closeCard();
-    });
   }
 
   async function init() {
     cacheEls();
     bindEvents();
-    showBoardTab();
     try {
-      await loadStatus();
+      await refresh();
     } catch (e) {
       /* toast already shown */
     }
-    try {
-      await loadProjects();
-    } catch (e) {
-      /* toast already shown */
-    }
-    startBoardPolling();
   }
 
   document.addEventListener('DOMContentLoaded', init);
