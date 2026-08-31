@@ -37,6 +37,8 @@ A secretary agent is started with **`$kanban-dispatch 秘書として開始`** (
 
 Visible Herdr workers are the secretary default. The bootstrap must test `HERDR_ENV`, `HERDR_PANE_ID`, and the current pane through the Herdr CLI. It must not infer availability from the prompt, and it must not silently fall back to headless workers. Headless secretary mode requires an explicit user request.
 
+`kanban-secretary.sh end [project-dir]` clears this pane's active-secretary marker (see **Secretary Guard** below) when a secretary session ends; a fresh `bootstrap` in a new pane also supersedes it automatically, so `end` is a courtesy, not a requirement.
+
 ## Per-Project Policy: .kanban/KANBAN.md
 
 `KANBAN.md` is the project's kanban contract, in two layers:
@@ -55,8 +57,18 @@ When the user assigns implementation work in a project that has `.kanban/`:
 5. Report `failed/` cards to the user; they need human judgment.
 6. **Verification is delegated too.** After implementation cards merge, cut a follow-up verification card (run the app, click through it, check the acceptance criteria) instead of verifying by hand. The dialogue agent never implements, verifies, or fixes directly — it cards, dispatches, and reports.
 7. **Browser role is exclusive.** Ordinary workers must not touch browser-automation tools; verification is curl/CLI level. When a check genuinely needs a browser, cut a dedicated browser-verification card and run it **alone** (`kanban-secretary.sh dispatch --once`) — at most one browser-role agent exists at a time, and no other agent (the dialogue agent included) touches browser tools while it runs.
+8. **No in-process delegation from the secretary pane.** Once bootstrapped, the secretary must not launch this CLI's own built-in subagent tool (Claude Code's `Agent`/`Task`; Codex's collaboration/subagent-spawning feature) to do the implementation/research/review/fix/verification itself — that bypasses cards, worktrees, and board history entirely. The only allowed actions in a bootstrapped secretary pane are reading project policy/board, `kanban add`/`kanban send`, `kanban-secretary.sh dispatch`/`dispatch --once`, and reporting to the user. If an in-process agent was started by mistake, stop immediately, do not merge or adopt its output, and file the same request as a card instead. See **Secretary Guard** below for the technical enforcement.
 
 Leave `model` empty to use the backend's own default. Model names are backend-specific — never pass a Claude model name to a codex card.
+
+## Secretary Guard (technical enforcement)
+
+`kanban-secretary.sh bootstrap` records this pane (Herdr pane id + project root) as the project's active secretary in `.kanban/.secretary-guard/marker.json`. `kanban-secretary.sh end` clears it; a later `bootstrap` in a different pane silently supersedes a stale marker (self-healing — there is no separate "is the old pane still alive" check to get wrong).
+
+- **Claude Code**: `kanban install`/`update` add a `PreToolUse` hook (matcher `Task`, the built-in Agent/subagent tool) to `~/.claude/settings.json` running `guard/claude_secretary_guard.py`. It reads the marker for the tool call's project and denies the call — with a reason pointing at `kanban add` / `kanban-secretary.sh dispatch` — only when the calling pane is that project's recorded active secretary. Any other pane (worker, reviewer, resolver, ordinary agent, another project's secretary) is unaffected; the check fails open (allows) whenever Herdr, the marker, or the pane id don't line up. `kanban-setup.sh` install/update/uninstall manage only this one hook entry — the merge preserves every other hook and settings key, and a `settings.json.mornkanban-guard.bak` backup is written once on first install.
+- **Codex**: no documented pre-tool deny hook for its collaboration/subagent-spawning feature was found (`~/.codex/hooks.json` exists and the `hooks` feature is stable, but neither an event covering tool-call denial by name nor the subagent tool's name is confirmed). Enforcement there is **prompt/contract-level only** — the skill text and the generated `KANBAN.md` "秘書契約" section — not a technical guard. This gap is intentionally not papered over; treat it as a residual risk on Codex-backed secretaries until a confirmed hook exists.
+- Status of both is shown by `kanban-setup.sh` / `./kanban-setup.sh` (`秘書ガード (in-process delegation 拒否): claude=..., codex=...`), reporting `enforced`, `not_installed`, or `misconfigured`.
+- A denied call appends one capped audit line (timestamp, tool name, pane id — no conversation text) to `.kanban/.secretary-guard/audit.log`, capped at 200 lines.
 
 ## Backends
 

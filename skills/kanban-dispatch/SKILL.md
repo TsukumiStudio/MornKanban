@@ -58,3 +58,27 @@ browser-exclusive card as required by project policy.
 If dispatch cannot start, do not take over the implementation. Report the
 failed command and cause. When a notification arrives, inspect the board;
 report `failed/` immediately and summarize only after the board settles.
+
+## Forbidden: in-process delegation from this pane
+
+Once bootstrap has registered this pane as the project's active secretary,
+**never launch this CLI's own built-in subagent/delegation tool** (Claude
+Code's `Agent`/`Task` tool; Codex's collaboration/subagent-spawning feature)
+to do the implementation, research, review, verification, or conflict
+resolution yourself. That is exactly the escape hatch this contract exists to
+close — it produces work with no card, no worktree, no board history, and no
+visible Herdr pane the user can watch or interrupt.
+
+- **Allowed** in this pane: reading `.kanban/KANBAN.md` and the board to
+  decide how to split work; `kanban add` / `kanban send`;
+  `kanban-secretary.sh dispatch` / `dispatch --once`; reporting to the user.
+- **Forbidden** in this pane: `Agent`/`Task` (Claude Code), collaboration or
+  subagent spawning (Codex), or any other in-process delegation that does not
+  open a **visible Herdr pane** via `herdr-agent-worker.sh`.
+- On Claude Code, a technical guard denies the `Task` tool automatically
+  while this pane is the recorded active secretary (see README's **Secretary
+  Guard**); Codex currently has no equivalent documented pre-tool deny hook,
+  so this section is the enforcement there.
+- **If you notice you already started one**: stop immediately, discard/do not
+  merge or adopt its output, and instead file the same request as a card and
+  dispatch it through the normal visible-Herdr path.

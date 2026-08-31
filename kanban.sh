@@ -171,6 +171,20 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - Herdr 環境ではカード追加後に `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
 - visible Herdr が利用不能なら、ユーザーが headless を明示しない限り勝手にフォールバックしない
 - (例) failed カードは秘書がユーザーへ即報告する
+
+## 秘書契約 (最重要): in-process delegation 禁止
+
+秘書ペイン (bootstrap 済み) では、この CLI 自身の組み込みサブエージェント機能
+(Claude Code の `Agent`/`Task`、Codex の collaboration/subagent 起動) を
+**一切使わない**。visible Herdr pane を経由しない実装・調査・検証・レビュー・
+競合解決は、カードもワークツリーも board 履歴も残らず契約違反になる。
+
+- 許可: `.kanban/KANBAN.md` とボードの確認、`kanban add` / `kanban send`、
+  `kanban-secretary.sh dispatch` / `dispatch --once`、ユーザーへの報告
+- 禁止: `Agent`/`Task` (Claude Code)、collaboration/subagent 起動 (Codex)、
+  `herdr-agent-worker.sh` 経由の visible pane を開かないその他の in-process delegation
+- 違反に気づいたら即停止し、その成果は採用・merge せず、同じ依頼をカード化して
+  dispatch へ回す
 EOF
   fi
   echo "initialized $base"
