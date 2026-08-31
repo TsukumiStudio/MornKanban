@@ -109,8 +109,10 @@ else:
 pane=$(herdr pane split --current --direction "$dir" --cwd "$PWD" --no-focus |
   jget 'd["result"]["pane"]["pane_id"]')
 
-# Label the pane so the user can tell WHO is doing WHAT at a glance.
-label="${role} (${backend}): ${KANBAN_CARD_TITLE:-?}"
+# Label the pane so the user can tell WHO is doing WHAT at a glance. All
+# roles run full-trust by default (see .kanban/KANBAN.md's worker/reviewer
+# 権限ポリシー section) so the pane title says so plainly, not just via color.
+label="${role} (${backend}/UNRESTRICTED): ${KANBAN_CARD_TITLE:-?}"
 herdr pane rename "$pane" "$(echo "$label" | cut -c1-48)" >/dev/null 2>&1 || true
 
 # Start the interactive agent. A brand-new worktree triggers a folder-trust
@@ -119,16 +121,30 @@ herdr pane rename "$pane" "$(echo "$label" | cut -c1-48)" >/dev/null 2>&1 || tru
 # KANBAN_ALLOWED_TOOLS: extra pre-approved tools (e.g. "mcp__claude-in-chrome"
 # for a browser-role card) so the unattended worker doesn't stall on the
 # tool-permission dialog. Claude-specific flag; never passed to codex.
+#
+# Permission policy is uniform across worker/reviewer (resolver, once it
+# exists, should reuse the same KANBAN_CLAUDE_PERMS/KANBAN_CODEX_* knobs):
+# default is full-trust (no permission prompt, no sandbox/approval), driven
+# by KANBAN_CLAUDE_PERMS / KANBAN_CODEX_SANDBOX / KANBAN_CODEX_FULL_BYPASS /
+# KANBAN_CODEX_APPROVAL, which kanban.sh exports from .kanban/KANBAN.md
+# frontmatter (env wins) when it invokes this wrapper as
+# KANBAN_WORKER_CMD/KANBAN_REVIEW_CMD.
+echo "herdr-agent-worker: [UNRESTRICTED] role=$role backend=$backend" >&2
 kind_args=()
 if [[ $backend == claude ]]; then
-  if [[ $role != reviewer ]]; then kind_args+=(--permission-mode acceptEdits); fi
+  perms=${KANBAN_CLAUDE_PERMS:-bypassPermissions}
+  if [[ $perms == bypassPermissions ]]; then
+    kind_args+=(--dangerously-skip-permissions)
+  else
+    kind_args+=(--permission-mode "$perms")
+  fi
   [[ -n $model ]] && kind_args+=(--model "$model")
   if [[ -n ${KANBAN_ALLOWED_TOOLS:-} ]]; then kind_args+=(--allowedTools "$KANBAN_ALLOWED_TOOLS"); fi
 else # codex
-  if [[ $role == reviewer ]]; then
-    kind_args+=(-s read-only -a never)
+  if [[ ${KANBAN_CODEX_FULL_BYPASS:-true} == true ]]; then
+    kind_args+=(--dangerously-bypass-approvals-and-sandbox)
   else
-    kind_args+=(-s "${KANBAN_CODEX_SANDBOX:-workspace-write}" -a never)
+    kind_args+=(-s "${KANBAN_CODEX_SANDBOX:-danger-full-access}" -a "${KANBAN_CODEX_APPROVAL:-never}")
   fi
   [[ -n $model ]] && kind_args+=(-m "$model")
 fi
