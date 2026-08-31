@@ -42,6 +42,7 @@ When the user assigns implementation work in a project that has `.kanban/`:
 4. Return to the user immediately. Do not implement the task in the dialogue session.
 5. Report `failed/` cards to the user; they need human judgment.
 6. **Verification is delegated too.** After implementation cards merge, cut a follow-up verification card (run the app, click through it, check the acceptance criteria) instead of verifying by hand. The dialogue agent never implements, verifies, or fixes directly — it cards, dispatches, and reports.
+7. **Browser role is exclusive.** Ordinary workers must not touch browser-automation tools; verification is curl/CLI level. When a check genuinely needs a browser, cut a dedicated browser-verification card and run it **alone** (`kanban run --once`) — at most one browser-role agent exists at a time, and no other agent (the dialogue agent included) touches browser tools while it runs.
 
 Leave `model` empty to use the backend's own default. Model names are backend-specific — never pass a Claude model name to a codex card.
 
