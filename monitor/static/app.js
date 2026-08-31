@@ -134,7 +134,8 @@
         if (s === "blocked" && c.blocked_kind === "review_infra") {
           item.appendChild(el("div", "card-sub badge-infra-blocked", "review infrastructure stopped (not a code failure)"));
         }
-        item.appendChild(el("div", "card-sub", [c.backend, c.model, "attempts " + c.attempts + "/" + c.max_attempts].filter(Boolean).join(" · ")));
+        const reviewLabel = c.review_enabled === "false" ? "Review: OFF" : "Review: ON";
+        item.appendChild(el("div", "card-sub", [c.backend, c.model, "attempts " + c.attempts + "/" + c.max_attempts, reviewLabel].filter(Boolean).join(" · ")));
         item.addEventListener("click", () => openCard(state.selectedSlug, s, c.filename));
         col.appendChild(item);
       }

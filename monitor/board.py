@@ -72,6 +72,7 @@ def card_summary(kanban_dir, state, filename):
         "blocked_kind": fm.get("blocked_kind", ""),
         "review_infra_retries": fm.get("review_infra_retries", ""),
         "worker_infra_retries": fm.get("worker_infra_retries", ""),
+        "review_enabled": fm.get("review_enabled", "true"),
         "mtime": mtime,
     }
 
