@@ -18,8 +18,8 @@
     return d.toLocaleString();
   };
 
-  async function fetchJSON(url) {
-    const res = await fetch(url, { cache: "no-store" });
+  async function fetchJSON(url, signal) {
+    const res = await fetch(url, { cache: "no-store", signal });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error || ("HTTP " + res.status));
@@ -43,7 +43,9 @@
   const modalBody = document.getElementById("card-modal-body");
   const modalClose = document.getElementById("card-modal-close");
 
-  let currentSlug = null; // null = list view; string = board view
+  const state = window.MonitorState.createState();
+  let boardAbort = null;
+  let modalAbort = null;
 
   function renderProjects(data) {
     projectsList.textContent = "";
@@ -89,30 +91,33 @@
     }
   }
 
-  async function openBoard(slug) {
-    currentSlug = slug;
-    projectsSection.hidden = true;
-    boardSection.hidden = false;
-    await refreshBoard();
-  }
+  // --- board (selected project) ------------------------------------------
 
-  function closeBoard() {
-    currentSlug = null;
-    boardSection.hidden = true;
-    projectsSection.hidden = false;
-  }
-
-  async function refreshBoard() {
-    if (!currentSlug) return;
-    let data;
-    try {
-      data = await fetchJSON("/api/projects/" + encodeURIComponent(currentSlug));
-    } catch (e) {
-      boardTitle.textContent = "読み込み失敗";
-      boardColumns.textContent = String(e.message || e);
-      return;
+  function renderBoardSkeleton() {
+    boardColumns.textContent = "";
+    for (const s of STATES) {
+      const col = el("div", "board-column");
+      const h = el("h4");
+      h.appendChild(el("span", "badge-" + s, STATE_LABELS[s]));
+      col.appendChild(h);
+      col.appendChild(el("div", "board-skeleton-item"));
+      col.appendChild(el("div", "board-skeleton-item"));
+      boardColumns.appendChild(col);
     }
-    boardTitle.textContent = data.name + " (" + data.root + ")";
+  }
+
+  function renderBoardErrorPanel(slug, message) {
+    boardColumns.textContent = "";
+    const panel = el("div", "board-error-panel");
+    panel.appendChild(el("div", "board-error-message", "読み込み失敗: " + message));
+    const retry = el("button", null, "再読み込み");
+    retry.type = "button";
+    retry.addEventListener("click", () => openBoard(slug));
+    panel.appendChild(retry);
+    boardColumns.appendChild(panel);
+  }
+
+  function renderBoardColumns(data) {
     boardColumns.textContent = "";
     for (const s of STATES) {
       const col = el("div", "board-column");
@@ -124,21 +129,103 @@
         const item = el("div", "card-item");
         item.appendChild(el("div", null, c.title || c.filename));
         item.appendChild(el("div", "card-sub", [c.backend, c.model, "attempts " + c.attempts + "/" + c.max_attempts].filter(Boolean).join(" · ")));
-        item.addEventListener("click", () => openCard(currentSlug, s, c.filename));
+        item.addEventListener("click", () => openCard(state.selectedSlug, s, c.filename));
         col.appendChild(item);
       }
       boardColumns.appendChild(col);
     }
   }
 
-  async function openCard(slug, state, filename) {
+  function renderBoardFromState() {
+    boardSection.classList.toggle("is-loading", state.board.status === "loading");
+    boardSection.classList.toggle("is-error", state.board.status === "error");
+
+    if (state.view !== "board") return;
+    const slug = state.selectedSlug;
+
+    if (state.board.status === "loading") {
+      boardTitle.textContent = "読み込み中: " + slug;
+      renderBoardSkeleton();
+      return;
+    }
+    if (state.board.status === "error") {
+      boardTitle.textContent = slug + " (読み込み失敗)";
+      renderBoardErrorPanel(slug, state.board.error);
+      return;
+    }
+    const data = state.board.data;
+    boardTitle.textContent = data.name + " (" + data.root + ")";
+    renderBoardColumns(data);
+  }
+
+  async function fetchBoard(slug, generation, signal) {
     let data;
     try {
-      data = await fetchJSON("/api/projects/" + encodeURIComponent(slug) + "/cards/" + encodeURIComponent(state) + "/" + encodeURIComponent(filename));
+      data = await fetchJSON("/api/projects/" + encodeURIComponent(slug), signal);
     } catch (e) {
-      data = { frontmatter: {}, body: "読み込み失敗: " + (e.message || e) };
+      if (e.name === "AbortError") return;
+      if (window.MonitorState.receiveBoardError(state, slug, generation, e.message || String(e))) {
+        renderBoardFromState();
+      }
+      return;
     }
-    modalTitle.textContent = (data.frontmatter && data.frontmatter.title) || filename;
+    if (window.MonitorState.receiveBoardSuccess(state, slug, generation, data)) {
+      renderBoardFromState();
+    }
+  }
+
+  async function openBoard(slug) {
+    if (boardAbort) boardAbort.abort();
+    boardAbort = new AbortController();
+    const generation = window.MonitorState.selectProject(state, slug);
+    projectsSection.hidden = true;
+    boardSection.hidden = false;
+    renderBoardFromState();
+    renderModalFromState();
+    await fetchBoard(slug, generation, boardAbort.signal);
+  }
+
+  function closeBoard() {
+    if (boardAbort) { boardAbort.abort(); boardAbort = null; }
+    if (modalAbort) { modalAbort.abort(); modalAbort = null; }
+    window.MonitorState.deselectProject(state);
+    boardSection.hidden = true;
+    projectsSection.hidden = false;
+    renderModalFromState();
+  }
+
+  async function refreshBoardData() {
+    if (!state.selectedSlug || state.board.status === "loading") return;
+    const slug = state.selectedSlug;
+    const generation = state.board.generation;
+    if (boardAbort) boardAbort.abort();
+    boardAbort = new AbortController();
+    await fetchBoard(slug, generation, boardAbort.signal);
+  }
+
+  // --- card detail modal ---------------------------------------------------
+
+  function renderModalFromState() {
+    if (!state.modal.open) {
+      modal.hidden = true;
+      return;
+    }
+    modal.hidden = false;
+
+    if (state.modal.status === "loading") {
+      modalTitle.textContent = "読み込み中: " + state.modal.filename;
+      modalMeta.textContent = "";
+      modalBody.textContent = "";
+      return;
+    }
+    if (state.modal.status === "error") {
+      modalTitle.textContent = state.modal.filename;
+      modalMeta.textContent = "";
+      modalBody.textContent = "読み込み失敗: " + state.modal.error;
+      return;
+    }
+    const data = state.modal.data;
+    modalTitle.textContent = (data.frontmatter && data.frontmatter.title) || state.modal.filename;
     modalMeta.textContent = "";
     for (const [k, v] of Object.entries(data.frontmatter || {})) {
       const tr = document.createElement("tr");
@@ -147,11 +234,40 @@
       modalMeta.appendChild(tr);
     }
     modalBody.textContent = data.body || "";
-    modal.hidden = false;
   }
 
-  modalClose.addEventListener("click", () => { modal.hidden = true; });
-  modal.addEventListener("click", (ev) => { if (ev.target === modal) modal.hidden = true; });
+  async function openCard(slug, cardState, filename) {
+    if (modalAbort) modalAbort.abort();
+    modalAbort = new AbortController();
+    const generation = window.MonitorState.openCard(state, slug, cardState, filename);
+    renderModalFromState();
+
+    let data;
+    try {
+      data = await fetchJSON(
+        "/api/projects/" + encodeURIComponent(slug) + "/cards/" + encodeURIComponent(cardState) + "/" + encodeURIComponent(filename),
+        modalAbort.signal
+      );
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      if (window.MonitorState.receiveCardError(state, generation, e.message || String(e))) {
+        renderModalFromState();
+      }
+      return;
+    }
+    if (window.MonitorState.receiveCardSuccess(state, generation, data)) {
+      renderModalFromState();
+    }
+  }
+
+  function closeModalUI() {
+    if (modalAbort) { modalAbort.abort(); modalAbort = null; }
+    window.MonitorState.closeModal(state);
+    renderModalFromState();
+  }
+
+  modalClose.addEventListener("click", closeModalUI);
+  modal.addEventListener("click", (ev) => { if (ev.target === modal) closeModalUI(); });
   backBtn.addEventListener("click", closeBoard);
   refreshBtn.addEventListener("click", () => refreshAll(true));
 
@@ -163,7 +279,7 @@
       ]);
       renderProjects(projects);
       renderActivity(activity);
-      if (currentSlug) await refreshBoard();
+      await refreshBoardData();
       updatedAt.textContent = "最終更新: " + new Date().toLocaleTimeString();
     } catch (e) {
       updatedAt.textContent = "更新失敗: " + (e.message || e);
