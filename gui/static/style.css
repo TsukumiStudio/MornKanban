@@ -1,0 +1,239 @@
+:root {
+  --color-bg: #f5f5f7;
+  --color-surface: #ffffff;
+  --color-border: #d8d8dc;
+  --color-text: #1c1c1e;
+  --color-muted: #6e6e73;
+  --color-accent: #3b6fe0;
+  --color-done-bg: #e6f6ea;
+  --color-failed-bg: #fbe7e7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+#app-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+#app-header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+#dep-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#dep-badges span {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #eee;
+  border: 1px solid var(--color-border);
+}
+
+#project-row,
+#action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  flex-wrap: wrap;
+}
+
+#project-row {
+  border-bottom: 1px solid var(--color-border);
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+button {
+  cursor: pointer;
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+button:hover {
+  opacity: 0.9;
+}
+
+#project-path {
+  flex: 1;
+  min-width: 200px;
+}
+
+#tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 20px 0;
+}
+
+#tabs button {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+}
+
+#view-board {
+  padding: 16px 20px;
+}
+
+#board {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+}
+
+.column {
+  flex: 1 1 0;
+  min-width: 200px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: #eceef1;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.column[data-status="failed"] {
+  background: var(--color-failed-bg);
+}
+
+.column[data-status="done"] {
+  background: var(--color-done-bg);
+}
+
+.column h2 {
+  margin: 4px 8px;
+  font-size: 14px;
+  color: var(--color-muted);
+  text-transform: uppercase;
+}
+
+.card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  padding: 10px;
+  cursor: pointer;
+}
+
+.card:hover {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+#card-form {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 480px;
+}
+
+#view-policy {
+  padding: 16px 20px;
+}
+
+#view-policy:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#policy-editor {
+  width: 100%;
+  min-height: 400px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+#card-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+}
+
+#card-modal:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-box {
+  position: relative;
+  background: #fff;
+  max-width: 720px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.modal-box pre {
+  overflow-x: auto;
+  white-space: pre;
+}
+
+#modal-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: transparent;
+  color: var(--color-text);
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+
+#toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #333;
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 6px;
+  z-index: 200;
+}
