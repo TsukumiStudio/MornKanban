@@ -17,6 +17,7 @@ FAST_TESTS = [
     "tests.test_secretary_guard",
     "tests.test_setup_dashboard",
     "tests.test_kanban_secretary.CardEffortTests",
+    "tests.test_kanban_secretary.PromptProjectionTests",
     "tests.test_kanban_secretary.SecretaryNameResolutionTests",
     "tests.test_kanban_secretary.SecretaryDoesNotHoldCardsBackContractTests",
     "tests.test_kanban_secretary.DiagnosisCardContractTests",

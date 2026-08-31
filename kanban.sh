@@ -199,8 +199,17 @@ open(path, "w").write("\n".join(out))
 EOF
 }
 
-card_body() { # everything after frontmatter
-  awk 'c==2{print} /^---$/{c++}' "$1"
+card_task() { # only the stable task specification, never accumulated History
+  awk '/^## Task$/{task=1; next} /^## History$/{if(task) exit} task{print}' "$1"
+}
+
+latest_rework_feedback() { # body of the newest rework-instruction History entry
+  awk '
+/^### [0-9][0-9][0-9][0-9]-.* rework instruction/ {capture=1; feedback=""; next}
+/^### [0-9][0-9][0-9][0-9]-/ {capture=0}
+capture {feedback=feedback $0 ORS}
+END {printf "%s", feedback}
+' "$1"
 }
 
 append_history() { # append_history <file> <heading> ; body from stdin
@@ -508,7 +517,7 @@ EOF
 }
 
 worker_prompt_for_card() { # worker_prompt_for_card <card>
-  local file=$1 kind target maximum
+  local file=$1 kind target maximum feedback
   kind=$(fm_get "$file" task_kind implementation)
   if [[ $kind == diagnose ]]; then
     target=$(fm_get "$file" diagnosis_target_minutes "$DEFAULT_DIAGNOSIS_TARGET_MINUTES")
@@ -524,7 +533,11 @@ DIAGNOSIS-ONLY TIMEBOX CONTRACT
 
 EOF
   fi
-  card_body "$file"
+  card_task "$file"
+  feedback=$(latest_rework_feedback "$file")
+  if [[ -n $feedback ]]; then
+    printf '\n## Latest reviewer feedback\n\n%s' "$feedback"
+  fi
 }
 
 cmd_list() {
@@ -727,7 +740,7 @@ You are a strict reviewer. Inspect this repository's current state and judge
 whether the task below is genuinely complete and of good quality. Check the
 actual files and diffs; do not trust the worker's claims.
 
-$(card_body "$file")
+$(card_task "$file")
 
 Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
 EOF
@@ -896,7 +909,7 @@ Inspect the actual files and diffs; do not trust the resolver's claims. Judge
 whether BOTH sides' intent was preserved and the task below is genuinely
 complete.
 
-$(card_body "$file")
+$(card_task "$file")
 
 Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
 EOF
@@ -920,7 +933,7 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   wcmd=$(resolve_cmd "$backend" "$model" "$effort")
   attempt_label="resolve-$(($(fm_get "$file" resolve_attempts 0) + 1))"
   prompt=$(printf 'You are the conflict-resolution role for MornKanban. Card branch %s passed review but conflicts with the current base branch %s. Resolve the conflict in this worktree, preserving the intent of BOTH sides -- never simply discard one side. Run any tests the task requires, then leave the tree conflict-free.\n\nConflicted files:\n%s\n\nOriginal task:\n%s\n' \
-    "$card_branch" "$base_branch" "$conflict_files" "$(card_body "$file")")
+    "$card_branch" "$base_branch" "$conflict_files" "$(card_task "$file")")
   t0=$SECONDS
   out=$( (cd "$workdir" && printf '%s' "$prompt" |
     KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \

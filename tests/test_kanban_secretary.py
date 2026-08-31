@@ -870,6 +870,66 @@ class CardEffortTests(unittest.TestCase):
         self.assertEqual(list((self.project / ".kanban" / "todo").glob("*.md")), [])
 
 
+class PromptProjectionTests(unittest.TestCase):
+    def test_roles_receive_task_view_without_accumulated_history(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            prompts = root / "prompts"
+            project.mkdir()
+            prompts.mkdir()
+            subprocess.run([str(KANBAN_SH), "init"], cwd=project, check=True, capture_output=True, text=True)
+            worker = root / "worker.sh"
+            reviewer = root / "reviewer.sh"
+            worker.write_text(
+                '#!/usr/bin/env bash\ncat > "$PROMPTS/worker-$KANBAN_CARD_ATTEMPT.txt"\nprintf "WORKER_OUTPUT_SENTINEL\\n"\n',
+                encoding="utf-8",
+            )
+            reviewer.write_text(
+                '#!/usr/bin/env bash\ncat > "$PROMPTS/reviewer-$KANBAN_CARD_ATTEMPT.txt"\n'
+                'if [[ $KANBAN_CARD_ATTEMPT == 1 ]]; then\n'
+                '  printf \'{"score":40,"feedback":"FEEDBACK_SENTINEL"}\\n\'\n'
+                'else\n'
+                '  printf \'{"score":95,"feedback":"ok"}\\n\'\n'
+                'fi\n',
+                encoding="utf-8",
+            )
+            worker.chmod(0o755)
+            reviewer.chmod(0o755)
+            env = {
+                **os.environ,
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(reviewer),
+                "KANBAN_JOBS": "1",
+                "PROMPTS": str(prompts),
+            }
+            add = subprocess.run(
+                [str(KANBAN_SH), "add", "prompt projection"], cwd=project,
+                input="TASK_SENTINEL", text=True, capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(add.returncode, 0, add.stderr)
+
+            for _ in range(2):
+                run = subprocess.run(
+                    [str(KANBAN_SH), "run", "--once"], cwd=project,
+                    text=True, capture_output=True, env=env, check=False,
+                )
+                self.assertEqual(run.returncode, 0, run.stderr)
+
+            worker1 = (prompts / "worker-1.txt").read_text(encoding="utf-8")
+            worker2 = (prompts / "worker-2.txt").read_text(encoding="utf-8")
+            reviewer1 = (prompts / "reviewer-1.txt").read_text(encoding="utf-8")
+            reviewer2 = (prompts / "reviewer-2.txt").read_text(encoding="utf-8")
+            self.assertIn("TASK_SENTINEL", worker1)
+            self.assertNotIn("review decision", worker1)
+            self.assertIn("FEEDBACK_SENTINEL", worker2)
+            self.assertNotIn("WORKER_OUTPUT_SENTINEL", worker2)
+            for prompt in (reviewer1, reviewer2):
+                self.assertIn("TASK_SENTINEL", prompt)
+                self.assertNotIn("WORKER_OUTPUT_SENTINEL", prompt)
+                self.assertNotIn("FEEDBACK_SENTINEL", prompt)
+
+
 class HerdrAgentWorkerBackendTests(unittest.TestCase):
     """herdr-agent-worker.sh must pick --kind claude|codex from the card's own
     routing (KANBAN_CARD_BACKEND / KANBAN_REVIEWER), never a hardcoded
