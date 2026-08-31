@@ -80,9 +80,15 @@ cat >"$tmp/prompt.md"
 # Claude Code and Codex both render on the terminal's alternate screen, so a
 # finished response cannot be recovered from pane scrollback. Have the agent
 # also write its final answer to a file inside the worktree and read that.
+# card_id/attempt identify this run for diagnostics (pane label, error
+# messages); the answer file itself stays at a fixed, well-known path so the
+# instructions below never depend on unstable per-run naming.
+card_id=$(basename "$PWD")
+attempt=$name
 ans="$PWD/.kanban-answer.md"
 rm -f "$ans"
-printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にもそのまま書き込むこと。作業・編集はカレントディレクトリ (worktree) 内だけで行い、リポジトリ本体のチェックアウトを絶対パスで触らないこと。\n' "$ans" >>"$tmp/prompt.md"
+printf '\n\n追加指示 (card_id=%s role=%s attempt=%s): 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にもそのまま書き込むこと。この書き込みが完了するまでは応答を終えないこと。作業・編集はカレントディレクトリ (worktree) 内だけで行い、リポジトリ本体のチェックアウトを絶対パスで触らないこと。\n' \
+  "$card_id" "$role" "$attempt" "$ans" >>"$tmp/prompt.md"
 
 jget() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"; }
 
@@ -133,8 +139,8 @@ fi
 # score or a genuinely empty worker diff, so it must be the first line of
 # stdout and nothing else score-shaped should follow it.
 infra_error() {
-  printf 'KANBAN_INFRA_ERROR: %s: %s\n' "$1" "$2"
-  exit 0
+  printf 'KANBAN_INFRA_ERROR: %s: %s\n' "$1" "$2" >&2
+  exit 1
 }
 
 if ! herdr agent start "$name" --kind "$backend" --pane "$pane" --timeout 45000 -- "${kind_args[@]}" >/dev/null 2>&1; then
@@ -159,45 +165,96 @@ fi
 
 herdr agent prompt "$name" "$(cat "$tmp/prompt.md")" --wait --timeout 1500000 >/dev/null 2>&1 || true
 
-# Ride out permission prompts (approve: these are our own sandboxed
-# worktrees) and keep waiting until the agent settles for good. A failure
-# reading agent state here (pane closed mid-run, agent handle gone) must be
-# reported as infrastructure, not silently swallowed into whatever partial
-# text `herdr` printed to stderr before dying.
-settled=false
-for _ in $(seq 1 90); do
-  get_out=$(herdr agent get "$name" 2>&1) || {
+# A blocked status is only a real permission/question dialog when the visible
+# pane actually shows one; a long-running shell command (e.g. the worker's
+# first `git log`) can otherwise transiently read as non-idle/blocked, and
+# command output can innocently contain words like "permission" (e.g. "git:
+# Permission denied"). Never send keys into a pane on a guess.
+looks_like_permission_prompt() {
+  grep -qE '(Do you want to (proceed|continue)\?|Allow (this|the) (action|command|tool)\?|\(y/n\)|\[y/N\]|Press enter to (confirm|continue)|don.t ask again)' <<<"$1"
+}
+
+# idle/done is Herdr's *pane* status, not proof the agent finished writing
+# its answer -- a transient idle/done blip (observed: reported ~20s into a
+# still-running first command) must never be treated as completion by
+# itself. Require the status to stay idle/done across several consecutive
+# polls AND the answer file to exist and be byte-stable across a read gap
+# before trusting it. If the agent is lost (status query fails, or reports
+# the agent is gone) before that happens, that is an infrastructure error,
+# not a completion.
+answer_stable() {
+  local f=$1 s1 s2
+  [[ -s $f ]] || return 1
+  s1=$(wc -c <"$f" 2>/dev/null) || return 1
+  sleep "$STABLE_SLEEP"
+  [[ -s $f ]] || return 1
+  s2=$(wc -c <"$f" 2>/dev/null) || return 1
+  [[ $s1 == "$s2" ]]
+}
+
+POLL_INTERVAL=${KANBAN_HERDR_POLL_INTERVAL:-3}
+SETTLE_CHECKS=${KANBAN_HERDR_SETTLE_CHECKS:-2}
+STABLE_SLEEP=${KANBAN_HERDR_STABLE_SLEEP:-2}
+MAX_WAIT_SECS=${KANBAN_HERDR_ANSWER_WAIT_SECS:-1500}
+max_iters=$((MAX_WAIT_SECS / POLL_INTERVAL))
+[[ $max_iters -lt 1 ]] && max_iters=1
+
+settle_count=0
+lost=0
+answer_ready=0
+i=0
+while ((i < max_iters)); do
+  i=$((i + 1))
+  get_out=$(herdr agent get "$name" 2>"$tmp/agent-get.err") || {
+    get_err=$(tail -n 1 "$tmp/agent-get.err" 2>/dev/null || true)
     if grep -qiE "not found|no such (pane|agent)" <<<"$get_out"; then
-      infra_error agent_not_found "role=$role: $(echo "$get_out" | tail -n 1)"
+      infra_error agent_not_found "role=$role: ${get_err:-agent was lost}"
     fi
-    infra_error wrapper_error "role=$role: herdr agent get failed: $(echo "$get_out" | tail -n 1)"
+    infra_error agent_not_found "role=$role: agent was lost (${get_err:-herdr agent get failed})"
   }
-  st=$(echo "$get_out" | jget 'd["result"]["agent"]["agent_status"]' 2>/dev/null) || {
+  st=$(jget 'd["result"]["agent"]["agent_status"]' <<<"$get_out" 2>/dev/null) || {
     infra_error wrapper_error "role=$role: could not parse agent status from herdr agent get"
   }
   case $st in
-    idle|done) settled=true; break ;;
+    idle | done)
+      settle_count=$((settle_count + 1))
+      ;;
     blocked)
+      settle_count=0
       ui=$(herdr agent read "$name" --source visible --lines 40 2>/dev/null || true)
-      if grep -qE "Do you want|Allow|permission" <<<"$ui"; then
+      if looks_like_permission_prompt "$ui"; then
         herdr agent send-keys "$name" enter >/dev/null 2>&1 || true
       fi
-      sleep 5 ;;
-    *) herdr agent wait "$name" --timeout 300000 >/dev/null 2>&1 || true ;;
+      ;;
+    gone | dead | missing | error)
+      lost=1
+      ;;
+    *)
+      settle_count=0
+      ;;
   esac
+  [[ $lost -eq 1 ]] && break
+
+  if ((settle_count >= SETTLE_CHECKS)) && [[ -f $ans ]] && answer_stable "$ans"; then
+    answer_ready=1
+    break
+  fi
+
+  sleep "$POLL_INTERVAL"
 done
-if ! $settled; then
-  infra_error timeout "role=$role: agent never reached idle/done"
+
+if [[ $lost -eq 1 ]]; then
+  infra_error agent_not_found "role=$role card=$card_id: agent was lost before writing $ans"
 fi
 
-herdr agent read "$name" --source recent-unwrapped --lines 200 --format text 2>/dev/null || true
-if [[ -f $ans ]]; then
-  echo ""
-  cat "$ans"
-  rm -f "$ans"   # keep it out of the card's git commit / merge
-elif [[ $role == reviewer ]]; then
-  # A settled reviewer that never wrote its answer file produced no
-  # judgeable content either -- treat it the same way as a broken pane
-  # rather than letting an empty/partial transcript get scored as 0.
-  infra_error empty_output "role=$role: agent settled but wrote no $ans"
+if [[ $answer_ready -ne 1 ]]; then
+  infra_error timeout "role=$role card=$card_id: timed out after ${MAX_WAIT_SECS}s waiting for a stable $ans"
 fi
+
+# The alternate-screen transcript is diagnostic context only, never a
+# substitute for the answer file -- it is only ever emitted alongside a
+# verified answer, never in place of one.
+herdr agent read "$name" --source recent-unwrapped --lines 200 --format text 2>/dev/null || true
+echo ""
+cat "$ans"
+rm -f "$ans"   # keep it out of the card's git commit / merge
