@@ -382,7 +382,7 @@ def git_current_branch():
 
 
 def git_is_clean():
-    r = _git(["status", "--porcelain"])
+    r = _git(["status", "--porcelain", "--untracked-files=no"])
     return r.returncode == 0 and r.stdout.strip() == ""
 
 
@@ -393,8 +393,9 @@ def git_pull_ff_only():
 def run_update():
     """Compare versions, git pull --ff-only origin main, reinstall CLI/skills.
 
-    Never discards or stashes user changes: dirty/detached/non-main checkouts
-    are refused outright. Returns (ok, [messages]).
+    Never discards or stashes tracked user changes: dirty/detached/non-main
+    checkouts are refused outright. Untracked files are left to git pull's
+    overwrite protection. Returns (ok, [messages]).
     """
     if in_worktree():
         return False, ["refused: kanban worktree 内"]
@@ -405,7 +406,7 @@ def run_update():
     if branch != "main":
         return False, ["update refused: current branch is '%s', expected 'main'" % branch]
     if not git_is_clean():
-        return False, ["update refused: working tree is dirty (commit or stash your changes first)"]
+        return False, ["update refused: tracked files are dirty (commit or stash your changes first)"]
 
     messages = []
     report = version_report()

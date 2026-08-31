@@ -415,11 +415,11 @@ GUIDE_FLOWS = [
     ),
     (
         "update",
-        "MornKanban checkout のルート (main ブランチ, clean な状態)",
+        "MornKanban checkout のルート (main ブランチ, 追跡済みファイルが clean な状態)",
         "kanban update / kanban-setup.sh update",
         "git pull --ff-only origin main の後、CLI シンボリックリンクとスキルを再導入",
         "checkout 内のファイル、~/.local/bin/kanban、スキル配下",
-        "project board、registry、monitor 設定、ローカルの未コミット変更 (dirty なら拒否)",
+        "project board、registry、monitor 設定、未追跡ファイル (追跡済みの変更は拒否)",
     ),
     (
         "uninstall",
@@ -514,14 +514,14 @@ def build_update_preview(status):
     elif branch != "main":
         lines.append("警告: 現在ブランチは '%s' (main が必要) のため拒否される見込み" % sanitize(branch))
     elif not setup_core.git_is_clean():
-        lines.append("警告: 作業ツリーに未コミットの変更があるため拒否される見込み (commit/stash してください)")
+        lines.append("警告: 追跡済みファイルに未コミットの変更があるため拒否される見込み (commit/stash してください)")
     else:
         lines.append("実行: git pull --ff-only origin main (%s)" % status["repo"])
         lines.append("更新: %s -> %s" % (sanitize(setup_core.KANBAN_LINK), sanitize(setup_core.KANBAN_SH)))
         for name, directory in setup_core.SKILL_TARGETS.items():
             lines.append("更新: %s/SKILL.md (バージョン %s へ再導入)" % (sanitize(directory), status["local_version"]))
         lines.append("更新: %s の MornKanban 管理対象hook" % sanitize(setup_core.CLAUDE_SETTINGS_PATH))
-    lines.append("変更しない: project board、registry、monitor 設定、ローカルの未コミット変更")
+    lines.append("変更しない: project board、registry、monitor 設定、未追跡ファイル")
     return lines
 
 

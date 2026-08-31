@@ -795,6 +795,17 @@ class GitUpdateTests(unittest.TestCase):
         # local edit must be untouched -- update never discards user changes
         self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "9.9.9")
 
+    def test_update_allows_and_preserves_untracked_files(self):
+        note = self.clone / "local-note.txt"
+        note.write_text("keep me\n", encoding="utf-8")
+        self._push_upstream_version_bump("9.9.2")
+
+        result = self._run("update")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "9.9.2")
+        self.assertEqual(note.read_text(encoding="utf-8"), "keep me\n")
+
     def test_update_refuses_detached_head(self):
         sha = subprocess.run(
             ["git", "-C", str(self.clone), "rev-parse", "HEAD"],

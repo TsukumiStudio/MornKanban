@@ -22,9 +22,10 @@
 - `kanban --version` はローカルの `VERSION` を読むだけでネットワークに触れない。
 - `kanban version` は current / latest / state (`up-to-date` / `update-available` /
   `local-ahead` / `unknown`) を表示する。
-- `kanban update` は dirty / detached HEAD / `main` 以外のブランチを拒否し、
-  ユーザーの変更を勝手に破棄・stash しない。`git pull --ff-only origin main` の後、
-  更新後のインストーラを再読み込みして CLI とスキルを再導入する。
+- `kanban update` は追跡済み・stage済みの変更 / detached HEAD / `main` 以外の
+  ブランチを拒否し、未追跡ファイルは保持する (更新内容と衝突する場合はGitが拒否する)。
+  `git pull --ff-only origin main` の後、更新後のインストーラを再読み込みして
+  CLI とスキルを再導入する。
 
 ## 自動検証
 
@@ -72,7 +73,7 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
 - `kanban.sh install` / `uninstall` が `~/.local/bin/kanban` とスキルだけを導入・削除し、
   リポジトリ本体とプロジェクトのボードは残す
 - 実際の一時 git リモート + clone に対する `kanban.sh update` の fast-forward、
-  dirty checkout の拒否
+  追跡済み変更の拒否、未追跡ファイルの保持
 - `kanban-setup.sh` が引数を `gui/setup_cli.py` へ確実に転送する
   (転送漏れは対話ウィザードへ黙って落ちる既知の失敗モード)
 - セットアップダッシュボードが枠と現在VERSIONだけを起動表示し、`h`入力後にだけ
