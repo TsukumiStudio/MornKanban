@@ -1833,6 +1833,25 @@ class SecretaryDoesNotHoldCardsBackContractTests(unittest.TestCase):
         self.assertIn("resolve_max_attempts", text)
 
 
+class DiagnosisCardContractTests(unittest.TestCase):
+    def test_secretary_skill_keeps_diagnosis_small_read_only_and_separate(self):
+        text = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        self.assertIn("kanban add --diagnose", normalized)
+        self.assertIn("read-only", normalized)
+        self.assertIn("5 minutes", normalized)
+        self.assertIn("10-minute hard maximum", normalized)
+        self.assertIn("File the fix as a separate card", normalized)
+        self.assertIn("Never inflate a diagnosis", normalized)
+
+    def test_generated_policy_contains_timebox_and_scope_block_contract(self):
+        text = (REPO / "kanban.sh").read_text(encoding="utf-8")
+        self.assertIn("diagnosis_target_minutes: 5", text)
+        self.assertIn("diagnosis_max_minutes: 10", text)
+        self.assertIn("BLOCKED: scope/timebox", text)
+        self.assertIn("修正は診断後の別カード", text)
+
+
 class SecretaryForbidsInProcessDelegationContractTests(unittest.TestCase):
     """Locks the "カードなしの in-process delegation / visible pane なしの自己実装
     禁止" contract into README, SKILL.md, and the generated KANBAN.md template so

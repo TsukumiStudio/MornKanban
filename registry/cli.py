@@ -37,6 +37,8 @@ DEFAULTS = {
     "default_model": "",
     "threshold": "80",
     "max_attempts": "3",
+    "diagnosis_target_minutes": "5",
+    "diagnosis_max_minutes": "10",
 }
 
 
@@ -167,7 +169,8 @@ def _resolve_source(explicit_from):
 
 
 def _write_card_atomic(todo_dir, title, body, backend, model, threshold, max_attempts,
-                        source_alias, source_path):
+                        source_alias, source_path, diagnose=False,
+                        diagnosis_target_minutes="5", diagnosis_max_minutes="10"):
     slug = _slugify(title)
     for _ in range(50):
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -184,6 +187,11 @@ def _write_card_atomic(todo_dir, title, body, backend, model, threshold, max_att
             "model: %s\n"
             "threshold: %s\n"
             "max_attempts: %s\n"
+            "review_enabled: %s\n"
+            "review_source: %s\n"
+            "task_kind: %s\n"
+            "diagnosis_target_minutes: %s\n"
+            "diagnosis_max_minutes: %s\n"
             "attempts: 0\n"
             "created: %s\n"
             "source_alias: %s\n"
@@ -192,7 +200,10 @@ def _write_card_atomic(todo_dir, title, body, backend, model, threshold, max_att
             "---\n\n"
             "## Task\n\n%s\n\n## History\n"
         ) % (
-            card_id, title, backend, model, threshold, max_attempts, created,
+            card_id, title, backend, model, threshold, max_attempts,
+            "false" if diagnose else "auto", "diagnose" if diagnose else "auto",
+            "diagnose" if diagnose else "implementation",
+            diagnosis_target_minutes, diagnosis_max_minutes, created,
             source_alias or "", source_path, body,
         )
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -246,7 +257,9 @@ def cmd_send(args):
     try:
         dest = _write_card_atomic(
             todo_dir, args.title, body, backend, model, threshold, max_attempts,
-            source_alias, source_path,
+            source_alias, source_path, diagnose=args.diagnose,
+            diagnosis_target_minutes=defaults["diagnosis_target_minutes"],
+            diagnosis_max_minutes=defaults["diagnosis_max_minutes"],
         )
     except OSError as e:
         print("kanban send: failed to write card: %s" % e, file=sys.stderr)
@@ -312,6 +325,8 @@ def build_parser():
     send_p.add_argument("-b", "--backend", default=None)
     send_p.add_argument("-m", "--model", default=None)
     send_p.add_argument("-t", "--threshold", default=None)
+    send_p.add_argument("--diagnose", action="store_true",
+                        help="file a read-only 5/10-minute diagnosis card")
     send_p.add_argument("--from", dest="from_path", default=None,
                          help="record this path as the send origin instead of cwd")
     send_p.set_defaults(func=cmd_send)

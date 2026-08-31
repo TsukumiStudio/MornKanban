@@ -23,6 +23,8 @@ BACKENDS="claude codex"
 # count is tracked separately from `attempts` (see review_with_infra_retry).
 DEFAULT_REVIEW_INFRA_MAX_RETRIES=2
 DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=2
+DEFAULT_DIAGNOSIS_TARGET_MINUTES=5
+DEFAULT_DIAGNOSIS_MAX_MINUTES=10
 # review_enabled priority: card override > environment > project policy > true.
 PROJECT_REVIEW_ENABLED=""
 
@@ -89,6 +91,8 @@ load_project_config() { # .kanban/KANBAN.md frontmatter -> defaults (env still w
   DEFAULT_RESOLVE_MAX_ATTEMPTS=$(fm_get "$cfg" resolve_max_attempts "$DEFAULT_RESOLVE_MAX_ATTEMPTS")
   DEFAULT_REVIEW_INFRA_MAX_RETRIES=$(fm_get "$cfg" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
   DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=$(fm_get "$cfg" review_infra_backoff_seconds "$DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS")
+  DEFAULT_DIAGNOSIS_TARGET_MINUTES=$(fm_get "$cfg" diagnosis_target_minutes "$DEFAULT_DIAGNOSIS_TARGET_MINUTES")
+  DEFAULT_DIAGNOSIS_MAX_MINUTES=$(fm_get "$cfg" diagnosis_max_minutes "$DEFAULT_DIAGNOSIS_MAX_MINUTES")
   # env wins over project config for both (bounded-retry knobs are also
   # useful to override ad hoc, e.g. from a test or a CI job).
   [[ -n ${KANBAN_REVIEW_INFRA_MAX_RETRIES:-} ]] && DEFAULT_REVIEW_INFRA_MAX_RETRIES=$KANBAN_REVIEW_INFRA_MAX_RETRIES
@@ -231,6 +235,8 @@ review_infra_max_retries: 2
 review_infra_backoff_seconds: 2
 review_enabled: true
 jobs: 2
+diagnosis_target_minutes: 5
+diagnosis_max_minutes: 10
 # 既定は無制限権限 (worker/reviewer 共通、resolver 実装時も同キーを流用する)。
 # claude_perms: bypassPermissions -> `--dangerously-skip-permissions` (permission prompt 全skip)
 # codex_full_bypass: true         -> `--dangerously-bypass-approvals-and-sandbox` (approval/sandbox 両方skip)
@@ -253,6 +259,13 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - 優先順位: cardの `--review` / `--no-review` > `KANBAN_REVIEW_ENABLED` > この設定 > 既定
 - `false` はworker成功後のreviewer審査だけを省略する。worker自身のtestは省略しない
 - 決定値と出所はカードへ保存され、dispatcher再起動後も変わらない
+
+## 調査カードのtimebox
+
+- 調査・原因分析は `kanban add --diagnose` で起票し、原則5分目標・最大10分
+- diagnoseはread-onlyの証拠・原因・次の一手の報告だけを成果とし、reviewer審査を既定で省略する
+- 修正は診断後の別カード。ユーザーが明示的に同時修正を求めた時だけ通常の実装カードに含める
+- 5分時点で結論をまとめ、10分以内に終わらない場合は途中成果を残して `BLOCKED: scope/timebox` とする
 
 ## 秘書契約 (最重要)
 
@@ -345,7 +358,7 @@ EOF
 cmd_add() {
   require_root
   local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL threshold=$DEFAULT_THRESHOLD
-  local review_enabled=auto review_source=auto
+  local review_enabled=auto review_source=auto task_kind=implementation
   while [[ $# -gt 0 ]]; do
     case $1 in
       -b|--backend) backend=$2; shift 2 ;;
@@ -353,14 +366,22 @@ cmd_add() {
       -t|--threshold) threshold=$2; shift 2 ;;
       --review) review_enabled=true; review_source=card; shift ;;
       --no-review) review_enabled=false; review_source=card; shift ;;
+      --diagnose) task_kind=diagnose; shift ;;
       *) title=$1; shift ;;
     esac
   done
-  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-t threshold] [--review|--no-review] < description"
+  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-t threshold] [--review|--no-review] [--diagnose] < description"
   case $backend in
     auto|claude|codex) ;;
     *) die "unknown backend: $backend (auto|claude|codex)" ;;
   esac
+  [[ $DEFAULT_DIAGNOSIS_TARGET_MINUTES =~ ^[1-9][0-9]*$ ]] || die "diagnosis_target_minutes must be a positive integer"
+  [[ $DEFAULT_DIAGNOSIS_MAX_MINUTES =~ ^[1-9][0-9]*$ ]] || die "diagnosis_max_minutes must be a positive integer"
+  [[ $DEFAULT_DIAGNOSIS_TARGET_MINUTES -le $DEFAULT_DIAGNOSIS_MAX_MINUTES ]] || die "diagnosis_target_minutes must not exceed diagnosis_max_minutes"
+  if [[ $task_kind == diagnose && $review_enabled == auto ]]; then
+    review_enabled=false
+    review_source=diagnose
+  fi
   local desc
   if [[ ! -t 0 ]]; then desc=$(cat); else desc=$title; fi
   local id slug file
@@ -378,6 +399,9 @@ max_attempts: $DEFAULT_MAX_ATTEMPTS
 resolve_max_attempts: $DEFAULT_RESOLVE_MAX_ATTEMPTS
 review_enabled: $review_enabled
 review_source: $review_source
+task_kind: $task_kind
+diagnosis_target_minutes: $DEFAULT_DIAGNOSIS_TARGET_MINUTES
+diagnosis_max_minutes: $DEFAULT_DIAGNOSIS_MAX_MINUTES
 attempts: 0
 resolve_attempts: 0
 created: $(date '+%Y-%m-%dT%H:%M:%S')
@@ -390,6 +414,26 @@ $desc
 ## History
 EOF
   echo "$file"
+}
+
+worker_prompt_for_card() { # worker_prompt_for_card <card>
+  local file=$1 kind target maximum
+  kind=$(fm_get "$file" task_kind implementation)
+  if [[ $kind == diagnose ]]; then
+    target=$(fm_get "$file" diagnosis_target_minutes "$DEFAULT_DIAGNOSIS_TARGET_MINUTES")
+    maximum=$(fm_get "$file" diagnosis_max_minutes "$DEFAULT_DIAGNOSIS_MAX_MINUTES")
+    cat <<EOF
+DIAGNOSIS-ONLY TIMEBOX CONTRACT
+- This card is read-only diagnosis, not implementation. Do not edit project files, commit, push, or broaden the scope.
+- Target: summarize evidence and a likely cause within ${target} minutes. Hard maximum: ${maximum} minutes.
+- Expected output: observed evidence, likely bottleneck/root cause, uncertainty, and one small follow-up implementation card if needed.
+- At the target, stop expanding the investigation and write the best supported conclusion.
+- If the hard maximum cannot be met, first preserve partial evidence in the answer, then make the answer's first line: BLOCKED: scope/timebox
+- Do not add related benchmarks, UI, refactors, mutation tests, or fixes unless this card explicitly asks for them.
+
+EOF
+  fi
+  card_body "$file"
 }
 
 cmd_list() {
@@ -652,7 +696,7 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   # retried here too, bounded and without consuming a worker attempt --
   # same principle as the reviewer side, applied symmetrically.
   local file=$1 workdir=$2 infra_max=${3:-$DEFAULT_REVIEW_INFRA_MAX_RETRIES}
-  local id backend model wcmd out title infra_cat retries t0 attempt_label
+  local id backend model wcmd out title infra_cat retries t0 attempt_label task_kind timebox_secs
   ATT_BLOCKED_REASON=""
   ATT_WORKER_STATUS=0
   ATT_WORKER_SECS=0
@@ -664,18 +708,31 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   wcmd=$(worker_cmd "$backend" "$model")
   retries=$(fm_get "$file" worker_infra_retries 0)
   attempt_label=$(($(fm_get "$file" attempts 0) + 1))
+  task_kind=$(fm_get "$file" task_kind implementation)
+  timebox_secs=""
+  if [[ $task_kind == diagnose ]]; then
+    timebox_secs=$(($(fm_get "$file" diagnosis_max_minutes "$DEFAULT_DIAGNOSIS_MAX_MINUTES") * 60))
+  fi
   while true; do
     # Custom worker commands (KANBAN_WORKER_CMD) receive the card's routing
     # via env, since the override bypasses worker_cmd's model handling.
     t0=$SECONDS
     ATT_WORKER_STATUS=0
-    out=$( (cd "$workdir" && card_body "$file" |
+    out=$( (cd "$workdir" && worker_prompt_for_card "$file" |
       KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \
       KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} \
+      KANBAN_CARD_KIND=$task_kind KANBAN_CARD_TIMEBOX_SECS=$timebox_secs \
       KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || ATT_WORKER_STATUS=$?
     ATT_WORKER_SECS=$((ATT_WORKER_SECS + SECONDS - t0))
     echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
     infra_cat=$(echo "$out" | classify_worker_infra_error)
+    if [[ $infra_cat == *scope_timebox* ]]; then
+      ATT_WORKER_INFRA_BLOCKED=false
+      ATT_BLOCKED_REASON=" scope/timebox (hard maximum reached; partial evidence is in History if available)"
+      ATT_SCORE=0
+      ATT_FEEDBACK=""
+      return
+    fi
     if [[ -z $infra_cat ]]; then
       fm_set "$file" worker_infra_retries 0
       break
@@ -1005,13 +1062,14 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
 
 process_card_wt() { # git mode: own worktree/branch, retries in place, merge on pass
   local file=$1 base_branch=$2
-  local id title threshold max_attempts attempts review_infra_max review_enabled review_source
+  local id title threshold max_attempts attempts review_infra_max review_enabled review_source task_kind
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "?")
   threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
   max_attempts=$(fm_get "$file" max_attempts "$DEFAULT_MAX_ATTEMPTS")
   attempts=$(fm_get "$file" attempts 0)
   review_infra_max=$(fm_get "$file" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
+  task_kind=$(fm_get "$file" task_kind implementation)
   local branch=kanban/$id wt=$KB/wt/$id
   local tag="[$title]"
   resolve_card_review "$file"
@@ -1055,6 +1113,17 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         move_card "$file" blocked >/dev/null
         echo "$tag BLOCKED ->$ATT_BLOCKED_REASON -> blocked"
         return
+      fi
+      if [[ $task_kind == diagnose ]]; then
+        local diagnosis_changes
+        diagnosis_changes=$(git -C "$wt" status --porcelain --untracked-files=all)
+        if [[ -n $diagnosis_changes ]]; then
+          printf 'diagnose card violated its read-only contract; changes were discarded and never merged:\n%s\n' \
+            "$diagnosis_changes" | append_history "$file" "diagnosis read-only violation"
+          git -C "$wt" reset --hard -q
+          git -C "$wt" clean -fdq
+          ATT_WORKER_STATUS=65
+        fi
       fi
       git -C "$wt" add -A
       git -C "$wt" commit -q --allow-empty -m "kanban: $title (attempt $((attempts + 1)))"

@@ -122,6 +122,7 @@ run_worker() { # run_worker <scen-dir> <worktree-dir> [role] [backend] -> stdout
     HERDR_ENV=1 HERDR_PANE_ID=self \
     KANBAN_CARD_ID=test-card KANBAN_CARD_ATTEMPT=attempt-1 \
     KANBAN_HERDR_ROLE="$role" \
+    KANBAN_CARD_KIND="${MOCK_CARD_KIND:-implementation}" \
     KANBAN_BACKEND_ORDER="$backend" KANBAN_CARD_BACKEND="$backend" \
     KANBAN_REVIEWER="$backend" KANBAN_RESOLVER="$backend" \
     KANBAN_HERDR_POLL_INTERVAL=0.1 KANBAN_HERDR_SETTLE_CHECKS=2 \
@@ -310,6 +311,16 @@ EOF
   rm -rf "$SCEN"
 }
 
+test_diagnosis_timeout_is_scope_block_not_infra_retry() {
+  note "scenario: diagnosis reaches its hard timebox without an answer"
+  new_scenario
+  printf 'idle\n' >"$SCEN/statuses"
+  MOCK_CARD_KIND=diagnose MOCK_MAX_WAIT=0.5 run_worker "$SCEN" "$WT"
+  assert_eq "diagnosis timeout exits non-zero" "$RC" "1"
+  assert_contains "uses scope/timebox category" "$ERR" "KANBAN_INFRA_ERROR: scope_timebox"
+  rm -rf "$SCEN"
+}
+
 test_transient_idle_then_reworking_then_answer
 test_blocked_false_positive_running_shell
 test_blocked_true_permission_prompt
@@ -318,6 +329,7 @@ test_agent_lost_mid_run
 test_answer_completes_atomically
 test_role_backend_matrix
 test_wrong_identity_is_rejected
+test_diagnosis_timeout_is_scope_block_not_infra_retry
 
 note ""
 note "passed: $pass_count  failed: $fail_count"

@@ -189,6 +189,15 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("model: opus", content)
         self.assertIn("threshold: 90", content)
 
+    def test_send_diagnose_preserves_read_only_timebox_metadata(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        r = self._run("send", "project-b", "why slow", "--diagnose", input_text="evidence only")
+        content = Path(r.stdout.strip()).read_text(encoding="utf-8")
+        self.assertIn("task_kind: diagnose", content)
+        self.assertIn("review_enabled: false", content)
+        self.assertIn("diagnosis_target_minutes: 5", content)
+        self.assertIn("diagnosis_max_minutes: 10", content)
+
     def test_send_to_unregistered_alias_fails(self):
         r = self._run("send", "no-such-alias", "t", input_text="b", check=False)
         self.assertNotEqual(r.returncode, 0)

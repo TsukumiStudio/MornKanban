@@ -11,6 +11,8 @@ review_infra_max_retries: 2
 review_infra_backoff_seconds: 2
 review_enabled: true
 jobs: 6
+diagnosis_target_minutes: 5
+diagnosis_max_minutes: 10
 claude_perms: bypassPermissions
 codex_sandbox: danger-full-access
 codex_full_bypass: true
@@ -37,6 +39,13 @@ GUI は python3 標準ライブラリのみ (pip 不可)、フロントは素の
 - 並列ワーカーは互いの成果物を見られない。API/DOM のインターフェース契約を
   各カード本文に明記し自己完結させる
 - 完了条件と検証コマンド (python3 -m py_compile / node --check 等) を必ず書く
+
+## 調査カード
+
+- 調査・診断だけの依頼は `--diagnose` でread-onlyカードにし、5分で結論をまとめ、最大10分で止める
+- 成果は証拠、原因候補、不確実性、次に切る小さな実装カード。修正や周辺改善を同じカードへ追加しない
+- 修正は診断後の別カード。ユーザーが診断と修正を同時に明示した場合だけ通常の実装カードにする
+- 最大時間に収まらない場合は途中証拠をHistoryへ残し、`BLOCKED: scope/timebox` で戻す
 
 ## ディスパッチャ運用
 

@@ -227,7 +227,7 @@ answer_stable() {
 POLL_INTERVAL=${KANBAN_HERDR_POLL_INTERVAL:-3}
 SETTLE_CHECKS=${KANBAN_HERDR_SETTLE_CHECKS:-2}
 STABLE_SLEEP=${KANBAN_HERDR_STABLE_SLEEP:-2}
-MAX_WAIT_SECS=${KANBAN_HERDR_ANSWER_WAIT_SECS:-1500}
+MAX_WAIT_SECS=${KANBAN_HERDR_ANSWER_WAIT_SECS:-${KANBAN_CARD_TIMEBOX_SECS:-1500}}
 max_iters=$(python3 -c 'import math,sys; print(max(1, math.ceil(float(sys.argv[1]) / float(sys.argv[2]))))' "$MAX_WAIT_SECS" "$POLL_INTERVAL") ||
   infra_error wrapper_error "invalid poll/timeout settings: interval=$POLL_INTERVAL timeout=$MAX_WAIT_SECS"
 
@@ -280,13 +280,15 @@ if [[ $lost -eq 1 ]]; then
 fi
 
 if [[ $answer_ready -ne 1 ]]; then
+  if [[ ${KANBAN_CARD_KIND:-implementation} == diagnose ]]; then
+    infra_error scope_timebox "role=$role card=$card_id: diagnosis hit its ${MAX_WAIT_SECS}s hard maximum before writing a stable answer"
+  fi
   infra_error timeout "role=$role card=$card_id: timed out after ${MAX_WAIT_SECS}s waiting for a stable $ans"
 fi
 
 # The alternate-screen transcript is diagnostic context only, never a
 # substitute for the answer file -- it is only ever emitted alongside a
 # verified answer, never in place of one.
-herdr agent read "$name" --source recent-unwrapped --lines 200 --format text 2>/dev/null || true
 first_line=$(head -n 1 "$ans")
 body=$(tail -n +2 "$ans")
 rm -f "$ans"   # keep it out of the card's git commit / merge
