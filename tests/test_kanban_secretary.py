@@ -2,6 +2,7 @@
 import importlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,41 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 SECRETARY = REPO / "kanban-secretary.sh"
+KANBAN_SH = REPO / "kanban.sh"
+KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
+
+# Distribution files copied to build a standalone repo outside this worktree
+# (setup_core.install_cli/install_skills/run_update all refuse to run from a
+# .kanban/wt/<id> worktree by design).
+DIST_FILES = ["kanban.sh", "kanban-setup.sh", "VERSION", "gui", "skills", ".gitignore"]
+
+
+def _copy_dist(dest):
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in DIST_FILES:
+        src = REPO / name
+        target = dest / name
+        if src.is_dir():
+            shutil.copytree(src, target, ignore=shutil.ignore_patterns("__pycache__"))
+        else:
+            shutil.copy2(src, target)
+    return dest
+
+
+def _init_git_repo(path, origin=None):
+    run = lambda *a: subprocess.run(
+        ["git", "-C", str(path), *a], check=True, capture_output=True, text=True
+    )
+    run("init", "-q")
+    run("checkout", "-q", "-b", "main")
+    run("add", "-A")
+    run("-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-q", "-m", "init")
+    if origin is not None:
+        run("remote", "add", "origin", str(origin))
+        run("push", "-q", "origin", "main")
+        run("branch", "-q", "--set-upstream-to=origin/main", "main")
+    return run
 
 
 class SecretaryScriptTests(unittest.TestCase):
@@ -119,7 +155,8 @@ class SkillInstallerTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_installs_rendered_skill_for_claude_and_codex(self):
-        with mock.patch.object(self.setup_core, "SKILL_TARGETS", self.targets):
+        with mock.patch.object(self.setup_core, "SKILL_TARGETS", self.targets), \
+             mock.patch.object(self.setup_core, "in_worktree", return_value=False):
             messages = self.setup_core.install_skills(force=True)
             status = self.setup_core.skill_status()
 
@@ -129,8 +166,265 @@ class SkillInstallerTests(unittest.TestCase):
             skill = Path(directory) / "SKILL.md"
             content = skill.read_text(encoding="utf-8")
             self.assertNotIn("__MORNKANBAN_REPO__", content)
+            self.assertNotIn("__MORNKANBAN_VERSION__", content)
             self.assertIn(str(REPO), content)
+            self.assertIn(self.setup_core.local_version(), content)
             self.assertTrue((Path(directory) / "agents" / "openai.yaml").is_file())
+
+
+class VersionComparisonTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(REPO / "gui"))
+        self.setup_core = importlib.import_module("setup_core")
+
+    def test_parse_version_rejects_non_semantic_strings(self):
+        with self.assertRaises(ValueError):
+            self.setup_core.parse_version("1.2")
+        with self.assertRaises(ValueError):
+            self.setup_core.parse_version("1.2.x")
+
+    def test_compare_versions_orders_semantically_not_lexically(self):
+        # lexical comparison would put "1.9.0" after "1.10.0"; semantic must not.
+        self.assertEqual(self.setup_core.compare_versions("1.9.0", "1.10.0"), -1)
+        self.assertEqual(self.setup_core.compare_versions("1.10.0", "1.9.0"), 1)
+        self.assertEqual(self.setup_core.compare_versions("0.1.0", "0.1.0"), 0)
+
+    def test_version_report_uses_file_url_override_no_network(self):
+        with tempfile.TemporaryDirectory() as td:
+            latest_file = Path(td) / "VERSION"
+            latest_file.write_text("9.9.9\n", encoding="utf-8")
+            env = {"KANBAN_VERSION_URL": "file://%s" % latest_file}
+            with mock.patch.dict(os.environ, env):
+                report = self.setup_core.version_report()
+        self.assertEqual(report["latest"], "9.9.9")
+        self.assertEqual(report["state"], "update-available")
+
+    def test_version_report_reports_local_ahead(self):
+        with tempfile.TemporaryDirectory() as td:
+            latest_file = Path(td) / "VERSION"
+            latest_file.write_text("0.0.1\n", encoding="utf-8")
+            env = {"KANBAN_VERSION_URL": "file://%s" % latest_file}
+            with mock.patch.dict(os.environ, env):
+                report = self.setup_core.version_report()
+        self.assertEqual(report["state"], "local-ahead")
+
+    def test_version_report_unreachable_source_is_unknown_not_fatal(self):
+        env = {"KANBAN_VERSION_URL": "file:///nonexistent/VERSION"}
+        with mock.patch.dict(os.environ, env):
+            report = self.setup_core.version_report()
+        self.assertIsNone(report["latest"])
+        self.assertEqual(report["state"], "unknown")
+        self.assertIsNotNone(report["error"])
+
+
+class SymlinkEntryPointTests(unittest.TestCase):
+    """kanban.sh must resolve its own real location when invoked through a
+    symlink (the ~/.local/bin/kanban entry point), not through $PWD."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        bindir = Path(self.temp.name) / "bin"
+        bindir.mkdir()
+        self.link = bindir / "kanban"
+        self.link.symlink_to(KANBAN_SH)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_version_flag_resolves_through_symlink_without_network(self):
+        result = subprocess.run(
+            [str(self.link), "--version"], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), (REPO / "VERSION").read_text(encoding="utf-8").strip())
+
+    def test_version_subcommand_resolves_gui_through_symlink(self):
+        env = os.environ.copy()
+        env["KANBAN_VERSION_URL"] = "file://%s" % (REPO / "VERSION")
+        result = subprocess.run(
+            [str(self.link), "version"], capture_output=True, text=True, env=env, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("current: %s" % (REPO / "VERSION").read_text(encoding="utf-8").strip(), result.stdout)
+        self.assertIn("state: up-to-date", result.stdout)
+
+
+class InstallUninstallTests(unittest.TestCase):
+    """End-to-end install/uninstall via kanban.sh, run against a copy of the
+    distribution outside this worktree (install/uninstall refuse to run
+    from inside a .kanban/wt/<id> checkout by design)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.dist = _copy_dist(Path(self.temp.name) / "repo")
+        self.home = Path(self.temp.name) / "home"
+        self.home.mkdir()
+        self.env = os.environ.copy()
+        self.env["HOME"] = str(self.home)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _run(self, *args):
+        return subprocess.run(
+            [str(self.dist / "kanban.sh"), *args],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+
+    def test_install_creates_symlink_and_versioned_skills(self):
+        result = self._run("install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        link = self.home / ".local" / "bin" / "kanban"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.path.realpath(str(link)), os.path.realpath(str(self.dist / "kanban.sh")))
+
+        skill = self.home / ".claude" / "skills" / "kanban-dispatch" / "SKILL.md"
+        content = skill.read_text(encoding="utf-8")
+        self.assertIn(str(self.dist), content)
+        self.assertIn((self.dist / "VERSION").read_text(encoding="utf-8").strip(), content)
+
+    def test_install_is_idempotent_repair(self):
+        first = self._run("install")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self._run("install")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        link = self.home / ".local" / "bin" / "kanban"
+        self.assertTrue(link.is_symlink())
+
+    def test_uninstall_removes_cli_and_skills_only(self):
+        self._run("install")
+        result = self._run("uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.assertFalse((self.home / ".local" / "bin" / "kanban").exists())
+        self.assertFalse((self.home / ".claude" / "skills" / "kanban-dispatch").exists())
+        self.assertFalse((self.home / ".codex" / "skills" / "kanban-dispatch").exists())
+        # the repository checkout itself is untouched by uninstall
+        self.assertTrue((self.dist / "kanban.sh").exists())
+
+
+class GitUpdateTests(unittest.TestCase):
+    """Real temporary git remote + clone: exercises the actual
+    `git pull --ff-only origin main` path, not a mock."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.origin = root / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
+
+        self.clone = _copy_dist(root / "clone")
+        self.run_git = _init_git_repo(self.clone, origin=self.origin)
+        subprocess.run(
+            ["git", "-C", str(self.origin), "symbolic-ref", "HEAD", "refs/heads/main"],
+            check=True,
+        )
+
+        self.home = root / "home"
+        self.home.mkdir()
+        self.env = os.environ.copy()
+        self.env["HOME"] = str(self.home)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _run(self, *args):
+        return subprocess.run(
+            [str(self.clone / "kanban.sh"), *args],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+
+    def _push_upstream_version_bump(self, new_version):
+        work = Path(self.temp.name) / "upstream_work"
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(work)], check=True)
+        subprocess.run(["git", "-C", str(work), "checkout", "-q", "main"], check=True)
+        (work / "VERSION").write_text(new_version + "\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(work), "-c", "user.email=test@example.com",
+             "-c", "user.name=test", "commit", "-q", "-am", "bump version"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "main"], check=True)
+
+    def test_update_refuses_dirty_checkout(self):
+        (self.clone / "VERSION").write_text("9.9.9\n", encoding="utf-8")  # uncommitted local edit
+
+        result = self._run("update")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dirty", result.stdout + result.stderr)
+        # local edit must be untouched -- update never discards user changes
+        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "9.9.9")
+
+    def test_update_refuses_detached_head(self):
+        sha = subprocess.run(
+            ["git", "-C", str(self.clone), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        subprocess.run(["git", "-C", str(self.clone), "checkout", "-q", sha], check=True)
+
+        result = self._run("update")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("detached", result.stdout + result.stderr)
+
+    def test_update_fast_forwards_and_reinstalls_versioned_skills(self):
+        self._push_upstream_version_bump("0.2.0")
+
+        result = self._run("update")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "0.2.0")
+
+        skill = self.home / ".claude" / "skills" / "kanban-dispatch" / "SKILL.md"
+        content = skill.read_text(encoding="utf-8")
+        self.assertIn("0.2.0", content)
+        self.assertIn(str(self.clone), content)
+
+        link = self.home / ".local" / "bin" / "kanban"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.path.realpath(str(link)), os.path.realpath(str(self.clone / "kanban.sh")))
+
+
+class ArgumentForwardingTests(unittest.TestCase):
+    """kanban-setup.sh must forward its argv to gui/setup_cli.py -- documented
+    as a known silent-failure risk (a missing "$@" makes every explicit
+    subcommand silently fall back to the interactive wizard)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.dist = _copy_dist(Path(self.temp.name) / "repo")
+        self.env = os.environ.copy()
+        self.env["HOME"] = str(Path(self.temp.name) / "home")
+        self.env["KANBAN_VERSION_URL"] = "file://%s" % (self.dist / "VERSION")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_version_command_is_forwarded_and_not_swallowed_by_wizard(self):
+        result = subprocess.run(
+            [str(self.dist / "kanban-setup.sh"), "version"],
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("current:", result.stdout)
+        # the interactive wizard's status_summary()/prompt banner must not appear
+        self.assertNotIn("kanban CLI:", result.stdout)
+
+    def test_unknown_command_is_forwarded_and_rejected_not_ignored(self):
+        result = subprocess.run(
+            [str(self.dist / "kanban-setup.sh"), "bogus-command"],
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bogus-command", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

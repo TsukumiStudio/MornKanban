@@ -2,10 +2,15 @@
 
 setup_gui.py から抽出した UI 非依存のロジック関数群。python3 標準ライブラリのみ使用。
 """
+import importlib
 import os
 import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.dirname(HERE)
 KANBAN_SH = os.path.join(REPO, "kanban.sh")
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
@@ -16,6 +21,72 @@ SKILL_TARGETS = {
     "Codex": os.path.expanduser("~/.codex/skills/kanban-dispatch"),
 }
 TIMEOUT = 30
+
+# raw VERSION on GitHub main: treated as "latest published version" because
+# this repository currently has no tags or GitHub Releases.
+DEFAULT_VERSION_URL = "https://raw.githubusercontent.com/TsukumiStudio/MornKanban/main/VERSION"
+
+
+# --- version -----------------------------------------------------------------
+
+def local_version():
+    with open(os.path.join(REPO, "VERSION"), "r", encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def version_source_url():
+    # KANBAN_VERSION_URL override lets tests point at a file:// URL instead
+    # of the network.
+    return os.environ.get("KANBAN_VERSION_URL", DEFAULT_VERSION_URL)
+
+
+def fetch_latest_version(url=None, timeout=TIMEOUT):
+    url = url or version_source_url()
+    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+        return resp.read().decode("utf-8").strip()
+
+
+def parse_version(v):
+    parts = v.strip().split(".")
+    if len(parts) != 3:
+        raise ValueError("invalid semantic version: %r" % v)
+    try:
+        return tuple(int(p) for p in parts)
+    except ValueError:
+        raise ValueError("invalid semantic version: %r" % v)
+
+
+def compare_versions(a, b):
+    """-1 if a<b, 0 if a==b, 1 if a>b (semantic, X.Y.Z)."""
+    ta, tb = parse_version(a), parse_version(b)
+    if ta < tb:
+        return -1
+    if ta > tb:
+        return 1
+    return 0
+
+
+def version_report():
+    current = local_version()
+    report = {"current": current, "latest": None, "state": "unknown", "error": None}
+    try:
+        latest = fetch_latest_version()
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        report["error"] = str(e)
+        return report
+    report["latest"] = latest
+    try:
+        cmp = compare_versions(current, latest)
+    except ValueError as e:
+        report["error"] = str(e)
+        return report
+    if cmp == 0:
+        report["state"] = "up-to-date"
+    elif cmp < 0:
+        report["state"] = "update-available"
+    else:
+        report["state"] = "local-ahead"
+    return report
 
 
 # --- logic functions (UI-independent) --------------------------------------
@@ -72,7 +143,10 @@ def install_cli():
 
 def _render_skill(source_path):
     with open(source_path, "r", encoding="utf-8") as fh:
-        return fh.read().replace("__MORNKANBAN_REPO__", REPO)
+        content = fh.read()
+    content = content.replace("__MORNKANBAN_REPO__", REPO)
+    content = content.replace("__MORNKANBAN_VERSION__", local_version())
+    return content
 
 
 def install_skills(force=False):
@@ -139,3 +213,73 @@ def run_uninstall():
         _uninstall_skill(name, directory)
         for name, directory in SKILL_TARGETS.items()
     ]
+
+
+# --- update (git pull --ff-only + reinstall) ---------------------------------
+
+def _git(args):
+    return subprocess.run(
+        ["git", "-C", REPO] + args,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def git_current_branch():
+    """Short branch name, or None when HEAD is detached."""
+    r = _git(["symbolic-ref", "--short", "-q", "HEAD"])
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def git_is_clean():
+    r = _git(["status", "--porcelain"])
+    return r.returncode == 0 and r.stdout.strip() == ""
+
+
+def git_pull_ff_only():
+    return _git(["pull", "--ff-only", "origin", "main"])
+
+
+def run_update():
+    """Compare versions, git pull --ff-only origin main, reinstall CLI/skills.
+
+    Never discards or stashes user changes: dirty/detached/non-main checkouts
+    are refused outright. Returns (ok, [messages]).
+    """
+    if in_worktree():
+        return False, ["refused: kanban worktree 内"]
+
+    branch = git_current_branch()
+    if branch is None:
+        return False, ["update refused: HEAD is detached (checkout main first)"]
+    if branch != "main":
+        return False, ["update refused: current branch is '%s', expected 'main'" % branch]
+    if not git_is_clean():
+        return False, ["update refused: working tree is dirty (commit or stash your changes first)"]
+
+    messages = []
+    report = version_report()
+    messages.append("current: %s" % report["current"])
+    if report["latest"]:
+        messages.append("latest: %s" % report["latest"])
+        messages.append("state: %s" % report["state"])
+    elif report["error"]:
+        messages.append("latest: unknown (%s)" % report["error"])
+
+    result = git_pull_ff_only()
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return False, messages + ["git pull --ff-only origin main failed: %s" % detail]
+    messages.append("git pull --ff-only origin main: %s" % (result.stdout.strip() or "already up to date"))
+
+    # Reload the installer so a freshly pulled setup_core.py drives the
+    # reinstall, not the module snapshot that was loaded before the pull.
+    self_module = sys.modules[__name__]
+    reloaded = importlib.reload(self_module)
+    _, cli_msg = reloaded.install_cli()
+    messages.append(cli_msg)
+    messages += reloaded.install_skills(force=True)
+    return True, messages

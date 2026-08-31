@@ -19,6 +19,28 @@ BACKENDS="claude codex"
 
 die() { echo "kanban: $*" >&2; exit 1; }
 
+resolve_self_dir() { # follow symlinks (e.g. ~/.local/bin/kanban) to the real repo dir, bash 3.2 safe
+  local src=$1 dir
+  while [[ -L $src ]]; do
+    dir=$(cd -P "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    case $src in
+      /*) ;;
+      *) src=$dir/$src ;;
+    esac
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SELF_DIR=$(resolve_self_dir "$0")
+VERSION_FILE=$SELF_DIR/VERSION
+SETUP_CLI=$SELF_DIR/gui/setup_cli.py
+
+cmd_version() { python3 "$SETUP_CLI" version; }
+cmd_install() { python3 "$SETUP_CLI" install; }
+cmd_update() { python3 "$SETUP_CLI" update; }
+cmd_uninstall() { python3 "$SETUP_CLI" uninstall; }
+
 find_root() {
   local d=$PWD
   while [[ $d != / ]]; do
@@ -501,5 +523,10 @@ case ${1:-} in
   list|ls) cmd_list ;;
   show) shift; cmd_show "${1:?usage: kanban show <id>}" ;;
   run) shift || true; cmd_run "$@" ;;
-  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]}" ;;
+  --version) cat "$VERSION_FILE" ;;
+  version) cmd_version ;;
+  install) cmd_install ;;
+  update) cmd_update ;;
+  uninstall) cmd_uninstall ;;
+  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|install|update|uninstall|version|--version}" ;;
 esac

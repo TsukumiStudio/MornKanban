@@ -13,10 +13,54 @@ if HERE not in sys.path:
 from setup_core import (  # noqa: E402
     check_deps,
     cli_installed,
+    install_cli,
+    install_skills,
     run_setup,
     run_uninstall,
+    run_update,
     skill_status,
+    version_report,
 )
+
+
+def cmd_install():
+    ok, cli_msg = install_cli()
+    print(cli_msg)
+    for msg in install_skills(force=True):
+        print(msg)
+    return ok
+
+
+def cmd_uninstall():
+    for msg in run_uninstall():
+        print(msg)
+    return True
+
+
+def cmd_update():
+    ok, messages = run_update()
+    for msg in messages:
+        print(msg)
+    return ok
+
+
+def cmd_version():
+    report = version_report()
+    print("current: %s" % report["current"])
+    if report["latest"]:
+        print("latest: %s" % report["latest"])
+        print("state: %s" % report["state"])
+    else:
+        print("latest: unknown (%s)" % report["error"])
+    return True
+
+
+COMMANDS = {
+    "install": cmd_install,
+    "uninstall": cmd_uninstall,
+    "update": cmd_update,
+    "version": cmd_version,
+}
 
 
 def status_summary():
@@ -40,6 +84,16 @@ def prompt(text):
 
 
 def main():
+    args = sys.argv[1:]
+    if args:
+        cmd = args[0]
+        handler = COMMANDS.get(cmd)
+        if handler is None:
+            print("kanban-setup: unknown command: %s" % cmd, file=sys.stderr)
+            sys.exit(1)
+        ok = handler()
+        sys.exit(0 if ok else 1)
+
     print(status_summary())
 
     if not sys.stdin.isatty():
