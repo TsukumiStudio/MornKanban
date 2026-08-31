@@ -40,6 +40,7 @@ cmd_version() { python3 "$SETUP_CLI" version; }
 cmd_install() { python3 "$SETUP_CLI" install; }
 cmd_update() { python3 "$SETUP_CLI" update; }
 cmd_uninstall() { python3 "$SETUP_CLI" uninstall; }
+cmd_monitor() { exec python3 "$SELF_DIR/monitor/cli.py" "$@"; }
 
 find_root() {
   local d=$PWD
@@ -523,10 +524,11 @@ case ${1:-} in
   list|ls) cmd_list ;;
   show) shift; cmd_show "${1:?usage: kanban show <id>}" ;;
   run) shift || true; cmd_run "$@" ;;
+  monitor) shift || true; cmd_monitor "$@" ;;
   --version) cat "$VERSION_FILE" ;;
   version) cmd_version ;;
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|monitor [run|daemon|config]|install|update|uninstall|version|--version}" ;;
 esac
