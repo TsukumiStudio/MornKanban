@@ -738,102 +738,29 @@ class InstallUninstallTests(unittest.TestCase):
         # the repository checkout itself is untouched by uninstall
         self.assertTrue((self.dist / "kanban.sh").exists())
 
-
-class GitUpdateTests(unittest.TestCase):
-    """Real temporary git remote + clone: exercises the actual
-    `git pull --ff-only origin main` path, not a mock."""
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        root = Path(self.temp.name)
-        self.origin = root / "origin.git"
-        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
-
-        self.clone = _copy_dist(root / "clone")
-        self.run_git = _init_git_repo(self.clone, origin=self.origin)
-        subprocess.run(
-            ["git", "-C", str(self.origin), "symbolic-ref", "HEAD", "refs/heads/main"],
-            check=True,
-        )
-
-        self.home = root / "home"
-        self.home.mkdir()
-        self.env = os.environ.copy()
-        self.env["HOME"] = str(self.home)
-
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def _run(self, *args):
-        return subprocess.run(
-            [str(self.clone / "kanban.sh"), *args],
-            capture_output=True,
-            text=True,
-            env=self.env,
-            check=False,
-        )
-
-    def _push_upstream_version_bump(self, new_version):
-        work = Path(self.temp.name) / "upstream_work"
-        subprocess.run(["git", "clone", "-q", str(self.origin), str(work)], check=True)
-        subprocess.run(["git", "-C", str(work), "checkout", "-q", "main"], check=True)
-        (work / "VERSION").write_text(new_version + "\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(work), "-c", "user.email=test@example.com",
-             "-c", "user.name=test", "commit", "-q", "-am", "bump version"],
-            check=True,
-        )
-        subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "main"], check=True)
-
-    def test_update_refuses_dirty_checkout(self):
-        (self.clone / "VERSION").write_text("9.9.9\n", encoding="utf-8")  # uncommitted local edit
-
-        result = self._run("update")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dirty", result.stdout + result.stderr)
-        # local edit must be untouched -- update never discards user changes
-        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "9.9.9")
-
-    def test_update_allows_and_preserves_untracked_files(self):
-        note = self.clone / "local-note.txt"
-        note.write_text("keep me\n", encoding="utf-8")
-        self._push_upstream_version_bump("9.9.2")
+    def test_update_reinstalls_without_invoking_git(self):
+        marker = self.home / "git-called"
+        fake_bin = self.home / "fake-bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text('#!/bin/sh\n: > "$GIT_MARKER"\nexit 99\n', encoding="utf-8")
+        fake_git.chmod(0o755)
+        self.env["PATH"] = str(fake_bin) + os.pathsep + self.env.get("PATH", "")
+        self.env["GIT_MARKER"] = str(marker)
 
         result = self._run("update")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "9.9.2")
-        self.assertEqual(note.read_text(encoding="utf-8"), "keep me\n")
-
-    def test_update_refuses_detached_head(self):
-        sha = subprocess.run(
-            ["git", "-C", str(self.clone), "rev-parse", "HEAD"],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        subprocess.run(["git", "-C", str(self.clone), "checkout", "-q", sha], check=True)
-
-        result = self._run("update")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("detached", result.stdout + result.stderr)
-
-    def test_update_fast_forwards_and_reinstalls_versioned_skills(self):
-        self._push_upstream_version_bump("9.9.1")
-
-        result = self._run("update")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "9.9.1")
-
+        self.assertFalse(marker.exists(), "update invoked git")
+        self.assertNotIn("git pull", result.stdout.lower())
         skill = self.home / ".claude" / "skills" / "kanban-dispatch" / "SKILL.md"
         content = skill.read_text(encoding="utf-8")
-        self.assertIn("9.9.1", content)
-        self.assertIn(str(self.clone), content)
+        self.assertIn((self.dist / "VERSION").read_text(encoding="utf-8").strip(), content)
+        self.assertIn(str(self.dist), content)
 
         link = self.home / ".local" / "bin" / "kanban"
         self.assertTrue(link.is_symlink())
-        self.assertEqual(os.path.realpath(str(link)), os.path.realpath(str(self.clone / "kanban.sh")))
+        self.assertEqual(os.path.realpath(str(link)), os.path.realpath(str(self.dist / "kanban.sh")))
 
 
 class ArgumentForwardingTests(unittest.TestCase):

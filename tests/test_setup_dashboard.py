@@ -158,39 +158,14 @@ class DashboardModuleTests(unittest.TestCase):
         self.assertIn("削除しない", text)
         self.assertIn(status["repo"], text)
 
-    def test_build_update_preview_describes_pull_and_reinstall_on_clean_main(self):
+    def test_build_update_preview_describes_reinstall_without_git(self):
         status = _fake_status()
-        with mock.patch.object(self.dashboard.setup_core, "git_current_branch", return_value="main"), \
-                mock.patch.object(self.dashboard.setup_core, "git_is_clean", return_value=True):
-            lines = self.dashboard.build_update_preview(status)
+        lines = self.dashboard.build_update_preview(status)
         text = "\n".join(lines)
-        self.assertIn("git pull --ff-only origin main", text)
+        self.assertIn("Git操作: なし", text)
+        self.assertNotIn("git pull", text.lower())
         self.assertIn(status["repo"], text)
         self.assertIn("変更しない", text)
-
-    def test_build_update_preview_warns_on_dirty_checkout(self):
-        status = _fake_status()
-        with mock.patch.object(self.dashboard.setup_core, "git_current_branch", return_value="main"), \
-                mock.patch.object(self.dashboard.setup_core, "git_is_clean", return_value=False):
-            lines = self.dashboard.build_update_preview(status)
-        text = "\n".join(lines)
-        self.assertIn("未コミット", text)
-        self.assertNotIn("git pull --ff-only origin main", text)
-
-    def test_build_update_preview_warns_on_non_main_branch(self):
-        status = _fake_status()
-        with mock.patch.object(self.dashboard.setup_core, "git_current_branch", return_value="feature"):
-            lines = self.dashboard.build_update_preview(status)
-        text = "\n".join(lines)
-        self.assertIn("feature", text)
-        self.assertNotIn("git pull --ff-only origin main", text)
-
-    def test_build_update_preview_warns_on_detached_head(self):
-        status = _fake_status()
-        with mock.patch.object(self.dashboard.setup_core, "git_current_branch", return_value=None):
-            lines = self.dashboard.build_update_preview(status)
-        text = "\n".join(lines)
-        self.assertIn("detached", text)
 
     def test_guide_covers_required_flows(self):
         titles = [t for t, *_ in self.dashboard.GUIDE_FLOWS]
@@ -456,12 +431,9 @@ class InteractiveWizardPtyTests(unittest.TestCase):
         self.assertTrue((self.home / ".local" / "bin" / "kanban").is_symlink())
 
     def test_update_preview_shown_and_declined_makes_no_changes(self):
-        # _copy_dist doesn't set up a real git checkout, so the preview must
-        # surface the detached-HEAD warning instead of an update command --
-        # exercising the same code path a real dirty/non-main checkout would.
         output = self._run_wizard(["s", "N"])
         self.assertIn("これから行う変更 (update)", output)
-        self.assertIn("detached", output)
+        self.assertIn("Git操作: なし", output)
         self.assertIn("中止しました", output)
 
     def test_plain_n_does_nothing(self):
@@ -512,16 +484,14 @@ class NonInteractiveCompatTests(unittest.TestCase):
         self.assertNotIn("どこで・何をすると", result.stdout)
 
     def test_update_subcommand_prints_preview_and_summary_without_confirmation(self):
-        # _copy_dist is not a git checkout, so update is refused, but the
-        # non-interactive path must still show the preview and a summary
-        # (with no [y/N] prompt) rather than staying silent about it.
         result = subprocess.run(
             ["python3", "gui/setup_cli.py", "update"],
             cwd=str(self.dist), input="", capture_output=True, text=True, env=self.env, check=False,
         )
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("これから行う変更 (update)", result.stdout)
         self.assertIn("update 結果", result.stdout)
+        self.assertIn("Git操作: なし", result.stdout)
         self.assertNotIn("[y/N]", result.stdout)
 
     def test_install_subcommand_runs_without_confirmation_prompt(self):

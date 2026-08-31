@@ -2,12 +2,9 @@
 
 setup_gui.py から抽出した UI 非依存のロジック関数群。python3 標準ライブラリのみ使用。
 """
-import importlib
 import json
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -362,73 +359,11 @@ def run_uninstall():
     ] + [uninstall_claude_guard()]
 
 
-# --- update (git pull --ff-only + reinstall) ---------------------------------
-
-def _git(args):
-    return subprocess.run(
-        ["git", "-C", REPO] + args,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def git_current_branch():
-    """Short branch name, or None when HEAD is detached."""
-    r = _git(["symbolic-ref", "--short", "-q", "HEAD"])
-    if r.returncode != 0:
-        return None
-    return r.stdout.strip()
-
-
-def git_is_clean():
-    r = _git(["status", "--porcelain", "--untracked-files=no"])
-    return r.returncode == 0 and r.stdout.strip() == ""
-
-
-def git_pull_ff_only():
-    return _git(["pull", "--ff-only", "origin", "main"])
+# --- update (reinstall from current checkout) --------------------------------
 
 
 def run_update():
-    """Compare versions, git pull --ff-only origin main, reinstall CLI/skills.
-
-    Never discards or stashes tracked user changes: dirty/detached/non-main
-    checkouts are refused outright. Untracked files are left to git pull's
-    overwrite protection. Returns (ok, [messages]).
-    """
+    """Reinstall CLI/skills/guard from this checkout without Git operations."""
     if in_worktree():
         return False, ["refused: kanban worktree 内"]
-
-    branch = git_current_branch()
-    if branch is None:
-        return False, ["update refused: HEAD is detached (checkout main first)"]
-    if branch != "main":
-        return False, ["update refused: current branch is '%s', expected 'main'" % branch]
-    if not git_is_clean():
-        return False, ["update refused: tracked files are dirty (commit or stash your changes first)"]
-
-    messages = []
-    report = version_report()
-    messages.append("current: %s" % report["current"])
-    if report["latest"]:
-        messages.append("latest: %s" % report["latest"])
-        messages.append("state: %s" % report["state"])
-    elif report["error"]:
-        messages.append("latest: unknown (%s)" % report["error"])
-
-    result = git_pull_ff_only()
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        return False, messages + ["git pull --ff-only origin main failed: %s" % detail]
-    messages.append("git pull --ff-only origin main: %s" % (result.stdout.strip() or "already up to date"))
-
-    # Reload the installer so a freshly pulled setup_core.py drives the
-    # reinstall, not the module snapshot that was loaded before the pull.
-    self_module = sys.modules[__name__]
-    reloaded = importlib.reload(self_module)
-    _, cli_msg = reloaded.install_cli()
-    messages.append(cli_msg)
-    messages += reloaded.install_skills(force=True)
-    messages.append(reloaded.install_claude_guard())
-    return True, messages
+    return True, run_setup()
