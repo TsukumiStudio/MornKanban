@@ -156,6 +156,12 @@ All of these are idempotent and only ever touch one file: `~/Library/LaunchAgent
 - All dynamic content is served as JSON and rendered client-side via `textContent` (never `innerHTML`), so card titles/bodies containing HTML-like text cannot inject markup into the page.
 - A project that fails to read (permission error, corrupt file, etc.) shows an inline error on its own card instead of breaking the rest of the page.
 
+### Project-switch UI state
+
+Selecting a project (or an already-selected project again) synchronously clears the previous board's columns, counts, and any open card-detail modal, and shows a loading skeleton for the newly selected project only. Every board fetch, poll, and card-detail fetch is tagged with a per-selection generation number in `monitor/static/state.js`; a response is applied only if it still matches the live selection, so a slow response from a previous project (or a superseded card fetch) can never overwrite what is currently on screen, and a fetch failure surfaces as an error state for the *selected* project instead of falling back to stale data.
+
+To check manually: open the monitor, click into a project, then quickly click a second project before the first board finishes loading — the first project's columns must never flash into view. Repeat with a third click back to the first project (A → B → A) and confirm only the final board is shown. Kill the monitor's network mid-load (or throttle it in DevTools) to confirm the board shows an error/retry state rather than a stale one. Automated coverage lives in `tests/test_monitor_state.js` (`node --test tests/test_monitor_state.js`).
+
 ## Cross-Project Send (file a card into any registered project, from anywhere)
 
 `kanban projects` and `kanban send` let you file a card into any project's `.kanban/todo/` regardless of the current directory or session — from inside project A into project B, from B into A, or from an unrelated directory into either, using a PC-wide alias registry.
