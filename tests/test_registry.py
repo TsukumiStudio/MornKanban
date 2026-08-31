@@ -181,13 +181,21 @@ class RegistryTests(unittest.TestCase):
     def test_send_cli_overrides_win_over_defaults(self):
         self._run("projects", "add", "project-b", str(self.b))
         r = self._run(
-            "send", "project-b", "t", "-b", "claude", "-m", "opus", "-t", "90",
+            "send", "project-b", "t", "-b", "claude", "-m", "opus", "-e", "high", "-t", "90",
             cwd=self.unrelated, input_text="b",
         )
         content = Path(r.stdout.strip()).read_text(encoding="utf-8")
         self.assertIn("backend: claude", content)
         self.assertIn("model: opus", content)
+        self.assertIn("effort: high", content)
         self.assertIn("threshold: 90", content)
+
+    def test_send_rejects_unknown_effort(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        result = self._run("send", "project-b", "t", "-e", "extreme", input_text="b", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid effort", result.stderr)
+        self.assertEqual(self._card_files(self.b), [])
 
     def test_send_diagnose_preserves_read_only_timebox_metadata(self):
         self._run("projects", "add", "project-b", str(self.b))

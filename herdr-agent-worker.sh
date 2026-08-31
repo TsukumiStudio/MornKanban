@@ -17,6 +17,7 @@
 #   KANBAN_CARD_BACKEND / KANBAN_REVIEWER / KANBAN_RESOLVER : card's backend
 #     routing, from kanban.sh (auto|claude|codex); "auto" resolves via
 #     KANBAN_BACKEND_ORDER the same way kanban.sh's resolve_backend() does.
+#   KANBAN_CARD_EFFORT : optional card-level effort shared by all three roles.
 set -euo pipefail
 
 if [[ ${HERDR_ENV:-} != 1 ]]; then
@@ -77,6 +78,7 @@ case $role in
   *) model=${KANBAN_CARD_MODEL:-} ;;
 esac
 if [[ $backend == claude && -z $model ]]; then model=sonnet; fi
+effort=${KANBAN_CARD_EFFORT:-}
 
 tmp=$(mktemp -d)
 pane=""
@@ -152,6 +154,7 @@ if [[ $backend == claude ]]; then
     kind_args+=(--permission-mode "$perms")
   fi
   [[ -n $model ]] && kind_args+=(--model "$model")
+  [[ -n $effort ]] && kind_args+=(--effort "$effort")
   if [[ -n ${KANBAN_ALLOWED_TOOLS:-} ]]; then kind_args+=(--allowedTools "$KANBAN_ALLOWED_TOOLS"); fi
 else # codex
   if [[ ${KANBAN_CODEX_FULL_BYPASS:-true} == true ]]; then
@@ -160,6 +163,7 @@ else # codex
     kind_args+=(-s "${KANBAN_CODEX_SANDBOX:-danger-full-access}" -a "${KANBAN_CODEX_APPROVAL:-never}")
   fi
   [[ -n $model ]] && kind_args+=(-m "$model")
+  [[ -n $effort ]] && kind_args+=(-c "model_reasoning_effort=$effort")
 fi
 
 # infra_error <category> <detail>: the caller (kanban.sh's

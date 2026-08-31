@@ -127,6 +127,13 @@ parse_bool() { # parse_bool <value> <context> -> true|false
   esac
 }
 
+validate_effort() { # validate_effort <value>; empty inherits the agent's shared setting
+  case ${1:-} in
+    ""|low|medium|high|xhigh|max) ;;
+    *) die "invalid effort: '$1' (low|medium|high|xhigh|max)" ;;
+  esac
+}
+
 resolve_card_review() { # resolve_card_review <card> -> CARD_REVIEW_ENABLED/SOURCE, persisted
   local file=$1 value
   value=$(fm_get "$file" review_enabled "auto")
@@ -280,6 +287,7 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 
 - **既定方針: 上位モデル (fable / opus 等) は秘書・設計役だけ。手を動かすワーカーとレビュワー・resolver は下位モデルで十分**
 - 既定: 通常実装は claude / sonnet、軽微な修正は codex / gpt-5.3-codex-spark (codex カードは -m 必須。model 名はバックエンド固有)
+- effort はカード単位で `-e low|medium|high|xhigh|max`。gpt-5.6-solは通常medium、難所highとし、共通設定のxhighを無条件に継承させない
 - 設計・難所のカードだけ例外的に -m opus 等へ上げる (理由をカードに書く)
 - resolver も既定では worker と同じ下位モデル (`resolver` / `resolve_model`)
 
@@ -356,12 +364,13 @@ EOF
 
 cmd_add() {
   require_root
-  local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL threshold=$DEFAULT_THRESHOLD
+  local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL effort="" threshold=$DEFAULT_THRESHOLD
   local review_enabled=auto review_source=auto task_kind=implementation
   while [[ $# -gt 0 ]]; do
     case $1 in
       -b|--backend) backend=$2; shift 2 ;;
       -m|--model) model=$2; shift 2 ;;
+      -e|--effort) effort=$2; shift 2 ;;
       -t|--threshold) threshold=$2; shift 2 ;;
       --review) review_enabled=true; review_source=card; shift ;;
       --no-review) review_enabled=false; review_source=card; shift ;;
@@ -369,11 +378,12 @@ cmd_add() {
       *) title=$1; shift ;;
     esac
   done
-  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-t threshold] [--review|--no-review] [--diagnose] < description"
+  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-e effort] [-t threshold] [--review|--no-review] [--diagnose] < description"
   case $backend in
     auto|claude|codex) ;;
     *) die "unknown backend: $backend (auto|claude|codex)" ;;
   esac
+  validate_effort "$effort"
   [[ $DEFAULT_DIAGNOSIS_TARGET_MINUTES =~ ^[1-9][0-9]*$ ]] || die "diagnosis_target_minutes must be a positive integer"
   [[ $DEFAULT_DIAGNOSIS_MAX_MINUTES =~ ^[1-9][0-9]*$ ]] || die "diagnosis_max_minutes must be a positive integer"
   [[ $DEFAULT_DIAGNOSIS_TARGET_MINUTES -le $DEFAULT_DIAGNOSIS_MAX_MINUTES ]] || die "diagnosis_target_minutes must not exceed diagnosis_max_minutes"
@@ -393,6 +403,7 @@ id: $id
 title: $title
 backend: $backend
 model: $model
+effort: $effort
 threshold: $threshold
 max_attempts: $DEFAULT_MAX_ATTEMPTS
 resolve_max_attempts: $DEFAULT_RESOLVE_MAX_ATTEMPTS
@@ -485,37 +496,37 @@ codex_sandbox_flag() { # codex_sandbox_flag -> echoes the CLI flag(s) for KANBAN
   fi
 }
 
-worker_cmd() { # worker_cmd <backend> <model> (model may be empty = backend default)
+worker_cmd() { # worker_cmd <backend> <model> <effort> (empty values inherit agent defaults)
   if [[ -n ${KANBAN_WORKER_CMD:-} ]]; then echo "$KANBAN_WORKER_CMD"; return; fi
-  local b=$1
+  local b=$1 effort=${3:-}
   if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
   case $b in
-    claude) echo "claude -p${2:+ --model $2} $(claude_perm_flag)" ;;
-    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${2:+ -m $2}" ;;
+    claude) echo "claude -p${2:+ --model $2}${effort:+ --effort $effort} $(claude_perm_flag)" ;;
+    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${2:+ -m $2}${effort:+ -c model_reasoning_effort=$effort}" ;;
     *) die "unknown backend: $b" ;;
   esac
 }
 
-review_cmd() {
+review_cmd() { # review_cmd <card-effort>
   if [[ -n ${KANBAN_REVIEW_CMD:-} ]]; then echo "$KANBAN_REVIEW_CMD"; return; fi
-  local b=${KANBAN_REVIEWER:-auto} m=${KANBAN_REVIEW_MODEL:-}
+  local b=${KANBAN_REVIEWER:-auto} m=${KANBAN_REVIEW_MODEL:-} effort=${1:-}
   if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
   case $b in
-    claude) echo "claude -p${m:+ --model $m} $(claude_perm_flag)" ;;
-    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}" ;;
+    claude) echo "claude -p${m:+ --model $m}${effort:+ --effort $effort} $(claude_perm_flag)" ;;
+    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}${effort:+ -c model_reasoning_effort=$effort}" ;;
     *) die "unknown reviewer backend: $b" ;;
   esac
 }
 
-resolve_cmd() { # resolve_cmd <card-backend> <card-model> -> resolver invocation (editing role, like a worker)
+resolve_cmd() { # resolve_cmd <card-backend> <card-model> <card-effort> -> resolver invocation
   if [[ -n ${KANBAN_RESOLVE_CMD:-} ]]; then echo "$KANBAN_RESOLVE_CMD"; return; fi
-  local b=${KANBAN_RESOLVER:-auto} m=${KANBAN_RESOLVE_MODEL:-}
+  local b=${KANBAN_RESOLVER:-auto} m=${KANBAN_RESOLVE_MODEL:-} effort=${3:-}
   [[ $b == auto ]] && b=$1
   [[ -n $m ]] || m=$2
   if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
   case $b in
-    claude) echo "claude -p${m:+ --model $m} $(claude_perm_flag)" ;;
-    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}" ;;
+    claude) echo "claude -p${m:+ --model $m}${effort:+ --effort $effort} $(claude_perm_flag)" ;;
+    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}${effort:+ -c model_reasoning_effort=$effort}" ;;
     *) die "unknown resolver backend: $b" ;;
   esac
 }
@@ -643,13 +654,15 @@ EOF
 
 invoke_reviewer() { # invoke_reviewer <card> <workdir> <prompt> <attempt-label> -> sets ATT_SCORE/ATT_FEEDBACK/ATT_REVIEW_INFRA_ERROR
   local file=$1 workdir=$2 prompt=$3 attempt_label=${4:-0}
-  local id title rcmd review_out parsed t0
+  local id title effort rcmd review_out parsed t0
   ATT_REVIEW_SECS=${ATT_REVIEW_SECS:-0}
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "")
-  rcmd=$(review_cmd)
+  effort=$(fm_get "$file" effort "")
+  validate_effort "$effort"
+  rcmd=$(review_cmd "$effort")
   t0=$SECONDS
-  review_out=$( (cd "$workdir" && KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<<"$prompt") ) || true
+  review_out=$( (cd "$workdir" && KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label KANBAN_CARD_TITLE=$title KANBAN_CARD_EFFORT=$effort $rcmd 2>&1 <<<"$prompt") ) || true
   ATT_REVIEW_SECS=$((ATT_REVIEW_SECS + SECONDS - t0))
   echo "$review_out" | tail -n 40 | append_history "$file" "reviewer output (tail)"
   parsed=$(echo "$review_out" | parse_score)
@@ -695,7 +708,7 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   # retried here too, bounded and without consuming a worker attempt --
   # same principle as the reviewer side, applied symmetrically.
   local file=$1 workdir=$2 infra_max=${3:-$DEFAULT_REVIEW_INFRA_MAX_RETRIES}
-  local id backend model wcmd out title infra_cat retries t0 attempt_label task_kind timebox_secs
+  local id backend model effort wcmd out title infra_cat retries t0 attempt_label task_kind timebox_secs
   ATT_BLOCKED_REASON=""
   ATT_WORKER_STATUS=0
   ATT_WORKER_SECS=0
@@ -703,8 +716,10 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   id=$(fm_get "$file" id "?")
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
+  effort=$(fm_get "$file" effort "")
+  validate_effort "$effort"
   title=$(fm_get "$file" title "")
-  wcmd=$(worker_cmd "$backend" "$model")
+  wcmd=$(worker_cmd "$backend" "$model" "$effort")
   retries=$(fm_get "$file" worker_infra_retries 0)
   attempt_label=$(($(fm_get "$file" attempts 0) + 1))
   task_kind=$(fm_get "$file" task_kind implementation)
@@ -721,7 +736,7 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
       KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \
       KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} \
       KANBAN_CARD_KIND=$task_kind KANBAN_CARD_TIMEBOX_SECS=$timebox_secs \
-      KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || ATT_WORKER_STATUS=$?
+      KANBAN_CARD_MODEL=$model KANBAN_CARD_EFFORT=$effort KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || ATT_WORKER_STATUS=$?
     ATT_WORKER_SECS=$((ATT_WORKER_SECS + SECONDS - t0))
     echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
     infra_cat=$(echo "$out" | classify_worker_infra_error)
@@ -812,14 +827,16 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   # review_with_infra_retry -- so an infra failure there never re-runs the
   # resolver.
   local file=$1 workdir=$2 conflict_files=$3 base_branch=$4 card_branch=$5
-  local id backend model wcmd out title prompt t0 attempt_label
+  local id backend model effort wcmd out title prompt t0 attempt_label
   ATT_RESOLVE_SECS=0
   ATT_REVIEW_SECS=0
   id=$(fm_get "$file" id "?")
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
+  effort=$(fm_get "$file" effort "")
+  validate_effort "$effort"
   title=$(fm_get "$file" title "")
-  wcmd=$(resolve_cmd "$backend" "$model")
+  wcmd=$(resolve_cmd "$backend" "$model" "$effort")
   attempt_label="resolve-$(($(fm_get "$file" resolve_attempts 0) + 1))"
   prompt=$(printf 'You are the conflict-resolution role for MornKanban. Card branch %s passed review but conflicts with the current base branch %s. Resolve the conflict in this worktree, preserving the intent of BOTH sides -- never simply discard one side. Run any tests the task requires, then leave the tree conflict-free.\n\nConflicted files:\n%s\n\nOriginal task:\n%s\n' \
     "$card_branch" "$base_branch" "$conflict_files" "$(card_body "$file")")
@@ -827,7 +844,7 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   out=$( (cd "$workdir" && printf '%s' "$prompt" |
     KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \
     KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} \
-    KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title \
+    KANBAN_CARD_MODEL=$model KANBAN_CARD_EFFORT=$effort KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title \
     KANBAN_CONFLICT_FILES=$conflict_files KANBAN_BASE_BRANCH=$base_branch KANBAN_CARD_BRANCH=$card_branch \
     $wcmd 2>&1) ) || true
   ATT_RESOLVE_SECS=$((SECONDS - t0))

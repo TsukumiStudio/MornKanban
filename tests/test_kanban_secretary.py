@@ -813,6 +813,48 @@ class ArgumentForwardingTests(unittest.TestCase):
         self.assertIn("bogus-command", result.stdout + result.stderr)
 
 
+class CardEffortTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name) / "project"
+        self.project.mkdir()
+        subprocess.run([str(KANBAN_SH), "init"], cwd=self.project, check=True, capture_output=True, text=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _run(self, *args, env=None, input_text="task"):
+        return subprocess.run(
+            [str(KANBAN_SH), *args], cwd=self.project, env=env,
+            input=input_text, text=True, capture_output=True, check=False,
+        )
+
+    def test_card_effort_reaches_worker_and_reviewer(self):
+        effort_log = Path(self.temp.name) / "effort.log"
+        worker = Path(self.temp.name) / "worker.sh"
+        reviewer = Path(self.temp.name) / "reviewer.sh"
+        worker.write_text('#!/usr/bin/env bash\nprintf "worker=%s\\n" "$KANBAN_CARD_EFFORT" >> "$EFFORT_LOG"\n', encoding="utf-8")
+        reviewer.write_text('#!/usr/bin/env bash\ncat >/dev/null\nprintf "reviewer=%s\\n" "$KANBAN_CARD_EFFORT" >> "$EFFORT_LOG"\nprintf \'{"score":95,"feedback":"ok"}\\n\'\n', encoding="utf-8")
+        worker.chmod(0o755)
+        reviewer.chmod(0o755)
+
+        added = self._run("add", "effort card", "-b", "codex", "-m", "gpt-5.6-sol", "-e", "high")
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertIn("effort: high", Path(added.stdout.strip()).read_text(encoding="utf-8"))
+
+        env = {**os.environ, "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_CMD": str(reviewer),
+               "KANBAN_JOBS": "1", "EFFORT_LOG": str(effort_log)}
+        result = self._run("run", "--once", env=env, input_text=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(effort_log.read_text(encoding="utf-8").splitlines(), ["worker=high", "reviewer=high"])
+
+    def test_add_rejects_unknown_effort(self):
+        result = self._run("add", "bad effort", "-e", "extreme")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid effort", result.stderr)
+        self.assertEqual(list((self.project / ".kanban" / "todo").glob("*.md")), [])
+
+
 class HerdrAgentWorkerBackendTests(unittest.TestCase):
     """herdr-agent-worker.sh must pick --kind claude|codex from the card's own
     routing (KANBAN_CARD_BACKEND / KANBAN_REVIEWER), never a hardcoded
@@ -851,7 +893,7 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         )
         # KANBAN_HERDR_ROLE etc. must come only from each test's overrides.
         for stray in ("KANBAN_HERDR_ROLE", "KANBAN_CARD_BACKEND", "KANBAN_REVIEWER",
-                      "KANBAN_CARD_MODEL", "KANBAN_REVIEW_MODEL", "KANBAN_BACKEND_ORDER",
+                      "KANBAN_CARD_MODEL", "KANBAN_CARD_EFFORT", "KANBAN_REVIEW_MODEL", "KANBAN_BACKEND_ORDER",
                       "KANBAN_CODEX_SANDBOX", "KANBAN_ALLOWED_TOOLS",
                       "KANBAN_RESOLVER", "KANBAN_RESOLVE_MODEL"):
             self.base_env.pop(stray, None)
@@ -965,6 +1007,20 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         self.assertNotIn("read-only", start)
         self.assertNotIn("workspace-write", start)
 
+    def test_card_effort_reaches_all_codex_roles(self):
+        self._write_fake_cli("codex")
+        routes = (
+            {"KANBAN_CARD_BACKEND": "codex"},
+            {"KANBAN_HERDR_ROLE": "reviewer", "KANBAN_REVIEWER": "codex"},
+            {"KANBAN_HERDR_ROLE": "resolver", "KANBAN_RESOLVER": "codex"},
+        )
+        for route in routes:
+            with self.subTest(role=route.get("KANBAN_HERDR_ROLE", "worker")):
+                self.log.unlink(missing_ok=True)
+                result = self._run_worker({**route, "KANBAN_CARD_EFFORT": "high"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("-c model_reasoning_effort=high", self._start_call())
+
     def test_codex_worker_without_model_omits_dash_m_and_sonnet(self):
         self._write_fake_cli("codex")
         result = self._run_worker({"KANBAN_CARD_BACKEND": "codex"})
@@ -1067,12 +1123,14 @@ class DispatcherWorkflowTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def _add_card(self, title, body="task body", backend=None, model=None):
+    def _add_card(self, title, body="task body", backend=None, model=None, effort=None):
         args = ["add", title]
         if backend:
             args += ["-b", backend]
         if model:
             args += ["-m", model]
+        if effort:
+            args += ["-e", effort]
         r = subprocess.run(
             [str(KANBAN_SH), *args],
             input=body, cwd=self.project, env=self.env, check=True, capture_output=True, text=True,
@@ -1348,6 +1406,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 {{
                   echo "backend=$KANBAN_CARD_BACKEND"
                   echo "model=$KANBAN_CARD_MODEL"
+                  echo "effort=$KANBAN_CARD_EFFORT"
                   echo "conflict=$KANBAN_CONFLICT_FILES"
                   echo "base=$KANBAN_BASE_BRANCH"
                   echo "card=$KANBAN_CARD_BRANCH"
@@ -1356,7 +1415,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 """
             ),
         )
-        card = self._add_card("routed card", backend="claude", model="opus")
+        card = self._add_card("routed card", backend="claude", model="opus", effort="high")
         card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
 
         result = self._run(
@@ -1374,6 +1433,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         dumped = dump_file.read_text(encoding="utf-8")
         self.assertIn("backend=claude", dumped)
         self.assertIn("model=opus", dumped)
+        self.assertIn("effort=high", dumped)
         self.assertIn("conflict=file.txt", dumped)
         self.assertIn("base=main", dumped)
         self.assertIn(f"card=kanban/{card_id}", dumped)

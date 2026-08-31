@@ -8,7 +8,7 @@ Invoked by kanban.sh as:
   python3 registry/cli.py projects show <alias>
   python3 registry/cli.py projects update <alias> <path>
   python3 registry/cli.py projects remove <alias>
-  python3 registry/cli.py send <alias> <title> [-b ...] [-m ...] [-t ...] [--from PATH]
+  python3 registry/cli.py send <alias> <title> [-b ...] [-m ...] [-e ...] [-t ...] [--from PATH]
   python3 registry/cli.py secretary resolve <project-root>
 
 python3 standard library only (no pip dependencies), matching the rest of
@@ -32,6 +32,7 @@ if PARENT not in sys.path:
 from registry import secretary, store  # noqa: E402
 
 BACKENDS = ("auto", "claude", "codex")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULTS = {
     "default_backend": "auto",
     "default_model": "",
@@ -168,7 +169,7 @@ def _resolve_source(explicit_from):
     return source_alias, source_path
 
 
-def _write_card_atomic(todo_dir, title, body, backend, model, threshold, max_attempts,
+def _write_card_atomic(todo_dir, title, body, backend, model, effort, threshold, max_attempts,
                         source_alias, source_path, diagnose=False,
                         diagnosis_target_minutes="5", diagnosis_max_minutes="10"):
     slug = _slugify(title)
@@ -185,6 +186,7 @@ def _write_card_atomic(todo_dir, title, body, backend, model, threshold, max_att
             "title: %s\n"
             "backend: %s\n"
             "model: %s\n"
+            "effort: %s\n"
             "threshold: %s\n"
             "max_attempts: %s\n"
             "review_enabled: %s\n"
@@ -200,7 +202,7 @@ def _write_card_atomic(todo_dir, title, body, backend, model, threshold, max_att
             "---\n\n"
             "## Task\n\n%s\n\n## History\n"
         ) % (
-            card_id, title, backend, model, threshold, max_attempts,
+            card_id, title, backend, model, effort, threshold, max_attempts,
             "false" if diagnose else "auto", "diagnose" if diagnose else "auto",
             "diagnose" if diagnose else "implementation",
             diagnosis_target_minutes, diagnosis_max_minutes, created,
@@ -244,6 +246,10 @@ def cmd_send(args):
         print("kanban send: unknown backend: %s (auto|claude|codex)" % backend, file=sys.stderr)
         return 1
     model = args.model if args.model is not None else defaults["default_model"]
+    effort = args.effort or ""
+    if effort and effort not in EFFORTS:
+        print("kanban send: invalid effort: %s (%s)" % (effort, "|".join(EFFORTS)), file=sys.stderr)
+        return 1
     threshold = args.threshold if args.threshold is not None else defaults["threshold"]
     max_attempts = defaults["max_attempts"]
 
@@ -256,7 +262,7 @@ def cmd_send(args):
 
     try:
         dest = _write_card_atomic(
-            todo_dir, args.title, body, backend, model, threshold, max_attempts,
+            todo_dir, args.title, body, backend, model, effort, threshold, max_attempts,
             source_alias, source_path, diagnose=args.diagnose,
             diagnosis_target_minutes=defaults["diagnosis_target_minutes"],
             diagnosis_max_minutes=defaults["diagnosis_max_minutes"],
@@ -324,6 +330,7 @@ def build_parser():
     send_p.add_argument("title")
     send_p.add_argument("-b", "--backend", default=None)
     send_p.add_argument("-m", "--model", default=None)
+    send_p.add_argument("-e", "--effort", default=None)
     send_p.add_argument("-t", "--threshold", default=None)
     send_p.add_argument("--diagnose", action="store_true",
                         help="file a read-only 5/10-minute diagnosis card")

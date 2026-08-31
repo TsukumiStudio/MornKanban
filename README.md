@@ -72,7 +72,7 @@ $kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/a
 `KANBAN.md` is the project's kanban contract, in two layers:
 
 - **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `resolver`, `resolve_model`, `threshold`, `max_attempts`, `resolve_max_attempts`, `review_infra_max_retries`, `review_infra_backoff_seconds`, `jobs`, `claude_perms`, `codex_sandbox`, `codex_full_bypass`, `codex_approval`, `secretary_agent`. Precedence: environment variable > `KANBAN.md` > built-in default. The `claude_perms`/`codex_*` keys default to an **unrestricted** worker/reviewer/resolver permission policy — see **UNRESTRICTED permission policy**.
-- **Body** (secretary policy): how to split cards, which backend/model to route each kind of task to, whether to auto-start the dispatcher, escalation rules. The dialogue agent must read and follow it before cutting cards.
+- **Body** (secretary policy): how to split cards, which backend/model/effort to route each kind of task to, whether to auto-start the dispatcher, escalation rules. The dialogue agent must read and follow it before cutting cards.
 
 `secretary_agent` overrides the per-project Herdr secretary name (see **Secretary Bootstrap** below); it is read only by `kanban-secretary.sh`, not by `kanban run` itself.
 
@@ -81,7 +81,7 @@ $kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/a
 When the user assigns implementation work in a project that has `.kanban/`:
 
 1. Read `.kanban/KANBAN.md` and follow its policy; it overrides the generic steps below where they differ.
-2. Write a self-contained card: `echo "<full task description>" | kanban add "<title>" [-b claude|codex] [-m model] [-t threshold] [--review|--no-review] [--diagnose]`. The worker has no conversation context; include target paths, constraints, and completion conditions. Leave `--review`/`--no-review` off to inherit the project's `review_enabled` policy (see **Review on/off**); pass it only to deliberately override that policy for one card. Use `--diagnose` for a read-only investigation: it targets 5 minutes, stops at 10 minutes, skips reviewer by default, and must produce evidence/cause/uncertainty rather than a fix. File implementation separately unless the user explicitly requested diagnosis and repair together.
+2. Write a self-contained card: `echo "<full task description>" | kanban add "<title>" [-b claude|codex] [-m model] [-e low|medium|high|xhigh|max] [-t threshold] [--review|--no-review] [--diagnose]`. The worker has no conversation context; include target paths, constraints, and completion conditions. Leave `--review`/`--no-review` off to inherit the project's `review_enabled` policy (see **Review on/off**); pass it only to deliberately override that policy for one card. Use `--diagnose` for a read-only investigation: it targets 5 minutes, stops at 10 minutes, skips reviewer by default, and must produce evidence/cause/uncertainty rather than a fix. File implementation separately unless the user explicitly requested diagnosis and repair together.
 3. Start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, resolver, and notification commands. Never substitute bare `kanban run`, which starts invisible headless workers. A nonstandard checkout uses its own absolute helper path.
 4. Return to the user immediately. Do not implement the task in the dialogue session.
 5. Report `failed/` cards to the user; they need human judgment.
@@ -92,6 +92,7 @@ When the user assigns implementation work in a project that has `.kanban/`:
 **Never hold a card back over file overlap, dependency order, or a collision with a card already in flight.** Those are execution-time concerns, resolved by the dispatcher/worker/reviewer/resolver via the formal state transitions below (`resolving`, `blocked`) — never by the secretary. Investigating conflicts, rebasing/merging, fixing, or re-verifying are not secretary actions either; write the card and dispatch it as soon as its own task description is self-contained. `resolving` and `blocked` cards are handled automatically and never need secretary attention; only `failed/` needs a human.
 
 Leave `model` empty to use the backend's own default. Model names are backend-specific — never pass a Claude model name to a codex card.
+Leave `effort` empty to inherit the agent's shared setting. `-e` stores a card-level override used by that card's worker, reviewer, and resolver. For `gpt-5.6-sol`, use `medium` for normal work and `high` for complex implementation unless the card has an exceptional reason to go higher.
 
 ## Secretary Guard (technical enforcement, not just instructions)
 
@@ -164,18 +165,18 @@ recovery is delegated work too.
 
 | Backend | Worker command | Reviewer command |
 | --- | --- | --- |
-| `claude` | `claude -p [--model M] <claude perm flag>` | `claude -p [--model M] <claude perm flag>` |
-| `codex` | `codex exec --skip-git-repo-check <codex perm flag> [-m M]` | `codex exec --skip-git-repo-check <codex perm flag> [-m M]` |
+| `claude` | `claude -p [--model M] [--effort E] <claude perm flag>` | `claude -p [--model M] [--effort E] <claude perm flag>` |
+| `codex` | `codex exec --skip-git-repo-check <codex perm flag> [-m M] [-c model_reasoning_effort=E]` | `codex exec --skip-git-repo-check <codex perm flag> [-m M] [-c model_reasoning_effort=E]` |
 
 Worker and reviewer use the **same** permission policy — nothing forces the reviewer to a safer mode. `<claude perm flag>` is `--dangerously-skip-permissions` when `claude_perms` (default `bypassPermissions`) is `bypassPermissions`, else `--permission-mode <claude_perms>`. `<codex perm flag>` is `--dangerously-bypass-approvals-and-sandbox` when `codex_full_bypass` (default `true`) is `true`, else `-s <codex_sandbox> -a <codex_approval>`. See **UNRESTRICTED permission policy** below for the risk and how to dial it back.
 
 `auto` (default for both worker and reviewer) resolves to the first installed CLI in `backend_order` (built-in default `claude codex`), so machines with only one CLI keep working unchanged. Codex does not run tests by default; state the test command in the card.
 
-Custom worker commands (`KANBAN_WORKER_CMD`) receive the card's routing as `KANBAN_CARD_MODEL` / `KANBAN_CARD_BACKEND` environment variables, since the override bypasses the built-in model handling.
+Custom worker commands (`KANBAN_WORKER_CMD`) receive the card's routing as `KANBAN_CARD_MODEL` / `KANBAN_CARD_EFFORT` / `KANBAN_CARD_BACKEND` environment variables, since the override bypasses the built-in routing handling.
 
 ## Model Policy (default)
 
-Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and design roles**. Hands-on workers and reviewers default to a lower tier — claude cards to `sonnet`, light codex cards to `gpt-5.3-codex-spark` — regardless of backend. Raise a specific card with `-m` only for design-heavy or hard cards, and note why in the card. Projects customize this in `.kanban/KANBAN.md` (`default_model`, `review_model`), but new projects start from this default.
+Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and design roles**. Hands-on workers and reviewers default to a lower tier — claude cards to `sonnet`, light codex cards to `gpt-5.3-codex-spark` — regardless of backend. Raise a specific card with `-m` only for design-heavy or hard cards, and note why in the card. For `gpt-5.6-sol`, use `-e medium` for normal work and `-e high` for complex implementation instead of inheriting an unnecessarily high shared setting. Projects customize models in `.kanban/KANBAN.md` (`default_model`, `review_model`), but effort remains a per-card choice.
 
 ## Herdr Integration (no headless workers)
 
@@ -189,7 +190,7 @@ The helper verifies that it is called from the current Herdr pane, keeps focus o
 
 The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, which `dispatch` always sets to that project's resolved secretary name — see **Secretary agent naming** above; a standalone invocation with no `KANBAN_HERDR_SECRETARY` resolves the same name itself from its own project root) to inspect and report, so `failed/` cards reach the user through the correct project's secretary instead of dying silently or reaching a different project's agent.
 
-The wrapper splits a pane below the dispatcher and starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, resolver backend from `KANBAN_RESOLVER`, and `auto` resolved via `KANBAN_BACKEND_ORDER`. Worker, reviewer, and resolver panes get the **same** full-trust permission policy (see **UNRESTRICTED permission policy** below): Claude gets `--dangerously-skip-permissions` (or `--permission-mode <claude_perms>` when overridden away from `bypassPermissions`), while Codex gets `--dangerously-bypass-approvals-and-sandbox` (or `-s <codex_sandbox> -a <codex_approval>` when `codex_full_bypass` is `false`). Model selection remains role-specific and Codex never inherits the Claude default of `sonnet`. The pane title and wrapper diagnostic identify the role and `UNRESTRICTED` policy. It accepts the folder-trust dialog for the card worktree, sends the worker/reviewer/resolver prompt, and waits for a stable `.kanban-answer.md`; terminal chrome is never substituted for a missing answer. Panes are closed when the attempt ends.
+The wrapper splits a pane below the dispatcher and starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, resolver backend from `KANBAN_RESOLVER`, and `auto` resolved via `KANBAN_BACKEND_ORDER`. Worker, reviewer, and resolver panes get the **same** full-trust permission policy (see **UNRESTRICTED permission policy** below): Claude gets `--dangerously-skip-permissions` (or `--permission-mode <claude_perms>` when overridden away from `bypassPermissions`), while Codex gets `--dangerously-bypass-approvals-and-sandbox` (or `-s <codex_sandbox> -a <codex_approval>` when `codex_full_bypass` is `false`). Model selection remains role-specific and Codex never inherits the Claude default of `sonnet`; the card's `effort` applies uniformly to its worker, reviewer, and resolver. The pane title and wrapper diagnostic identify the role and `UNRESTRICTED` policy. It accepts the folder-trust dialog for the card worktree, sends the worker/reviewer/resolver prompt, and waits for a stable `.kanban-answer.md`; terminal chrome is never substituted for a missing answer. Panes are closed when the attempt ends.
 
 ### UNRESTRICTED permission policy
 
@@ -231,7 +232,7 @@ A card that passed review can still conflict with `main` at merge time if anothe
 
 1. The card moves `doing`/passed review → `resolving`; the original card branch (`kanban/<id>`) is kept, never discarded.
 2. A fresh worktree/branch (`.kanban/wt/<id>-resolve` / `kanban-resolve/<id>`) is created from the current `main`, and the card branch is merged into it, reproducing the conflict.
-3. The resolver backend (`KANBAN_RESOLVE_CMD`, or the card's own backend/model by default) is given the conflicted file list, both branch names, and the original task, and is instructed to **preserve both sides' intent — never discard one side outright** — and to run whatever tests the task requires.
+3. The resolver backend (`KANBAN_RESOLVE_CMD`, or the card's own backend/model/effort by default) is given the conflicted file list, both branch names, and the original task, and is instructed to **preserve both sides' intent — never discard one side outright** — and to run whatever tests the task requires.
 4. Once conflict markers are gone, the same review agent inspects the resolve worktree and scores it exactly like a normal attempt.
 5. `score >= threshold` → only the **resolve branch** is merged into `main` (the original card branch is deleted without ever being merged itself, so nothing merges twice); both worktrees are removed, card → `done`.
 6. Below threshold → feedback is appended and the resolver retries in the same resolve worktree; after `resolve_max_attempts` (default 2, `KANBAN.md`/card frontmatter `resolve_max_attempts`) the card moves to `failed`. Its History records the conflicted files, every resolve attempt's score/feedback, and the two branches (`kanban-resolve/<id>`, `kanban/<id>`) kept for manual inspection.
@@ -368,11 +369,11 @@ kanban projects remove <alias>          # unregister (send/monitor stop recogniz
 ### Sending a card
 
 ```sh
-kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-t threshold] [--from PATH] < description
+kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-e effort] [-t threshold] [--from PATH] < description
 ```
 
 - The card is always created in the **destination** project's `.kanban/todo/` — never in the directory `kanban send` was run from. Body comes from stdin (same as `kanban add`); with no stdin it falls back to the title.
-- Unset `-b`/`-m`/`-t` default from the destination's own `.kanban/KANBAN.md` (`default_backend`/`default_model`/`threshold`), exactly like a card added locally with `kanban add` there — the sending project's policy is never consulted.
+- Unset `-b`/`-m`/`-t` default from the destination's own `.kanban/KANBAN.md` (`default_backend`/`default_model`/`threshold`), exactly like a card added locally with `kanban add` there; unset `-e` inherits the agent's shared effort setting. The sending project's policy is never consulted.
 - The card's frontmatter records `source_alias` (set only when the current directory — or `--from PATH` — is itself inside a registered project), `source_path` (always, the realpath of where the send was issued from), and `dispatched_via: send`, so a worker or reviewer can see where a card came from without leaking any secret/env-var values.
 - Card IDs are allocated with a random suffix and written via a temp-file-then-hardlink swap inside the destination's `todo/`, so concurrent `kanban send` calls from multiple sessions into the same project never collide on an id or leave a partially-written card visible to the dispatcher.
 - `kanban send` never starts or touches a dispatcher. If the destination's `.kanban/.lock` shows no live process, it prints (to stderr, after the created card's path on stdout) that the card is filed but nothing will run it until `kanban run` or the visible Herdr dispatcher is started there — it does not silently fall back to a headless worker.

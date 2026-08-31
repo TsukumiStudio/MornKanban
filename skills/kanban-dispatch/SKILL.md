@@ -63,8 +63,11 @@ While secretary mode is active:
    the same request. Never inflate a diagnosis with related benchmarks, UI,
    refactors, mutation tests, or exhaustive adjacent improvements; one card
    has one main result and one main responsibility.
-3. Add the cards with `kanban add` and the policy-selected backend/model
-   **as soon as each card's own description is self-contained.** Never hold a
+3. Add the cards with `kanban add` and the policy-selected backend/model.
+   Set card effort with `-e`: for `gpt-5.6-sol`, use `medium` for normal work
+   and `high` for complex work unless project policy gives a different reason;
+   do not let every worker/reviewer/resolver inherit a shared `xhigh` by default.
+   Add each card **as soon as its own description is self-contained.** Never hold a
    card back over file overlap, dependency order, or a collision with a card
    already in flight — those are execution-time concerns that the
    dispatcher/worker/reviewer/resolver resolve on their own through the
