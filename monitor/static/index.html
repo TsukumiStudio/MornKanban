@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MornKanban Monitor</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>MornKanban Monitor</h1>
+  <div class="topbar-status">
+    <span id="updated-at">読み込み中...</span>
+    <button id="refresh-btn" type="button">更新</button>
+  </div>
+</header>
+
+<p class="readonly-note">閲覧専用です。このページからカードの追加・状態変更・プロセス操作はできません。</p>
+
+<main>
+  <section id="projects-section">
+    <h2>プロジェクト</h2>
+    <div id="projects-list" class="projects-list"></div>
+  </section>
+
+  <section id="board-section" hidden>
+    <button id="back-btn" type="button">← プロジェクト一覧に戻る</button>
+    <h2 id="board-title"></h2>
+    <div id="board-columns" class="board-columns"></div>
+  </section>
+
+  <section id="activity-section">
+    <h2>最近の活動</h2>
+    <ul id="activity-list" class="activity-list"></ul>
+  </section>
+</main>
+
+<div id="card-modal" class="modal" hidden>
+  <div class="modal-content">
+    <button id="card-modal-close" type="button" class="modal-close">×</button>
+    <h3 id="card-modal-title"></h3>
+    <table id="card-modal-meta" class="card-meta"></table>
+    <pre id="card-modal-body" class="card-body"></pre>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

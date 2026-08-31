@@ -23,8 +23,8 @@
 
 ```sh
 bash -n kanban.sh kanban-setup.sh kanban-secretary.sh herdr-agent-worker.sh herdr-notify-secretary.sh
-python3 -m py_compile gui/setup_core.py gui/setup_cli.py tests/test_kanban_secretary.py
-python3 -m unittest -v tests/test_kanban_secretary.py
+python3 -m py_compile gui/setup_core.py gui/setup_cli.py monitor/*.py tests/test_kanban_secretary.py tests/test_monitor.py
+python3 -m unittest -v tests/test_kanban_secretary.py tests/test_monitor.py
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/kanban-dispatch
 ```
 
