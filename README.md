@@ -10,10 +10,10 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 
 ## GUI
 
-- Clone the repo and run `./kanban-gui.sh` — it opens the best available setup frontend: a small tkinter window, native macOS dialogs (osascript) when tkinter is missing, or an interactive CLI wizard anywhere else.
-- Zero extra installs — just `python3` plus whatever the OS already ships.
-- Buttons/menu: install the `kanban` CLI (symlink into `~/.local/bin`), install the Claude Code skill (`~/.claude/skills/kanban-dispatch`), register projects and run `kanban init` on them.
-- Day-to-day operation is **not** in the GUI: open a Herdr pane in the project and tell Claude 「**kanban の秘書として待機して**」 (see Secretary Bootstrap below).
+- `./kanban-gui.sh` opens **one setup screen** — a tkinter window, a native macOS dialog (osascript) when tkinter is missing, or a CLI prompt anywhere else — for environment setup only.
+- One "run setup" action installs the `kanban` CLI symlink (`~/.local/bin`) and the Claude Code skill (`~/.claude/skills/kanban-dispatch`); it's idempotent.
+- Project onboarding is **not** in the GUI: open a Herdr pane in the project and tell Claude 「**kanban の秘書として待機して**」 — the secretary runs `kanban init` and everything else (see Secretary Bootstrap below).
+- Requirements: bash + python3 (the same as `kanban.sh` itself).
 
 ## Secretary Bootstrap (one-liner)
 
