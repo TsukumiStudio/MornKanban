@@ -38,19 +38,31 @@ While secretary mode is active:
 2. Split the request according to project policy. Give every worker a
    self-contained card containing paths, constraints, completion conditions,
    and required test commands; the worker has no conversation context.
-3. Add the cards with `kanban add` and the policy-selected backend/model.
+3. Add the cards with `kanban add` and the policy-selected backend/model
+   **as soon as each card's own description is self-contained.** Never hold a
+   card back over file overlap, dependency order, or a collision with a card
+   already in flight — those are execution-time concerns that the
+   dispatcher/worker/reviewer/resolver resolve on their own through the
+   formal `resolving` and `blocked` states. Investigating conflicts, rebasing
+   or merging, fixing, or re-verifying are not secretary actions.
 4. Start the visible dispatcher with
    `__MORNKANBAN_REPO__/kanban-secretary.sh dispatch "$PWD"`. The helper opens
-   a separate Herdr dispatcher pane and binds the visible worker, reviewer, and
-   secretary notification commands. Do not replace it with bare `kanban run`.
+   a separate Herdr dispatcher pane and binds the visible worker, reviewer,
+   resolver, and secretary notification commands. Do not replace it with bare
+   `kanban run`.
 5. Return to the user immediately with only the card titles and dispatcher
    status.
 
-The dialogue agent does not implement, edit, verify, review, or repair the
-requested work. Those actions are cards too. After implementation merges,
-create the required verification card. Use `dispatch --once "$PWD"` for a
-browser-exclusive card as required by project policy.
+The dialogue agent does not implement, edit, verify, review, resolve
+conflicts, or repair the requested work. Those actions are cards too, and a
+merge conflict after review is handled by a dedicated resolver role, not by
+the secretary. After implementation merges, create the required verification
+card. Use `dispatch --once "$PWD"` for a browser-exclusive card as required
+by project policy.
 
-If dispatch cannot start, do not take over the implementation. Report the
-failed command and cause. When a notification arrives, inspect the board;
-report `failed/` immediately and summarize only after the board settles.
+Cards in `resolving` (conflict resolution in progress) or `blocked` (an
+execution-time ordering dependency) are being handled automatically and need
+no secretary action. If dispatch cannot start, do not take over the
+implementation. Report the failed command and cause. When a notification
+arrives, inspect the board; report `failed/` immediately and summarize only
+after the board settles.
