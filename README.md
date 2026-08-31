@@ -376,7 +376,7 @@ kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-t threshold] [--
 
 ## Testing MornKanban Itself
 
-This repo's own suite has two tiers — see `gui/VERIFY.md` "テストの段階 (fast / full)" for the exact commands and what each excludes. **fast** (`KANBAN_TEST_TIER=fast`) skips the 6 tests that drive a real `kanban.sh run --once` through actual git worktrees/merges (~2s each) and is for a worker's normal iteration/rework loop. **full** (the default, no env var) runs everything and is the required gate immediately before a release or explicit full verification; fast passing is not evidence against a git-worktree/merge/resolver regression. For a deliberately fast card, use `--no-review` or a project-level `review_enabled: false`; this skips only the reviewer, not the card's own requested checks.
+This repo's suite has three bounded tiers — see `gui/VERIFY.md`. Use `python3 tests/run.py targeted <unittest-name>` while iterating, `python3 tests/run.py fast` at a checkpoint, and `python3 tests/run.py full` exactly once before integration. Every step has a hard timeout and kills its whole subprocess group on expiry, so a failed test cannot leave a dispatcher/worker behind. Full discovers every Python test and additionally runs the visible-worker lifecycle, frontend, and skill validation; targeted/fast are not substitutes for that final gate. For a deliberately fast card, use `--no-review` or project-level `review_enabled: false`; this skips only the reviewer, not the card's requested checks.
 
 ## Constraints
 
