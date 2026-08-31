@@ -82,7 +82,7 @@ def status_summary():
         lines.append("%s スキル: %s" % (name, "導入済み" if installed else "未導入"))
     guard = guard_status()
     lines.append(
-        "秘書ガード (直接実装/検証/Git変更/外部公開の拒否): claude=%s, codex=%s"
+        "秘書ガード (直接実装/検証/Git変更/外部公開/in-process delegation の拒否): claude=%s, codex=%s"
         % (guard["claude"], guard["codex"])
     )
     lines.append("導入後はプロジェクトのペインで『$kanban-dispatch 秘書として開始』")

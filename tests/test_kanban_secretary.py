@@ -2,6 +2,7 @@
 import importlib
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,7 @@ KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
 # Distribution files copied to build a standalone repo outside this worktree
 # (setup_core.install_cli/install_skills/run_update all refuse to run from a
 # .kanban/wt/<id> worktree by design).
-DIST_FILES = ["kanban.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
+DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
 
 
 def _copy_dist(dest):
@@ -258,6 +259,8 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("KANBAN_WORKER_CMD=", log)
         self.assertIn("herdr-agent-worker.sh", log)
         self.assertIn("KANBAN_REVIEW_CMD=", log)
+        self.assertIn("KANBAN_RESOLVE_CMD=", log)
+        self.assertIn("KANBAN_HERDR_ROLE=resolver", log)
         self.assertIn("KANBAN_NOTIFY_CMD=", log)
         self.assertIn("herdr-notify-secretary.sh", log)
         self.assertIn("KANBAN_HERDR_SECRETARY=secretary-project", log)
@@ -826,7 +829,8 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         # KANBAN_HERDR_ROLE etc. must come only from each test's overrides.
         for stray in ("KANBAN_HERDR_ROLE", "KANBAN_CARD_BACKEND", "KANBAN_REVIEWER",
                       "KANBAN_CARD_MODEL", "KANBAN_REVIEW_MODEL", "KANBAN_BACKEND_ORDER",
-                      "KANBAN_CODEX_SANDBOX", "KANBAN_ALLOWED_TOOLS"):
+                      "KANBAN_CODEX_SANDBOX", "KANBAN_ALLOWED_TOOLS",
+                      "KANBAN_RESOLVER", "KANBAN_RESOLVE_MODEL"):
             self.base_env.pop(stray, None)
 
     def tearDown(self):
@@ -956,6 +960,488 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         result = self._run_worker({"KANBAN_CARD_BACKEND": "auto", "KANBAN_BACKEND_ORDER": "claude codex"})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no agent CLI found", result.stderr)
+
+    def test_resolver_role_gets_editing_claude_args_from_resolver_env(self):
+        self._write_fake_cli("claude")
+        result = self._run_worker(
+            {
+                "KANBAN_HERDR_ROLE": "resolver",
+                "KANBAN_RESOLVER": "claude",
+                "KANBAN_RESOLVE_MODEL": "sonnet",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertIn("--kind claude", start)
+        self.assertIn("--permission-mode acceptEdits", start)
+        self.assertIn("--model sonnet", start)
+
+    def test_resolver_role_gets_workspace_write_codex_args(self):
+        self._write_fake_cli("codex")
+        result = self._run_worker(
+            {
+                "KANBAN_HERDR_ROLE": "resolver",
+                "KANBAN_RESOLVER": "codex",
+                "KANBAN_RESOLVE_MODEL": "gpt-5.6-terra",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertIn("--kind codex", start)
+        self.assertIn("-s workspace-write", start)
+        self.assertIn("-a never", start)
+        self.assertIn("-m gpt-5.6-terra", start)
+        self.assertNotIn("read-only", start)
+
+
+class DispatcherWorkflowTests(unittest.TestCase):
+    """kanban.sh `run` end-to-end via KANBAN_WORKER_CMD / KANBAN_REVIEW_CMD /
+    KANBAN_RESOLVE_CMD mock scripts -- no real agent CLI is spent, but the
+    actual git worktree/branch/merge/conflict machinery runs for real."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name) / "project"
+        self.project.mkdir()
+        self._git("init", "-q")
+        self._git("checkout", "-q", "-b", "main")
+        (self.project / "seed.txt").write_text("seed\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init")
+        subprocess.run(
+            [str(KANBAN_SH), "init"], cwd=self.project, check=True, capture_output=True, text=True
+        )
+        self.bin = Path(self.temp.name) / "bin"
+        self.bin.mkdir()
+        self.env = os.environ.copy()
+        self.env["PATH"] = str(self.bin) + os.pathsep + self.env.get("PATH", "")
+        self.env["KANBAN_TEST_MAIN_ROOT"] = str(self.project)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _git(self, *args, check=True):
+        return subprocess.run(
+            ["git", "-C", str(self.project), *args], check=check, capture_output=True, text=True
+        )
+
+    def _write_script(self, name, content):
+        path = self.bin / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def _add_card(self, title, body="task body", backend=None, model=None):
+        args = ["add", title]
+        if backend:
+            args += ["-b", backend]
+        if model:
+            args += ["-m", model]
+        r = subprocess.run(
+            [str(KANBAN_SH), *args],
+            input=body, cwd=self.project, env=self.env, check=True, capture_output=True, text=True,
+        )
+        return Path(r.stdout.strip())
+
+    def _run(self, *args, env_overrides=None, timeout=90):
+        env = self.env.copy()
+        if env_overrides:
+            env.update(env_overrides)
+        return subprocess.run(
+            [str(KANBAN_SH), *args], cwd=self.project, env=env,
+            check=False, capture_output=True, text=True, timeout=timeout,
+        )
+
+    OK_REVIEW = textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        printf '{"score": 95, "feedback": "ok"}\\n'
+        """
+    )
+
+    def test_no_conflict_merge_still_works(self):
+        worker = self._write_script(
+            "worker.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'from worker\\n' > new_file.txt
+                """
+            ),
+        )
+        review = self._write_script("review.sh", self.OK_REVIEW)
+        self._add_card("regression card")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        self.assertEqual((self.project / "new_file.txt").read_text(encoding="utf-8"), "from worker\n")
+
+    def _seed_conflict(self):
+        (self.project / "file.txt").write_text("base\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "add file")
+
+    def _conflicting_worker(self):
+        # Simulates another card merging into base WHILE this worker is
+        # running (a real ordering race), by committing straight to the base
+        # checkout (KANBAN_TEST_MAIN_ROOT) before touching its own worktree
+        # copy of the same line -- the two edits then genuinely conflict at
+        # merge time instead of just being a stale worktree base.
+        return self._write_script(
+            "worker.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                ( cd "$KANBAN_TEST_MAIN_ROOT" && printf 'main change\\n' > file.txt && \\
+                  git add file.txt && \\
+                  git -c user.email=t@t -c user.name=t commit -q -m "main edit" )
+                printf 'card change\\n' > file.txt
+                """
+            ),
+        )
+
+    def test_merge_conflict_after_review_goes_to_resolver_then_done(self):
+        self._seed_conflict()
+        worker = self._conflicting_worker()
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                input=$(cat)
+                if printf '%s' "$input" | grep -q conflict; then
+                  printf '{"score": 90, "feedback": "resolve ok"}\\n'
+                else
+                  printf '{"score": 95, "feedback": "ok"}\\n'
+                fi
+                """
+            ),
+        )
+        resolve = self._write_script(
+            "resolve.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'merged change\\n' > file.txt
+                """
+            ),
+        )
+        self._add_card("conflicting card")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_RESOLVE_CMD": str(resolve),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        card_text = done[0].read_text(encoding="utf-8")
+        self.assertIn("merge conflict", card_text)
+        self.assertIn("resolver output", card_text)
+        self.assertEqual((self.project / "file.txt").read_text(encoding="utf-8"), "merged change\n")
+        # no double-merge: the original card branch must be gone, only the
+        # resolve branch's commit landed on main.
+        branches = self._git("branch", "--list").stdout
+        self.assertNotIn("kanban/", branches)
+        self.assertNotIn("kanban-resolve/", branches)
+
+    def test_resolver_retries_on_low_review_score_then_passes(self):
+        self._seed_conflict()
+        worker = self._conflicting_worker()
+        count_file = Path(self.temp.name) / "resolve_review_count"
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -eu
+                input=$(cat)
+                if printf '%s' "$input" | grep -q conflict; then
+                  n=0
+                  [[ -f "{count_file}" ]] && n=$(cat "{count_file}")
+                  n=$((n + 1))
+                  echo "$n" > "{count_file}"
+                  if [[ $n -lt 2 ]]; then
+                    printf '{{"score": 30, "feedback": "still conflicted"}}\\n'
+                  else
+                    printf '{{"score": 90, "feedback": "resolve ok"}}\\n'
+                  fi
+                else
+                  printf '{{"score": 95, "feedback": "ok"}}\\n'
+                fi
+                """
+            ),
+        )
+        resolve = self._write_script(
+            "resolve.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'merged change\\n' > file.txt
+                """
+            ),
+        )
+        self._add_card("retry-then-pass card")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_RESOLVE_CMD": str(resolve),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        card_text = done[0].read_text(encoding="utf-8")
+        self.assertIn("still conflicted", card_text)
+        self.assertEqual(count_file.read_text(encoding="utf-8").strip(), "2")
+
+    def test_resolve_max_attempts_exceeded_moves_to_failed_with_history(self):
+        cfg = self.project / ".kanban" / "KANBAN.md"
+        text = cfg.read_text(encoding="utf-8")
+        self.assertIn("resolve_max_attempts: 2", text)
+        cfg.write_text(text.replace("resolve_max_attempts: 2", "resolve_max_attempts: 1"), encoding="utf-8")
+
+        self._seed_conflict()
+        worker = self._conflicting_worker()
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                input=$(cat)
+                if printf '%s' "$input" | grep -q conflict; then
+                  printf '{"score": 10, "feedback": "never good enough"}\\n'
+                else
+                  printf '{"score": 95, "feedback": "ok"}\\n'
+                fi
+                """
+            ),
+        )
+        resolve = self._write_script(
+            "resolve.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'still bad\\n' > file.txt
+                """
+            ),
+        )
+        self._add_card("unresolvable card")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_RESOLVE_CMD": str(resolve),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        self.assertEqual(len(failed), 1, result.stdout + result.stderr)
+        card_text = failed[0].read_text(encoding="utf-8")
+        self.assertIn("conflict files: file.txt", card_text)
+        self.assertIn("never good enough", card_text)
+        self.assertIn("kept for manual inspection", card_text)
+        branches = self._git("branch", "--list").stdout
+        self.assertIn("kanban-resolve/", branches)
+        self.assertIn("kanban/", branches)
+        # branches must actually still exist on disk, not just claimed
+        self.assertTrue((self.project / ".git").exists())
+
+    def test_resolve_cmd_receives_card_routing_and_conflict_context(self):
+        self._seed_conflict()
+        worker = self._conflicting_worker()
+        review = self._write_script("review.sh", self.OK_REVIEW)
+        dump_file = Path(self.temp.name) / "resolve_env.txt"
+        resolve = self._write_script(
+            "resolve.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                {{
+                  echo "backend=$KANBAN_CARD_BACKEND"
+                  echo "model=$KANBAN_CARD_MODEL"
+                  echo "conflict=$KANBAN_CONFLICT_FILES"
+                  echo "base=$KANBAN_BASE_BRANCH"
+                  echo "card=$KANBAN_CARD_BRANCH"
+                }} > "{dump_file}"
+                printf 'merged change\\n' > file.txt
+                """
+            ),
+        )
+        card = self._add_card("routed card", backend="claude", model="opus")
+        card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_RESOLVE_CMD": str(resolve),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(dump_file.exists(), result.stdout + result.stderr)
+        dumped = dump_file.read_text(encoding="utf-8")
+        self.assertIn("backend=claude", dumped)
+        self.assertIn("model=opus", dumped)
+        self.assertIn("conflict=file.txt", dumped)
+        self.assertIn("base=main", dumped)
+        self.assertIn(f"card=kanban/{card_id}", dumped)
+
+    def test_dispatcher_refuses_second_run_while_lock_is_live(self):
+        lock = self.project / ".kanban" / ".lock"
+        lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+        result = self._run("run", "--once")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already running", result.stdout + result.stderr)
+
+    def test_resolving_orphan_is_reclaimed_and_not_double_processed(self):
+        card = self._add_card("orphan card")
+        card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
+
+        # Simulate a dispatcher that crashed mid-resolve: the card is stuck in
+        # resolving/ with leftover worktrees/branches from the interrupted
+        # attempt.
+        wt = self.project / ".kanban" / "wt"
+        self._git("worktree", "add", "-q", "-b", f"kanban/{card_id}", str(wt / card_id), "main")
+        self._git(
+            "worktree", "add", "-q", "-b", f"kanban-resolve/{card_id}",
+            str(wt / f"{card_id}-resolve"), "main",
+        )
+        resolving_dir = self.project / ".kanban" / "resolving"
+        resolving_dir.mkdir(exist_ok=True)
+        card.rename(resolving_dir / card.name)
+
+        worker = self._write_script(
+            "worker.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'ok\\n' > out.txt
+                """
+            ),
+        )
+        review = self._write_script("review.sh", self.OK_REVIEW)
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        self.assertEqual(len(list(resolving_dir.glob("*.md"))), 0)
+        branches = self._git("branch", "--list").stdout
+        self.assertNotIn(f"kanban/{card_id}\n", branches.replace(" ", "\n"))
+        self.assertNotIn(f"kanban-resolve/{card_id}", branches)
+
+
+class SecretaryDoesNotHoldCardsBackContractTests(unittest.TestCase):
+    """Locks the "秘書は競合判断で起票を止めない" contract into the docs so a
+    future edit cannot silently reintroduce a hold-back-on-conflict rule."""
+
+    def test_readme_forbids_holding_cards_back_over_conflict_or_order(self):
+        text = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Never hold a card back over file overlap, dependency order", text)
+        self.assertIn("resolving", text)
+        self.assertIn("blocked", text)
+
+    def test_skill_forbids_holding_cards_back_over_conflict_or_order(self):
+        text = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        self.assertIn("Never hold a card back over file overlap, dependency order", normalized)
+
+    def test_kanban_md_template_forbids_holding_cards_back(self):
+        text = (REPO / "kanban.sh").read_text(encoding="utf-8")
+        self.assertIn("秘書はファイル重複・依存順序・実行中カードとの競合を理由に起票を保留しない", text)
+        self.assertIn("resolve_max_attempts", text)
+
+
+class SecretaryForbidsInProcessDelegationContractTests(unittest.TestCase):
+    """Locks the "カードなしの in-process delegation / visible pane なしの自己実装
+    禁止" contract into README, SKILL.md, and the generated KANBAN.md template so
+    a future doc edit cannot silently drop the ban or the required
+    `kanban add` -> `kanban-secretary.sh dispatch` escape hatch."""
+
+    def test_readme_forbids_in_process_delegation_and_names_forbidden_tools(self):
+        text = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("No in-process delegation from the secretary pane", text)
+        self.assertIn("Agent", text)
+        self.assertIn("Task", text)
+        self.assertIn("collaboration/subagent-spawning feature", text)
+        self.assertIn("kanban add", text)
+        self.assertIn("kanban-secretary.sh dispatch", text)
+
+    def test_skill_forbids_in_process_delegation_and_names_forbidden_tools(self):
+        text = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        self.assertIn("Forbidden: in-process delegation from this pane", normalized)
+        self.assertIn("never launch this CLI's own built-in subagent/delegation tool", normalized)
+        self.assertIn("Agent`/`Task`", normalized)
+        self.assertIn("collaboration or", normalized)
+        self.assertIn("subagent spawning", normalized)
+        self.assertIn("visible Herdr pane", normalized)
+        self.assertIn("kanban add", normalized)
+        self.assertIn("kanban-secretary.sh dispatch", normalized)
+
+    def test_kanban_md_template_forbids_in_process_delegation_and_names_forbidden_tools(self):
+        text = (REPO / "kanban.sh").read_text(encoding="utf-8")
+        self.assertIn("in-process delegation 禁止", text)
+        self.assertIn("Agent`/`Task` (Claude Code)", text)
+        self.assertIn("collaboration/subagent 起動 (Codex)", text)
+        self.assertIn("kanban add", text)
+        self.assertIn("kanban-secretary.sh dispatch", text)
 
 
 if __name__ == "__main__":

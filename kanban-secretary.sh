@@ -136,6 +136,7 @@ dispatch() {
 
   command="env KANBAN_WORKER_CMD=$(shell_quote "$REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_REVIEW_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=reviewer $REPO/herdr-agent-worker.sh")"
+  command="$command KANBAN_RESOLVE_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=resolver $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_NOTIFY_CMD=$(shell_quote "$REPO/herdr-notify-secretary.sh")"
   command="$command KANBAN_HERDR_SECRETARY=$(shell_quote "$SECRETARY_NAME")"
   command="$command $(shell_quote "$KANBAN_BIN") run"

@@ -3,9 +3,9 @@
 `kanban-secretary.sh bootstrap` records which Herdr pane is currently acting
 as the dialogue secretary for a given project root. The marker is what lets a
 tool-invocation guard (see claude_secretary_guard.py) tell "this pane is the
-secretary, direct implementation/verification/git/publish tools are
-forbidden here" apart from any other pane (workers, reviewers, ordinary
-agents, other projects).
+secretary, direct implementation/verification/git/publish tools and
+in-process delegation (Agent/Task) are forbidden here" apart from any other
+pane (workers, reviewers, resolvers, ordinary agents, other projects).
 
 python3 stdlib only, matching the rest of MornKanban's distribution
 constraints.
@@ -77,7 +77,7 @@ def is_secretary_pane(project_root, pane_id):
 
     A missing/unreadable marker, or a pane_id that does not match, means "not
     the secretary" - the guard must fail open toward *allowing* tools rather
-    than blocking an unrelated pane (worker/reviewer/other project).
+    than blocking an unrelated pane (worker/reviewer/resolver/other project).
     """
     if not pane_id:
         return False

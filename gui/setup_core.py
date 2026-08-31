@@ -27,7 +27,8 @@ TIMEOUT = 30
 # --- secretary direct-action guard -------------------------------------------
 # Claude Code has a real PreToolUse hook we can deny through (settings.json,
 # see below): matched against every tool a secretary pane could use to
-# implement/verify/commit/publish directly. Codex has no documented
+# implement/verify/commit/publish directly, including this CLI's own
+# in-process Agent/Task subagent delegation. Codex has no documented
 # pre-tool-call deny hook as of this writing (its `hooks`/`rules` surfaces
 # are approval-memory/notify, not a deny gate) - its enforcement stays
 # prompt/contract-level only (skill text + KANBAN.md + README), and
@@ -293,6 +294,8 @@ def uninstall_claude_guard(settings_path=None):
 def claude_guard_state(settings_path=None):
     """'enforced' | 'not-installed' | 'misconfigured'."""
     path = settings_path or CLAUDE_SETTINGS_PATH
+    if not os.path.isfile(GUARD_HOOK_SCRIPT):
+        return "misconfigured"
     try:
         data = _read_json_settings(path)
     except (OSError, ValueError):
