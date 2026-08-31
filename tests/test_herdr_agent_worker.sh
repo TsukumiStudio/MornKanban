@@ -120,6 +120,7 @@ run_worker() { # run_worker <scen-dir> <worktree-dir> [role] [backend] -> stdout
   set +e
   OUT=$(cd "$WT" && env \
     HERDR_ENV=1 HERDR_PANE_ID=self \
+    KANBAN_CARD_ID=test-card KANBAN_CARD_ATTEMPT=attempt-1 \
     KANBAN_HERDR_ROLE="$role" \
     KANBAN_BACKEND_ORDER="$backend" KANBAN_CARD_BACKEND="$backend" \
     KANBAN_REVIEWER="$backend" KANBAN_RESOLVER="$backend" \
@@ -148,7 +149,7 @@ test_transient_idle_then_reworking_then_answer() {
   new_scenario
   printf 'idle\nworking\nworking\nidle\nidle\n' >"$SCEN/statuses"
   cat >"$SCEN/on_call_4" <<EOF
-printf 'FINAL ANSWER CONTENT\n' > "$WT/.kanban-answer.md"
+printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\nFINAL ANSWER CONTENT\n' > "$WT/.kanban-answer.md"
 EOF
   run_worker "$SCEN" "$WT"
   assert_eq "exits 0 once the answer actually lands" "$RC" "0"
@@ -176,7 +177,7 @@ remote: Permission denied (publickey).
 fatal: Could not read from remote repository.
 EOF
   cat >"$SCEN/on_call_3" <<EOF
-printf 'ANSWER-2\n' > "$WT/.kanban-answer.md"
+printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\nANSWER-2\n' > "$WT/.kanban-answer.md"
 EOF
   run_worker "$SCEN" "$WT"
   assert_eq "still completes successfully" "$RC" "0"
@@ -200,7 +201,7 @@ Allow the action?
   2. No, and tell Claude what to do differently (y/n)
 EOF
   cat >"$SCEN/on_call_2" <<EOF
-printf 'ANSWER-3\n' > "$WT/.kanban-answer.md"
+printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\nANSWER-3\n' > "$WT/.kanban-answer.md"
 EOF
   run_worker "$SCEN" "$WT"
   assert_eq "completes successfully" "$RC" "0"
@@ -252,7 +253,7 @@ test_answer_completes_atomically() {
   # write and silently eat the "PART1-" chunk. Kick it off from the first
   # `agent get` call instead of before run_worker, so ordering is guaranteed.
   cat >"$SCEN/on_call_1" <<EOF
-( printf 'PART1-' >"$WT/.kanban-answer.md"
+( printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\nPART1-' >"$WT/.kanban-answer.md"
   sleep 2.5
   printf 'PART2-DONE\n' >>"$WT/.kanban-answer.md" ) &
 EOF
@@ -273,7 +274,7 @@ test_role_backend_matrix() {
       new_scenario
       printf 'idle\nworking\nidle\nidle\n' >"$SCEN/statuses"
       cat >"$SCEN/on_call_3" <<EOF
-printf '{"score": 90, "feedback": "ok"}\n' > "$WT/.kanban-answer.md"
+printf 'KANBAN_ANSWER_ID: test-card|wt|$role|attempt-1\n{"score": 90, "feedback": "ok"}\n' > "$WT/.kanban-answer.md"
 EOF
       run_worker "$SCEN" "$WT" "$role" "$backend"
       assert_eq "[$role/$backend] settles only once the answer lands" "$RC" "0"
@@ -291,6 +292,21 @@ EOF
   done
 }
 
+# --- wrong-card/stale answer is rejected even when stable -----------------
+test_wrong_identity_is_rejected() {
+  note "scenario: stable answer belongs to another card/attempt"
+  new_scenario
+  printf 'idle\nidle\n' >"$SCEN/statuses"
+  cat >"$SCEN/on_call_1" <<EOF
+printf 'KANBAN_ANSWER_ID: other-card|wt|worker|old-attempt\nSTALE CONTENT\n' > "$WT/.kanban-answer.md"
+EOF
+  run_worker "$SCEN" "$WT"
+  assert_eq "rejects stale answer with non-zero status" "$RC" "1"
+  assert_contains "reports identity mismatch" "$ERR" "answer identity mismatch"
+  assert_not_contains "does not emit stale answer body" "$OUT" "STALE CONTENT"
+  rm -rf "$SCEN"
+}
+
 test_transient_idle_then_reworking_then_answer
 test_blocked_false_positive_running_shell
 test_blocked_true_permission_prompt
@@ -298,6 +314,7 @@ test_idle_without_answer_times_out
 test_agent_lost_mid_run
 test_answer_completes_atomically
 test_role_backend_matrix
+test_wrong_identity_is_rejected
 
 note ""
 note "passed: $pass_count  failed: $fail_count"

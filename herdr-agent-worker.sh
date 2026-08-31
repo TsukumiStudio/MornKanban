@@ -80,15 +80,17 @@ cat >"$tmp/prompt.md"
 # Claude Code and Codex both render on the terminal's alternate screen, so a
 # finished response cannot be recovered from pane scrollback. Have the agent
 # also write its final answer to a file inside the worktree and read that.
-# card_id/attempt identify this run for diagnostics (pane label, error
-# messages); the answer file itself stays at a fixed, well-known path so the
-# instructions below never depend on unstable per-run naming.
-card_id=$(basename "$PWD")
-attempt=$name
+# Bind the answer to the exact card, worktree, role, and attempt. Several
+# visible agents can finish at nearly the same time, and a stale answer file
+# must never be consumed by another attempt.
+card_id=${KANBAN_CARD_ID:-unknown}
+attempt=${KANBAN_CARD_ATTEMPT:-0}
+worktree=$(basename "$PWD")
+ident_line="KANBAN_ANSWER_ID: ${card_id}|${worktree}|${role}|${attempt}"
 ans="$PWD/.kanban-answer.md"
 rm -f "$ans"
-printf '\n\n追加指示 (card_id=%s role=%s attempt=%s): 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にもそのまま書き込むこと。この書き込みが完了するまでは応答を終えないこと。作業・編集はカレントディレクトリ (worktree) 内だけで行い、リポジトリ本体のチェックアウトを絶対パスで触らないこと。\n' \
-  "$card_id" "$role" "$attempt" "$ans" >>"$tmp/prompt.md"
+printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にも書き込むこと。ファイルの1行目は必ず次の識別行そのままにし、2行目以降に回答本体を続けること: %s\nこの書き込みが完了するまでは応答を終えないこと。作業・編集はカレントディレクトリ (worktree) 内だけで行い、リポジトリ本体のチェックアウトを絶対パスで触らないこと。\n' \
+  "$ans" "$ident_line" >>"$tmp/prompt.md"
 
 jget() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"; }
 
@@ -271,6 +273,14 @@ fi
 # substitute for the answer file -- it is only ever emitted alongside a
 # verified answer, never in place of one.
 herdr agent read "$name" --source recent-unwrapped --lines 200 --format text 2>/dev/null || true
-echo ""
-cat "$ans"
+first_line=$(head -n 1 "$ans")
+body=$(tail -n +2 "$ans")
 rm -f "$ans"   # keep it out of the card's git commit / merge
+if [[ $first_line != "$ident_line" ]]; then
+  infra_error stale_answer "role=$role: answer identity mismatch (expected ${ident_line}; got ${first_line:0:120})"
+fi
+if [[ -z $body ]]; then
+  infra_error empty_answer "role=$role: answer body was empty after a valid identity line"
+fi
+echo ""
+printf '%s\n' "$body"
