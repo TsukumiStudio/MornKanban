@@ -70,3 +70,18 @@ HTTP 409
 旧エンドポイント (`/api/board`, `/api/policy`, `/api/card`) は削除されて 404 を返すことを確認した。
 コード修正は行っていない。
 
+
+## ブラウザ検証
+
+対象: `MORNKANBAN_GUI_PORT=8804 python3 gui/server.py` を起動し、claude-in-chrome で `http://127.0.0.1:8804/` を実操作。
+
+- ページ見出し「MornKanban Setup」、依存バッジ (herdr / claude / codex) の表示を確認
+- 「1. kanban CLI」「2. Claude Code スキル」の各ステップに「導入済み」表示、対応ボタンが見える (いずれもクリックしていない)
+- `mkdir -p /tmp/kanban-gui-verify5` の後、プロジェクト欄に `/tmp/kanban-gui-verify5` を入力し「追加」→ 一覧に `kanban-gui-verify5 (/tmp/kanban-gui-verify5)` が「kanban init」ボタン付きで表示
+- 「kanban init」ボタンをクリック → バッジが「導入済み」に変化
+- シェルで `/tmp/kanban-gui-verify5/.kanban` の存在を確認 (`doing/ done/ failed/ review/ todo/ .gitignore KANBAN.md` を含む)
+- スクリーンショット2枚 (初期表示・init 後) を確認。レイアウト崩れなし、カード型UIが縦に整列し文字切れ等の見た目異常は無い
+
+後処理: 開いたタブを close、`pgrep -f gui/server.py` (シェルラッパー行を除く実プロセス) は 0件を確認。
+
+判定: PASS
