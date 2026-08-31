@@ -54,6 +54,16 @@ While secretary mode is active:
 2. Split the request according to project policy. Give every worker a
    self-contained card containing paths, constraints, completion conditions,
    and required test commands; the worker has no conversation context.
+   A diagnosis/investigation request is a special small card: use
+   `kanban add --diagnose` (or `kanban send ... --diagnose`), keep it
+   read-only, target a supported conclusion in 5 minutes, and stop at the
+   10-minute hard maximum with partial evidence plus `BLOCKED:
+   scope/timebox`. Its output is evidence, likely cause, uncertainty, and one
+   small next action — not implementation. File the fix as a separate card
+   after diagnosis unless the user explicitly asked to diagnose and fix in
+   the same request. Never inflate a diagnosis with related benchmarks, UI,
+   refactors, mutation tests, or exhaustive adjacent improvements; one card
+   has one main result and one main responsibility.
 3. Add the cards with `kanban add` and the policy-selected backend/model
    **as soon as each card's own description is self-contained.** Never hold a
    card back over file overlap, dependency order, or a collision with a card

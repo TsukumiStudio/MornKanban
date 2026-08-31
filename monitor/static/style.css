@@ -135,6 +135,11 @@ h2 { font-size: 1rem; color: var(--muted); margin: 24px 0 10px; }
 .board-column h4 .badge-done { color: var(--done); }
 .board-column h4 .badge-failed { color: var(--failed); }
 
+.badge-infra-blocked {
+  color: var(--blocked);
+  font-weight: 600;
+}
+
 .card-item {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -239,3 +244,18 @@ h2 { font-size: 1rem; color: var(--muted); margin: 24px 0 10px; }
 }
 
 .board-error-message { color: var(--failed); font-size: 0.85rem; }
+
+.agent-activity-title { margin: 18px 0 8px; font-size: 0.9rem; color: var(--muted); }
+.agent-activity-list { display: grid; gap: 6px; }
+.agent-activity-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.agent-activity-event { font-size: 0.82rem; font-weight: 600; }
+.agent-activity-meta, .agent-activity-time, .agent-activity-empty { font-size: 0.72rem; color: var(--muted); }
+.agent-activity-time { white-space: nowrap; text-align: right; }

@@ -6,9 +6,17 @@ reviewer: claude
 review_model: sonnet
 threshold: 80
 max_attempts: 3
-jobs: 2
-claude_perms: acceptEdits
-codex_sandbox: workspace-write
+resolve_max_attempts: 2
+review_infra_max_retries: 2
+review_infra_backoff_seconds: 2
+review_enabled: true
+jobs: 6
+diagnosis_target_minutes: 5
+diagnosis_max_minutes: 10
+claude_perms: bypassPermissions
+codex_sandbox: danger-full-access
+codex_full_bypass: true
+codex_approval: never
 ---
 
 # このプロジェクトのカンバン運用ポリシー
@@ -26,10 +34,18 @@ GUI は python3 標準ライブラリのみ (pip 不可)、フロントは素の
 
 ## カードの切り方
 
-- ファイル境界で分割し、同一ファイルを触るカードは同時に投入しない
+- 秘書はファイル競合や依存順序を判断せず、自己完結情報が揃ったカードを直ちに投入する
+- 同一ファイルを触るカードも投入を止めない。競合・順序はworker / resolverが実行時に解決する
 - 並列ワーカーは互いの成果物を見られない。API/DOM のインターフェース契約を
   各カード本文に明記し自己完結させる
 - 完了条件と検証コマンド (python3 -m py_compile / node --check 等) を必ず書く
+
+## 調査カード
+
+- 調査・診断だけの依頼は `--diagnose` でread-onlyカードにし、5分で結論をまとめ、最大10分で止める
+- 成果は証拠、原因候補、不確実性、次に切る小さな実装カード。修正や周辺改善を同じカードへ追加しない
+- 修正は診断後の別カード。ユーザーが診断と修正を同時に明示した場合だけ通常の実装カードにする
+- 最大時間に収まらない場合は途中証拠をHistoryへ残し、`BLOCKED: scope/timebox` で戻す
 
 ## ディスパッチャ運用
 
@@ -54,5 +70,11 @@ GUI は python3 標準ライブラリのみ (pip 不可)、フロントは素の
 - レポートは段階書き込み。起動したプロセスは必ず kill してから完了とする
 - ブラウザ検証カードの前提: Claude in Chrome 拡張で localhost / 127.0.0.1 への
   アクセスを事前許可しておくこと (未許可だと権限ダイアログでワーカーが停止する)
-- カード間に依存がある場合 (完了条件が他カードの成果物を要る等) は同時投入せず、
-  依存元の merge 後に次のバッチとして投入する。並列カードは互いの成果物を見られない
+- カード間の依存や競合は秘書が事前調整しない。workerが依存未完了を検出した場合は
+  blockedとして戻し、dispatcher / resolverが正式な状態遷移で処理する
+
+## 並列数
+
+- このプロジェクトの既定は `jobs: 6`
+- `-j` や `KANBAN_JOBS` を指定せず起動したdispatcherは、この値を実行中も再読込する
+- 増加時は空き枠へ即時投入し、減少時は実行中jobを止めず、新規投入だけを抑える

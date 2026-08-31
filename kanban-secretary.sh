@@ -56,6 +56,45 @@ resolve_secretary_name() {
   SECRETARY_SOURCE=$(echo "$out" | json_value 'd["source"]')
 }
 
+write_secretary_marker() { # write_secretary_marker <root>
+  python3 -c '
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "guard"))
+import secretary_marker as marker
+marker.write_marker(sys.argv[2], os.environ["HERDR_PANE_ID"], sys.argv[3])
+' "$REPO" "$1" "$SECRETARY_NAME" || die "could not write the active-secretary marker"
+}
+
+ensure_secretary_binding() { # ensure_secretary_binding <root>
+  # dispatch may be invoked in a long-lived pane that was bootstrapped under
+  # the old fixed name `secretary`. Compare the actual current Herdr agent,
+  # repair a free mismatch, and refuse to steal a name owned by another pane.
+  local root=$1 current owner info agents
+  info=$(herdr agent get "$HERDR_PANE_ID" 2>&1) ||
+    die "could not inspect current Herdr agent $HERDR_PANE_ID: $info"
+  current=$(echo "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result",{}).get("agent",{}).get("name", ""))') ||
+    die "could not parse current Herdr agent identity"
+  if [[ $current != "$SECRETARY_NAME" ]]; then
+    agents=$(herdr agent list 2>&1) || die "could not inspect Herdr agent names: $agents"
+    owner=$(echo "$agents" | python3 -c '
+import json, sys
+d=json.load(sys.stdin)
+target, current_pane=sys.argv[1:3]
+for agent in d.get("result", {}).get("agents", []):
+    if agent.get("name") == target and agent.get("pane_id") != current_pane:
+        print(agent.get("pane_id", "unknown"))
+        break
+' "$SECRETARY_NAME" "$HERDR_PANE_ID") || die "could not parse Herdr agent list"
+    if [[ -n $owner ]]; then
+      die "secretary name '$SECRETARY_NAME' is already owned by pane $owner; refusing to steal another project's agent (set secretary_agent in $root/.kanban/KANBAN.md)"
+    fi
+    herdr agent rename "$HERDR_PANE_ID" "$SECRETARY_NAME" >/dev/null ||
+      die "failed to repair secretary identity '$current' -> '$SECRETARY_NAME' for pane $HERDR_PANE_ID"
+    echo "kanban-secretary: repaired secretary identity '${current:-<unnamed>}' -> '$SECRETARY_NAME' on pane $HERDR_PANE_ID" >&2
+  fi
+  write_secretary_marker "$root"
+}
+
 bootstrap() {
   local target=${1:-$PWD} root git_root
   require_herdr
@@ -88,12 +127,7 @@ This agent was NOT renamed; no other project's running agent was touched."
   # dead pane. Read by guard/claude_secretary_guard.py to fail-closed deny
   # direct implementation/verification/git/publish tools from inside this
   # exact pane only.
-  python3 -c '
-import os, sys
-sys.path.insert(0, os.path.join(sys.argv[1], "guard"))
-import secretary_marker as marker
-marker.write_marker(sys.argv[2], os.environ["HERDR_PANE_ID"], sys.argv[3])
-' "$REPO" "$root" "$SECRETARY_NAME" || die "could not write the active-secretary marker"
+  write_secretary_marker "$root"
 
   echo "secretary ready: project=$root secretary=$SECRETARY_NAME (name source: $SECRETARY_SOURCE) execution=visible-herdr guard=$(guard_status_line)"
 }
@@ -122,13 +156,14 @@ dispatch() {
 
   require_herdr
   root=$(kanban_project_root "$target") || die "no .kanban directory found (run bootstrap first)"
+  resolve_secretary_name "$root"
+  ensure_secretary_binding "$root"
   lock=$root/.kanban/.lock
   if [[ -f $lock ]] && kill -0 "$(cat "$lock")" 2>/dev/null; then
     echo "dispatcher already running: pid=$(cat "$lock")"
     return 0
   fi
 
-  resolve_secretary_name "$root"
   direction=$(split_direction)
   pane=$(herdr pane split --current --direction "$direction" --cwd "$root" --no-focus |
     json_value 'd["result"]["pane"]["pane_id"]')
@@ -138,6 +173,7 @@ dispatch() {
   command="$command KANBAN_REVIEW_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=reviewer $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_RESOLVE_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=resolver $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_NOTIFY_CMD=$(shell_quote "$REPO/herdr-notify-secretary.sh")"
+  command="$command KANBAN_ACTIVITY_LOG=$(shell_quote "$root/.kanban/activity.jsonl")"
   command="$command KANBAN_HERDR_SECRETARY=$(shell_quote "$SECRETARY_NAME")"
   command="$command $(shell_quote "$KANBAN_BIN") run"
   if $once; then command="$command --once"; fi

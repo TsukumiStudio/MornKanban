@@ -1,3 +1,5 @@
 wt/
 .lock
 .merge.lock
+activity.jsonl
+activity.jsonl.lock
