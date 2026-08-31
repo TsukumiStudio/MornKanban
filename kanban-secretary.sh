@@ -66,7 +66,39 @@ bootstrap() {
   # Notifications address the secretary by this stable Herdr agent name.
   herdr agent rename "$HERDR_PANE_ID" "$SECRETARY_NAME" >/dev/null ||
     die "could not register this agent as '$SECRETARY_NAME'"
-  echo "secretary ready: project=$root agent=$SECRETARY_NAME execution=visible-herdr"
+
+  # Record this pane as the project's active secretary. Project/pane scoped;
+  # a re-bootstrap in a new pane silently supersedes a stale marker left by a
+  # dead pane. Read by guard/claude_secretary_guard.py to deny in-process
+  # subagent delegation from inside this exact pane only.
+  python3 -c '
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "guard"))
+import secretary_marker as marker
+marker.write_marker(sys.argv[2], os.environ["HERDR_PANE_ID"], sys.argv[3])
+' "$REPO" "$root" "$SECRETARY_NAME" || die "could not write the active-secretary marker"
+
+  echo "secretary ready: project=$root agent=$SECRETARY_NAME execution=visible-herdr guard=$(guard_status_line)"
+}
+
+guard_status_line() {
+  if [[ -f $REPO/guard/claude_secretary_guard.py ]]; then
+    echo "claude=$( [[ -f ~/.claude/settings.json ]] && grep -q claude_secretary_guard.py ~/.claude/settings.json 2>/dev/null && echo enforced || echo not-installed ),codex=prompt-only"
+  else
+    echo "unavailable"
+  fi
+}
+
+end() {
+  local target=${1:-$PWD} root
+  root=$(project_root "$target") || die "no .kanban directory found"
+  python3 -c '
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "guard"))
+import secretary_marker as marker
+marker.clear_marker(sys.argv[2])
+' "$REPO" "$root"
+  echo "secretary marker cleared: project=$root"
 }
 
 dispatch() {
@@ -106,5 +138,6 @@ dispatch() {
 case ${1:-} in
   bootstrap) shift; bootstrap "$@" ;;
   dispatch) shift; dispatch "$@" ;;
-  *) die "usage: $0 <bootstrap [project-dir] | dispatch [--once] [project-dir]>" ;;
+  end) shift; end "$@" ;;
+  *) die "usage: $0 <bootstrap [project-dir] | dispatch [--once] [project-dir] | end [project-dir]>" ;;
 esac
