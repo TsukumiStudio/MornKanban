@@ -14,6 +14,7 @@ from setup_core import (  # noqa: E402
     check_deps,
     cli_installed,
     run_setup,
+    run_uninstall,
     skill_installed,
 )
 
@@ -43,17 +44,16 @@ def main():
     if not sys.stdin.isatty():
         sys.exit(0)
 
-    if cli_installed() and skill_installed():
-        sys.exit(0)
-
-    ans = prompt("セットアップを実行しますか? [y/N]: ")
+    ans = prompt("[y=セットアップ / u=アンインストール / N=何もしない]: ")
     if ans is None:
         sys.exit(0)
-    if ans.strip().lower() != "y":
-        sys.exit(0)
-
-    for msg in run_setup():
-        print(msg)
+    choice = ans.strip().lower()
+    if choice == "y":
+        for msg in run_setup():
+            print(msg)
+    elif choice == "u":
+        for msg in run_uninstall():
+            print(msg)
     sys.exit(0)
 
 
