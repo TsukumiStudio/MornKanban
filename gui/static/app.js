@@ -68,16 +68,11 @@
   function updateDoneState() {
     if (!lastStatus) return;
     const install = lastStatus.install || {};
-    if (install.cli) {
-      el['step-cli'].classList.add('done');
-    } else {
-      el['step-cli'].classList.remove('done');
-    }
-    if (install.skill) {
-      el['step-skill'].classList.add('done');
-    } else {
-      el['step-skill'].classList.remove('done');
-    }
+    const bothDone = !!(install.cli && install.skill);
+    el['step-cli'].classList.toggle('done', bothDone);
+    el['step-skill'].classList.toggle('done', bothDone);
+    el['step-projects'].classList.toggle('done', bothDone);
+    el['step-next'].classList.toggle('done', bothDone);
   }
 
   async function refresh() {
@@ -91,8 +86,8 @@
 
     el['dep-badges'].innerHTML = '';
     const deps = data.deps || {};
-    for (const [name, ok] of Object.entries(deps)) {
-      el['dep-badges'].appendChild(depBadge(name, ok));
+    for (const name of ['herdr', 'claude', 'codex']) {
+      el['dep-badges'].appendChild(depBadge(name, !!deps[name]));
     }
     if (!deps.herdr || !deps.claude) {
       toast('herdr / claude が見つかりません');
