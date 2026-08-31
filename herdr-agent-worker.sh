@@ -127,27 +127,56 @@ else # codex
   [[ -n $model ]] && kind_args+=(-m "$model")
 fi
 
+# infra_error <category> <detail>: the caller (kanban.sh's
+# classify_review_infra_error / classify_worker_infra_error) parses this
+# sentinel to tell a broken pane/agent/wrapper from a genuine low review
+# score or a genuinely empty worker diff, so it must be the first line of
+# stdout and nothing else score-shaped should follow it.
+infra_error() {
+  printf 'KANBAN_INFRA_ERROR: %s: %s\n' "$1" "$2"
+  exit 0
+}
+
 if ! herdr agent start "$name" --kind "$backend" --pane "$pane" --timeout 45000 -- "${kind_args[@]}" >/dev/null 2>&1; then
+  local_started=false
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     ui=$(herdr agent read "$name" --source visible --lines 30 2>/dev/null || true)
     if grep -q "trust this folder" <<<"$ui"; then
       herdr agent send-keys "$name" down >/dev/null
       herdr agent send-keys "$name" enter >/dev/null
+      local_started=true
       break
     fi
     sleep 2
   done
-  herdr agent wait "$name" --timeout 60000 >/dev/null
+  if ! $local_started; then
+    infra_error agent_not_found "role=$role backend=$backend: herdr agent start failed and no trust dialog was seen"
+  fi
+  if ! herdr agent wait "$name" --timeout 60000 >/dev/null 2>&1; then
+    infra_error agent_not_found "role=$role backend=$backend: agent never became ready after start"
+  fi
 fi
 
 herdr agent prompt "$name" "$(cat "$tmp/prompt.md")" --wait --timeout 1500000 >/dev/null 2>&1 || true
 
 # Ride out permission prompts (approve: these are our own sandboxed
-# worktrees) and keep waiting until the agent settles for good.
+# worktrees) and keep waiting until the agent settles for good. A failure
+# reading agent state here (pane closed mid-run, agent handle gone) must be
+# reported as infrastructure, not silently swallowed into whatever partial
+# text `herdr` printed to stderr before dying.
+settled=false
 for _ in $(seq 1 90); do
-  st=$(herdr agent get "$name" | jget 'd["result"]["agent"]["agent_status"]')
+  get_out=$(herdr agent get "$name" 2>&1) || {
+    if grep -qiE "not found|no such (pane|agent)" <<<"$get_out"; then
+      infra_error agent_not_found "role=$role: $(echo "$get_out" | tail -n 1)"
+    fi
+    infra_error wrapper_error "role=$role: herdr agent get failed: $(echo "$get_out" | tail -n 1)"
+  }
+  st=$(echo "$get_out" | jget 'd["result"]["agent"]["agent_status"]' 2>/dev/null) || {
+    infra_error wrapper_error "role=$role: could not parse agent status from herdr agent get"
+  }
   case $st in
-    idle|done) break ;;
+    idle|done) settled=true; break ;;
     blocked)
       ui=$(herdr agent read "$name" --source visible --lines 40 2>/dev/null || true)
       if grep -qE "Do you want|Allow|permission" <<<"$ui"; then
@@ -157,10 +186,18 @@ for _ in $(seq 1 90); do
     *) herdr agent wait "$name" --timeout 300000 >/dev/null 2>&1 || true ;;
   esac
 done
+if ! $settled; then
+  infra_error timeout "role=$role: agent never reached idle/done"
+fi
 
 herdr agent read "$name" --source recent-unwrapped --lines 200 --format text 2>/dev/null || true
 if [[ -f $ans ]]; then
   echo ""
   cat "$ans"
   rm -f "$ans"   # keep it out of the card's git commit / merge
+elif [[ $role == reviewer ]]; then
+  # A settled reviewer that never wrote its answer file produced no
+  # judgeable content either -- treat it the same way as a broken pane
+  # rather than letting an empty/partial transcript get scored as 0.
+  infra_error empty_output "role=$role: agent settled but wrote no $ans"
 fi
