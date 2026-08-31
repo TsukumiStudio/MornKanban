@@ -888,6 +888,11 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
                 "HERDR_ENV": "1",
                 "HERDR_PANE_ID": "w1:p1",
                 "HERDR_TEST_LOG": str(self.log),
+                "KANBAN_CARD_ID": "test-card",
+                "KANBAN_CARD_ATTEMPT": "attempt-1",
+                "KANBAN_HERDR_POLL_INTERVAL": "0.1",
+                "KANBAN_HERDR_STABLE_SLEEP": "0.05",
+                "KANBAN_HERDR_ANSWER_WAIT_SECS": "3",
             }
         )
         # KANBAN_HERDR_ROLE etc. must come only from each test's overrides.
@@ -917,6 +922,12 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
                     ;;
                   "agent get")
                     printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+                    ;;
+                  "agent prompt")
+                    role=${KANBAN_HERDR_ROLE:-worker}
+                    printf 'KANBAN_ANSWER_ID: test-card|worktree|%s|attempt-1\n{"score":90,"feedback":"ok"}\n' \
+                      "$role" > "$PWD/.kanban-answer.md"
+                    printf '%s\n' '{"result":{}}'
                     ;;
                   "agent read")
                     echo "mock agent transcript"
@@ -1030,7 +1041,7 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no agent CLI found", result.stderr)
 
-    def test_resolver_role_gets_editing_claude_args_from_resolver_env(self):
+    def test_resolver_role_gets_unrestricted_claude_args_from_resolver_env(self):
         self._write_fake_cli("claude")
         result = self._run_worker(
             {
@@ -1042,10 +1053,11 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         start = self._start_call()
         self.assertIn("--kind claude", start)
-        self.assertIn("--permission-mode acceptEdits", start)
+        self.assertIn("--dangerously-skip-permissions", start)
+        self.assertNotIn("--permission-mode acceptEdits", start)
         self.assertIn("--model sonnet", start)
 
-    def test_resolver_role_gets_workspace_write_codex_args(self):
+    def test_resolver_role_gets_unrestricted_codex_args(self):
         self._write_fake_cli("codex")
         result = self._run_worker(
             {
@@ -1057,8 +1069,8 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         start = self._start_call()
         self.assertIn("--kind codex", start)
-        self.assertIn("-s workspace-write", start)
-        self.assertIn("-a never", start)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", start)
+        self.assertNotIn("workspace-write", start)
         self.assertIn("-m gpt-5.6-terra", start)
         self.assertNotIn("read-only", start)
 
