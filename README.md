@@ -38,6 +38,10 @@ Leave `model` empty to use the backend's own default. Model names are backend-sp
 
 Custom worker commands (`KANBAN_WORKER_CMD`) receive the card's routing as `KANBAN_CARD_MODEL` / `KANBAN_CARD_BACKEND` environment variables, since the override bypasses the built-in model handling.
 
+## Model Policy (default)
+
+Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and design roles**. Hands-on workers and reviewers default to a lower tier — claude cards to `sonnet`, light codex cards to `gpt-5.3-codex-spark` — regardless of backend. Raise a specific card with `-m` only for design-heavy or hard cards, and note why in the card. Projects customize this in `.kanban/KANBAN.md` (`default_model`, `review_model`), but new projects start from this default.
+
 ## Herdr Integration (no headless workers)
 
 When the dispatcher runs inside a [Herdr](https://herdr.dev) pane, `herdr-agent-worker.sh` replaces the headless `claude -p` worker/reviewer with a **visible interactive agent in its own pane**, so every parallel card appears in the Herdr sidebar and can be watched or interrupted:

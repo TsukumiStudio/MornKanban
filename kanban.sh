@@ -113,9 +113,9 @@ cmd_init() {
 ---
 backend_order: claude codex
 default_backend: auto
-default_model:
+default_model: sonnet
 reviewer: auto
-review_model:
+review_model: sonnet
 threshold: 80
 max_attempts: 3
 jobs: 2
@@ -130,8 +130,9 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 
 ## エージェント・モデル構成
 
-- 既定: (例) 通常実装は claude / sonnet、軽微な修正は codex / gpt-5.3-codex-spark
-- 設計や難所: (例) -m opus を指定
+- **既定方針: 上位モデル (fable / opus 等) は秘書・設計役だけ。手を動かすワーカーとレビュワーは下位モデルで十分**
+- 既定: 通常実装は claude / sonnet、軽微な修正は codex / gpt-5.3-codex-spark (codex カードは -m 必須。model 名はバックエンド固有)
+- 設計・難所のカードだけ例外的に -m opus 等へ上げる (理由をカードに書く)
 
 ## カードの切り方
 
