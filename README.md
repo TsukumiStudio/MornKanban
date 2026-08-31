@@ -4,15 +4,26 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 
 ## Setup
 
-- Install once: `git clone git@github.com:TsukumiStudio/MornKanban.git ~/git/MornKanban && ln -s ~/git/MornKanban/kanban.sh ~/.local/bin/kanban`
+- Install once: `git clone git@github.com:TsukumiStudio/MornKanban.git ~/git/MornKanban && ~/git/MornKanban/kanban-setup.sh install` (creates/repairs the `~/.local/bin/kanban` symlink and the Claude Code/Codex skills; `ln -s ~/git/MornKanban/kanban.sh ~/.local/bin/kanban` alone still works but skips the skill install).
 - Per project: `kanban init` creates `.kanban/{todo,doing,review,done,failed}/` plus a `KANBAN.md` policy template (commit them; cards are git history).
 - When asked to set up kanban for a project, run `kanban init`, then fill `.kanban/KANBAN.md` with the project's agent/model composition and card policy through dialogue with the user. A second `kanban init` never overwrites an existing `KANBAN.md`.
 
 ## Setup Wizard
 
 - `./kanban-setup.sh` runs an interactive CLI wizard: it shows the environment status and asks once — `y` installs (CLI symlink + Claude Code/Codex skill, idempotent), `u` uninstalls (removes only what this installer created), `N` does nothing.
+- `./kanban-setup.sh {install|update|uninstall|version}` runs the same actions non-interactively. This is how a first install works, before `~/.local/bin/kanban` exists — `kanban.sh {install|update|uninstall|version}` is equivalent once the symlink is in place.
 - Project onboarding is **not** part of the wizard: open a Herdr pane in the project and invoke **`$kanban-dispatch 秘書として開始`**. The skill initializes the board, verifies visible Herdr execution, and makes the current conversation the secretary (see Secretary Bootstrap below).
 - Requirements: bash + python3 (the same as `kanban.sh` itself).
+
+## Versioning and Updates
+
+- The repository ships a committed `VERSION` file (semantic `X.Y.Z`) as the single source of truth for the installed distribution version.
+- `kanban --version` prints only the locally installed version, read from `VERSION` next to the resolved script — no network access.
+- `kanban version` prints the current version, the latest published version, and the comparison state (`up-to-date` / `update-available` / `local-ahead` / `unknown`). Because this repository currently has no tags or GitHub Releases, "latest published" means the raw `VERSION` file on `main` on GitHub. Set `KANBAN_VERSION_URL` (a `file://` URL works) to override the source, e.g. for tests.
+- `kanban update` refuses a dirty, detached, or non-`main` checkout (it never discards or stashes user changes), then runs `git pull --ff-only origin main` and reinstalls the CLI symlink and skills from the freshly pulled code.
+- `kanban install` / `kanban uninstall` (re)create or remove `~/.local/bin/kanban` and the Claude Code/Codex `kanban-dispatch` skills; uninstall only removes installer-managed files and leaves the repository checkout and all project boards untouched.
+- The installed skill's rendered `SKILL.md` embeds both the resolved repository path and the distribution version at install/update time.
+- `kanban.sh` resolves its own real location by following symlinks (e.g. the `~/.local/bin/kanban` entry point), so these commands work whether invoked directly or through the installed symlink.
 
 ## Secretary Bootstrap (one-liner)
 

@@ -5,7 +5,8 @@ description: "Initialize and run a visible MornKanban secretary session. Use whe
 
 # MornKanban secretary
 
-The authoritative MornKanban checkout is `__MORNKANBAN_REPO__`. Read its
+The authoritative MornKanban checkout is `__MORNKANBAN_REPO__` (installed
+version `__MORNKANBAN_VERSION__`). Read its
 `README.md`, especially **Secretary Bootstrap**, **Dialogue-Agent Contract**,
 and **Herdr Integration**. Project policy in `.kanban/KANBAN.md` overrides the
 generic contract.
