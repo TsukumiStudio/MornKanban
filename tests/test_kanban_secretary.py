@@ -22,6 +22,16 @@ KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
 # .kanban/wt/<id> worktree by design).
 DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
 
+# `KANBAN_TEST_TIER=fast` skips the handful of tests that drive a real
+# `kanban.sh run --once` end to end (real git worktree/branch/merge
+# subprocesses, ~2s each). They stay in the default/full run; fast is for
+# tight worker/rework iteration where the rest of the suite already covers
+# the touched unit. See gui/VERIFY.md "テストの段階 (fast / full)".
+FULL_ONLY = unittest.skipIf(
+    os.environ.get("KANBAN_TEST_TIER") == "fast",
+    "full tier only: real kanban.sh run --once git worktree/merge integration",
+)
+
 
 def _copy_dist(dest):
     dest = Path(dest)
@@ -1060,6 +1070,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         """
     )
 
+    @FULL_ONLY
     def test_no_conflict_merge_still_works(self):
         worker = self._write_script(
             "worker.sh",
@@ -1115,6 +1126,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
             ),
         )
 
+    @FULL_ONLY
     def test_merge_conflict_after_review_goes_to_resolver_then_done(self):
         self._seed_conflict()
         worker = self._conflicting_worker()
@@ -1169,6 +1181,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertNotIn("kanban/", branches)
         self.assertNotIn("kanban-resolve/", branches)
 
+    @FULL_ONLY
     def test_resolver_retries_on_low_review_score_then_passes(self):
         self._seed_conflict()
         worker = self._conflicting_worker()
@@ -1226,6 +1239,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertIn("still conflicted", card_text)
         self.assertEqual(count_file.read_text(encoding="utf-8").strip(), "2")
 
+    @FULL_ONLY
     def test_resolve_max_attempts_exceeded_moves_to_failed_with_history(self):
         cfg = self.project / ".kanban" / "KANBAN.md"
         text = cfg.read_text(encoding="utf-8")
@@ -1285,6 +1299,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         # branches must actually still exist on disk, not just claimed
         self.assertTrue((self.project / ".git").exists())
 
+    @FULL_ONLY
     def test_resolve_cmd_receives_card_routing_and_conflict_context(self):
         self._seed_conflict()
         worker = self._conflicting_worker()
@@ -1339,6 +1354,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already running", result.stdout + result.stderr)
 
+    @FULL_ONLY
     def test_resolving_orphan_is_reclaimed_and_not_double_processed(self):
         card = self._add_card("orphan card")
         card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)

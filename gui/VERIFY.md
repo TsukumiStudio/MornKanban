@@ -30,6 +30,35 @@ node --test tests/test_monitor_state.js
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/kanban-dispatch
 ```
 
+### テストの段階 (fast / full)
+
+`tests/test_kanban_secretary.py` の `DispatcherWorkflowTests` のうち実際に
+`kanban.sh run --once` を1回通しで走らせる6本 (`test_no_conflict_merge_still_works`,
+`test_merge_conflict_after_review_goes_to_resolver_then_done`,
+`test_resolver_retries_on_low_review_score_then_passes`,
+`test_resolve_max_attempts_exceeded_moves_to_failed_with_history`,
+`test_resolve_cmd_receives_card_routing_and_conflict_context`,
+`test_resolving_orphan_is_reclaimed_and_not_double_processed`) は、実 git
+worktree/branch/merge を毎回作り直すため1本あたり約2秒かかり、全体の実行時間の
+過半を占める (計測: 変更前 python テスト合計 中央値 36.1s → 上記6本を除いた
+fast tier で 10.8s、full tier (全件) で 24.2s。3回計測の中央値、同一 machine)。
+
+- **fast**: `KANBAN_TEST_TIER=fast python3 -m unittest tests/test_kanban_secretary.py tests/test_monitor.py tests/test_registry.py tests/test_secretary_guard.py` +
+  `node --test tests/test_monitor_state.js` + 構文チェック一式。ワーカーの通常
+  iteration/rework で使う。上記6本は `unittest.skipIf` でスキップされ
+  (`skipped=6` と表示される)、それ以外の147本 (git worktree を伴わない
+  dispatcher/resolver/monitor/registry/guard 単体ロジック) は毎回実行する。
+- **full**: `KANBAN_TEST_TIER` を設定しない (未設定がデフォルト)。上記6本を含む
+  全153本 + node テスト + skill validation を実行する。**マージ前の最終gate
+  として必ず1回はfullを実行する。** `review_enabled: false` のプロジェクトでも、
+  reviewerをfullゲート目的だけに起動するのではなく、ワーカー自身か専用の
+  マージ前ステップがfullを実行してから完了とする。
+- fastで緑になったことは「回帰なし」の証明にはならない。上記6本が担保する
+  git worktree/merge/conflict/resolver/retry の実結合動作はfullでしか検証されない。
+
+コマンドがcardに明記されている場合はそちらを優先する。特に指定が無い通常の
+worker rework 反復では fast、マージ直前には full を使う。
+
 テスト対象:
 
 - 秘書 bootstrap が `.kanban/KANBAN.md` を初期化し、current Herdr agent を `secretary` として登録する
