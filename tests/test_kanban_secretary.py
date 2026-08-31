@@ -1043,5 +1043,41 @@ class SecretaryDoesNotHoldCardsBackContractTests(unittest.TestCase):
         self.assertIn("resolve_max_attempts", text)
 
 
+class SecretaryForbidsInProcessDelegationContractTests(unittest.TestCase):
+    """Locks the "カードなしの in-process delegation / visible pane なしの自己実装
+    禁止" contract into README, SKILL.md, and the generated KANBAN.md template so
+    a future doc edit cannot silently drop the ban or the required
+    `kanban add` -> `kanban-secretary.sh dispatch` escape hatch."""
+
+    def test_readme_forbids_in_process_delegation_and_names_forbidden_tools(self):
+        text = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("No in-process delegation from the secretary pane", text)
+        self.assertIn("Agent", text)
+        self.assertIn("Task", text)
+        self.assertIn("collaboration/subagent-spawning feature", text)
+        self.assertIn("kanban add", text)
+        self.assertIn("kanban-secretary.sh dispatch", text)
+
+    def test_skill_forbids_in_process_delegation_and_names_forbidden_tools(self):
+        text = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        self.assertIn("Forbidden: in-process delegation from this pane", normalized)
+        self.assertIn("never launch this CLI's own built-in subagent/delegation tool", normalized)
+        self.assertIn("Agent`/`Task`", normalized)
+        self.assertIn("collaboration or", normalized)
+        self.assertIn("subagent spawning", normalized)
+        self.assertIn("visible Herdr pane", normalized)
+        self.assertIn("kanban add", normalized)
+        self.assertIn("kanban-secretary.sh dispatch", normalized)
+
+    def test_kanban_md_template_forbids_in_process_delegation_and_names_forbidden_tools(self):
+        text = (REPO / "kanban.sh").read_text(encoding="utf-8")
+        self.assertIn("in-process delegation 禁止", text)
+        self.assertIn("Agent`/`Task` (Claude Code)", text)
+        self.assertIn("collaboration/subagent 起動 (Codex)", text)
+        self.assertIn("kanban add", text)
+        self.assertIn("kanban-secretary.sh dispatch", text)
+
+
 if __name__ == "__main__":
     unittest.main()
