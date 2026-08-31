@@ -4,9 +4,30 @@ Mirrors the card format written by kanban.sh (YAML-ish frontmatter delimited
 by `---` lines, followed by a Markdown body with a `## History` section) but
 never writes anything back.
 """
+import json
 import os
 
 STATES = ["todo", "doing", "review", "resolving", "blocked", "done", "failed"]
+
+
+def agent_activity(kanban_dir, limit=200):
+    """Read recent sanitized worker/reviewer/resolver correlation events."""
+    path = os.path.join(kanban_dir, "activity.jsonl")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    events = []
+    for line in lines[-max(1, limit):]:
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    events.sort(key=lambda item: item.get("timestamp", 0), reverse=True)
+    return events[:limit]
 
 
 def list_cards(kanban_dir, state):
@@ -166,4 +187,5 @@ def board_detail(kanban_dir):
         "counts": {s: len(columns[s]) for s in STATES},
         "columns": columns,
         "dispatcher": dispatcher_status(kanban_dir),
+        "agent_activity": agent_activity(kanban_dir),
     }

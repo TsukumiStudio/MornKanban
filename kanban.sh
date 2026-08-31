@@ -213,7 +213,7 @@ cmd_init() {
   local base=${1:-$PWD}/.kanban
   for s in "${STATES[@]}"; do mkdir -p "$base/$s"; done
   touch "$base"/{todo,doing,review,done,failed}/.gitkeep
-  printf 'wt/\n.lock\n.merge.lock\n' >"$base/.gitignore"
+  printf 'wt/\n.lock\n.merge.lock\nactivity.jsonl\nactivity.jsonl.lock\n' >"$base/.gitignore"
   if [[ ! -f $base/KANBAN.md ]]; then
     cat >"$base/KANBAN.md" <<'EOF'
 ---
@@ -606,7 +606,7 @@ invoke_reviewer() { # invoke_reviewer <card> <workdir> <prompt> <attempt-label> 
   title=$(fm_get "$file" title "")
   rcmd=$(review_cmd)
   t0=$SECONDS
-  review_out=$( (cd "$workdir" && KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<<"$prompt") ) || true
+  review_out=$( (cd "$workdir" && KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<<"$prompt") ) || true
   ATT_REVIEW_SECS=$((ATT_REVIEW_SECS + SECONDS - t0))
   echo "$review_out" | tail -n 40 | append_history "$file" "reviewer output (tail)"
   parsed=$(echo "$review_out" | parse_score)
@@ -671,6 +671,7 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
     ATT_WORKER_STATUS=0
     out=$( (cd "$workdir" && card_body "$file" |
       KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \
+      KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} \
       KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || ATT_WORKER_STATUS=$?
     ATT_WORKER_SECS=$((ATT_WORKER_SECS + SECONDS - t0))
     echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
@@ -769,6 +770,7 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   t0=$SECONDS
   out=$( (cd "$workdir" && printf '%s' "$prompt" |
     KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \
+    KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} \
     KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title \
     KANBAN_CONFLICT_FILES=$conflict_files KANBAN_BASE_BRANCH=$base_branch KANBAN_CARD_BRANCH=$card_branch \
     $wcmd 2>&1) ) || true

@@ -124,8 +124,9 @@ run_worker() { # run_worker <scen-dir> <worktree-dir> [role] [backend] -> stdout
     KANBAN_HERDR_ROLE="$role" \
     KANBAN_BACKEND_ORDER="$backend" KANBAN_CARD_BACKEND="$backend" \
     KANBAN_REVIEWER="$backend" KANBAN_RESOLVER="$backend" \
-    KANBAN_HERDR_POLL_INTERVAL=1 KANBAN_HERDR_SETTLE_CHECKS=2 \
-    KANBAN_HERDR_STABLE_SLEEP=1 KANBAN_HERDR_ANSWER_WAIT_SECS="${MOCK_MAX_WAIT:-15}" \
+    KANBAN_HERDR_POLL_INTERVAL=0.1 KANBAN_HERDR_SETTLE_CHECKS=2 \
+    KANBAN_HERDR_STABLE_SLEEP=0.05 KANBAN_HERDR_ANSWER_WAIT_SECS="${MOCK_MAX_WAIT:-3}" \
+    KANBAN_ACTIVITY_LOG="$scen/activity.jsonl" \
     MOCK_SCEN_DIR="$scen" \
     PATH="$scen/bin:$PATH" \
     "$WORKER" <<<"card body" 2>"$scen/stderr.log")
@@ -154,6 +155,8 @@ EOF
   run_worker "$SCEN" "$WT"
   assert_eq "exits 0 once the answer actually lands" "$RC" "0"
   assert_contains "stdout carries the real answer" "$OUT" "FINAL ANSWER CONTENT"
+  assert_contains "correlation log records the card" "$(cat "$SCEN/activity.jsonl")" '"card_id":"test-card"'
+  assert_contains "correlation log records pane and agent lifecycle" "$(cat "$SCEN/activity.jsonl")" '"event":"answer_accepted"'
   local calls
   calls=$(wc -l <"$SCEN/get_calls")
   if ((calls >= 4)); then
@@ -222,7 +225,7 @@ test_idle_without_answer_times_out() {
   note "scenario: agent reports idle/done repeatedly but never writes an answer"
   new_scenario
   printf 'idle\n' >"$SCEN/statuses"
-  MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT"
+  MOCK_MAX_WAIT=0.5 run_worker "$SCEN" "$WT"
   assert_eq "exits non-zero (infrastructure error, not success)" "$RC" "1"
   assert_eq "stdout is empty -- no terminal-status-line stand-in for the answer" "$OUT" ""
   assert_contains "stderr explains the timeout" "$ERR" "timed out"
@@ -254,10 +257,10 @@ test_answer_completes_atomically() {
   # `agent get` call instead of before run_worker, so ordering is guaranteed.
   cat >"$SCEN/on_call_1" <<EOF
 ( printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\nPART1-' >"$WT/.kanban-answer.md"
-  sleep 2.5
+  sleep 0.25
   printf 'PART2-DONE\n' >>"$WT/.kanban-answer.md" ) &
 EOF
-  MOCK_MAX_WAIT=20 run_worker "$SCEN" "$WT"
+  MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT"
   assert_eq "completes successfully once stable" "$RC" "0"
   assert_contains "full content present" "$OUT" "PART1-PART2-DONE"
   assert_not_contains "never emitted a truncated mid-write read as the answer" "$OUT" $'PART1-\n'
@@ -284,7 +287,7 @@ EOF
       note "scenario: role=$role backend=$backend no-answer timeout"
       new_scenario
       printf 'idle\n' >"$SCEN/statuses"
-      MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT" "$role" "$backend"
+      MOCK_MAX_WAIT=0.5 run_worker "$SCEN" "$WT" "$role" "$backend"
       assert_eq "[$role/$backend] times out as an infra error" "$RC" "1"
       assert_eq "[$role/$backend] stdout stays empty on timeout" "$OUT" ""
       rm -rf "$SCEN"

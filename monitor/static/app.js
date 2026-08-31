@@ -35,6 +35,7 @@
   const boardSection = document.getElementById("board-section");
   const boardColumns = document.getElementById("board-columns");
   const boardTitle = document.getElementById("board-title");
+  const agentActivityList = document.getElementById("agent-activity-list");
   const activityList = document.getElementById("activity-list");
   const updatedAt = document.getElementById("updated-at");
   const backBtn = document.getElementById("back-btn");
@@ -143,6 +144,26 @@
     }
   }
 
+  function renderAgentActivity(events) {
+    agentActivityList.textContent = "";
+    if (!events || !events.length) {
+      agentActivityList.appendChild(el("div", "agent-activity-empty", "まだ実行ログはありません"));
+      return;
+    }
+    for (const event of events) {
+      const row = el("div", "agent-activity-row");
+      const identity = [event.card_id, event.role, "attempt " + event.attempt].filter(Boolean).join(" · ");
+      const runtime = [event.backend, event.model, event.agent_name, event.pane_id].filter(Boolean).join(" / ");
+      const main = el("div");
+      main.appendChild(el("div", "agent-activity-event", event.event + (event.status ? " · " + event.status : "")));
+      main.appendChild(el("div", "agent-activity-meta", identity));
+      main.appendChild(el("div", "agent-activity-meta", runtime));
+      row.appendChild(main);
+      row.appendChild(el("div", "agent-activity-time", fmtTime(event.timestamp) + " · " + (event.duration_secs || 0) + "s"));
+      agentActivityList.appendChild(row);
+    }
+  }
+
   function renderBoardFromState() {
     boardSection.classList.toggle("is-loading", state.board.status === "loading");
     boardSection.classList.toggle("is-error", state.board.status === "error");
@@ -152,17 +173,20 @@
 
     if (state.board.status === "loading") {
       boardTitle.textContent = "読み込み中: " + slug;
+      agentActivityList.textContent = "";
       renderBoardSkeleton();
       return;
     }
     if (state.board.status === "error") {
       boardTitle.textContent = slug + " (読み込み失敗)";
+      agentActivityList.textContent = "";
       renderBoardErrorPanel(slug, state.board.error);
       return;
     }
     const data = state.board.data;
     boardTitle.textContent = data.name + " (" + data.root + ")";
     renderBoardColumns(data);
+    renderAgentActivity(data.agent_activity);
   }
 
   async function fetchBoard(slug, generation, signal) {

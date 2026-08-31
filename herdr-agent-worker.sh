@@ -26,6 +26,17 @@ fi
 
 role=${KANBAN_HERDR_ROLE:-worker}
 name=$(echo "${role}-$$-$RANDOM" | tr -cd 'a-z0-9_-' | cut -c1-31)
+started_epoch=$(date +%s)
+activity_log=${KANBAN_ACTIVITY_LOG:-}
+
+log_activity() { # log_activity <event> <status>
+  [[ -n $activity_log ]] || return 0
+  python3 "$(cd "$(dirname "$0")" && pwd)/activity_log.py" "$activity_log" \
+    --event "$1" --status "${2:-}" --card-id "${card_id:-unknown}" \
+    --role "$role" --attempt "${attempt:-0}" --backend "${backend:-}" \
+    --model "${model:-}" --agent-name "$name" --pane-id "${pane:-}" \
+    --duration-secs "$(($(date +%s) - started_epoch))" >/dev/null 2>&1 || true
+}
 
 resolve_auto_backend() { # echo first installed backend from KANBAN_BACKEND_ORDER
   local b
@@ -157,6 +168,7 @@ fi
 # score or a genuinely empty worker diff, so it must be the first line of
 # stdout and nothing else score-shaped should follow it.
 infra_error() {
+  log_activity infra_error "$1"
   printf 'KANBAN_INFRA_ERROR: %s: %s\n' "$1" "$2" >&2
   exit 1
 }
@@ -180,6 +192,8 @@ if ! herdr agent start "$name" --kind "$backend" --pane "$pane" --timeout 45000 
     infra_error agent_not_found "role=$role backend=$backend: agent never became ready after start"
   fi
 fi
+
+log_activity agent_started running
 
 herdr agent prompt "$name" "$(cat "$tmp/prompt.md")" --wait --timeout 1500000 >/dev/null 2>&1 || true
 
@@ -214,8 +228,8 @@ POLL_INTERVAL=${KANBAN_HERDR_POLL_INTERVAL:-3}
 SETTLE_CHECKS=${KANBAN_HERDR_SETTLE_CHECKS:-2}
 STABLE_SLEEP=${KANBAN_HERDR_STABLE_SLEEP:-2}
 MAX_WAIT_SECS=${KANBAN_HERDR_ANSWER_WAIT_SECS:-1500}
-max_iters=$((MAX_WAIT_SECS / POLL_INTERVAL))
-[[ $max_iters -lt 1 ]] && max_iters=1
+max_iters=$(python3 -c 'import math,sys; print(max(1, math.ceil(float(sys.argv[1]) / float(sys.argv[2]))))' "$MAX_WAIT_SECS" "$POLL_INTERVAL") ||
+  infra_error wrapper_error "invalid poll/timeout settings: interval=$POLL_INTERVAL timeout=$MAX_WAIT_SECS"
 
 settle_count=0
 lost=0
@@ -282,5 +296,6 @@ fi
 if [[ -z $body ]]; then
   infra_error empty_answer "role=$role: answer body was empty after a valid identity line"
 fi
+log_activity answer_accepted ok
 echo ""
 printf '%s\n' "$body"

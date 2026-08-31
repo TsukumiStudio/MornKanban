@@ -205,6 +205,15 @@ class BoardTest(unittest.TestCase):
         items = board.last_activity(self.kb)
         self.assertEqual(items[0]["filename"], "b.md")
 
+    def test_agent_activity_reads_recent_jsonl_and_ignores_malformed_rows(self):
+        path = os.path.join(self.kb, "activity.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('{"timestamp":1,"event":"agent_started","card_id":"c1"}\n')
+            fh.write('not json\n')
+            fh.write('{"timestamp":2,"event":"answer_accepted","card_id":"c1"}\n')
+        events = board.agent_activity(self.kb)
+        self.assertEqual([event["event"] for event in events], ["answer_accepted", "agent_started"])
+
 
 class ServerTest(unittest.TestCase):
     def setUp(self):
@@ -268,10 +277,13 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(proj["counts"]["todo"], 1)
 
     def test_project_detail_and_card(self):
+        with open(os.path.join(self.kb, "activity.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write('{"timestamp":1,"event":"agent_started","card_id":"c1","role":"worker"}\n')
         status, data = self._get("/api/projects/proj")
         self.assertEqual(status, 200)
         detail = json.loads(data)
         self.assertEqual(detail["counts"]["todo"], 1)
+        self.assertEqual(detail["agent_activity"][0]["card_id"], "c1")
 
         status, data = self._get("/api/projects/proj/cards/todo/a.md")
         self.assertEqual(status, 200)
