@@ -138,7 +138,15 @@ def api_status():
     }
 
 
+def guard_not_worktree():
+    if "/.kanban/wt/" in REPO:
+        raise ApiError(
+            "refusing to install from a kanban worktree; run the GUI from the real checkout"
+        )
+
+
 def api_install_cli():
+    guard_not_worktree()
     os.makedirs(LOCAL_BIN, exist_ok=True)
     if os.path.lexists(KANBAN_LINK):
         if not os.path.islink(KANBAN_LINK):
@@ -149,6 +157,7 @@ def api_install_cli():
 
 
 def api_install_skill(body):
+    guard_not_worktree()
     force = bool(body.get("force"))
     if os.path.isfile(SKILL_PATH) and not force:
         raise ApiError("already installed (force で上書き)", 409)
