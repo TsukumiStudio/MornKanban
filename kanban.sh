@@ -10,9 +10,10 @@
 # See README.md for the workflow contract.
 set -euo pipefail
 
-STATES=(todo doing review done failed)
+STATES=(todo doing review resolving blocked done failed)
 DEFAULT_THRESHOLD=80
 DEFAULT_MAX_ATTEMPTS=3
+DEFAULT_RESOLVE_MAX_ATTEMPTS=2
 DEFAULT_BACKEND=auto
 DEFAULT_MODEL=""
 BACKENDS="claude codex"
@@ -73,9 +74,12 @@ load_project_config() { # .kanban/KANBAN.md frontmatter -> defaults (env still w
   DEFAULT_MODEL=$(fm_get "$cfg" default_model "$DEFAULT_MODEL")
   DEFAULT_THRESHOLD=$(fm_get "$cfg" threshold "$DEFAULT_THRESHOLD")
   DEFAULT_MAX_ATTEMPTS=$(fm_get "$cfg" max_attempts "$DEFAULT_MAX_ATTEMPTS")
+  DEFAULT_RESOLVE_MAX_ATTEMPTS=$(fm_get "$cfg" resolve_max_attempts "$DEFAULT_RESOLVE_MAX_ATTEMPTS")
   cfg_env "$cfg" backend_order KANBAN_BACKEND_ORDER
   cfg_env "$cfg" reviewer KANBAN_REVIEWER
   cfg_env "$cfg" review_model KANBAN_REVIEW_MODEL
+  cfg_env "$cfg" resolver KANBAN_RESOLVER
+  cfg_env "$cfg" resolve_model KANBAN_RESOLVE_MODEL
   cfg_env "$cfg" jobs KANBAN_JOBS
   cfg_env "$cfg" claude_perms KANBAN_CLAUDE_PERMS
   cfg_env "$cfg" codex_sandbox KANBAN_CODEX_SANDBOX
@@ -142,8 +146,11 @@ default_backend: auto
 default_model: sonnet
 reviewer: auto
 review_model: sonnet
+resolver: auto
+resolve_model: sonnet
 threshold: 80
 max_attempts: 3
+resolve_max_attempts: 2
 jobs: 2
 claude_perms: acceptEdits
 codex_sandbox: workspace-write
@@ -154,15 +161,26 @@ codex_sandbox: workspace-write
 秘書 (対話) エージェントはカードを切る前にこのファイルを読み、以下に従うこと。
 frontmatter は kanban CLI が既定値として読む (環境変数が優先)。
 
+## 秘書契約 (最重要)
+
+- **秘書はファイル重複・依存順序・実行中カードとの競合を理由に起票を保留しない。**
+  明白な自己完結情報が揃い次第、即座に `todo` へ追加して dispatcher へ渡す。
+- 秘書は競合調査・rebase/merge・修正・検証を一切行わない。それらは実行側
+  (dispatcher/worker/reviewer/resolver) の責務であり、正式な状態遷移で処理する。
+- 順序依存やファイル競合の解決は実行時に判明してから実行側が処理する。秘書へ
+  戻さない。
+
 ## エージェント・モデル構成
 
-- **既定方針: 上位モデル (fable / opus 等) は秘書・設計役だけ。手を動かすワーカーとレビュワーは下位モデルで十分**
+- **既定方針: 上位モデル (fable / opus 等) は秘書・設計役だけ。手を動かすワーカーとレビュワー・resolver は下位モデルで十分**
 - 既定: 通常実装は claude / sonnet、軽微な修正は codex / gpt-5.3-codex-spark (codex カードは -m 必須。model 名はバックエンド固有)
 - 設計・難所のカードだけ例外的に -m opus 等へ上げる (理由をカードに書く)
+- resolver も既定では worker と同じ下位モデル (`resolver` / `resolve_model`)
 
 ## カードの切り方
 
-- (例) ファイル境界で分割し、同一ファイルを触るカードは同時に投入しない
+- (例) ファイル境界で分割し、同一ファイルを触るカードは同時に投入する (競合は
+  resolver が処理する。秘書は分割の目安に使うだけで、投入を止める理由にしない)
 - (例) 完了条件と検証コマンドを必ずカード本文に書く
 
 ## ディスパッチャ運用
@@ -170,7 +188,8 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - 秘書開始時は `$kanban-dispatch 秘書として開始` を使う。スキルが環境を実測し、以後の会話では対話エージェント自身が実装しない
 - Herdr 環境ではカード追加後に `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
 - visible Herdr が利用不能なら、ユーザーが headless を明示しない限り勝手にフォールバックしない
-- (例) failed カードは秘書がユーザーへ即報告する
+- (例) failed カードは秘書がユーザーへ即報告する。resolving/blocked は実行側が
+  自律的に処理するので、秘書は failed に落ちた時だけ介入する
 
 ## 秘書契約 (最重要): in-process delegation 禁止
 
@@ -220,7 +239,9 @@ backend: $backend
 model: $model
 threshold: $threshold
 max_attempts: $DEFAULT_MAX_ATTEMPTS
+resolve_max_attempts: $DEFAULT_RESOLVE_MAX_ATTEMPTS
 attempts: 0
+resolve_attempts: 0
 created: $(date '+%Y-%m-%dT%H:%M:%S')
 ---
 
@@ -282,6 +303,28 @@ review_cmd() {
   esac
 }
 
+resolve_cmd() { # resolve_cmd <card-backend> <card-model> -> resolver invocation (editing role, like a worker)
+  if [[ -n ${KANBAN_RESOLVE_CMD:-} ]]; then echo "$KANBAN_RESOLVE_CMD"; return; fi
+  local b=${KANBAN_RESOLVER:-auto} m=${KANBAN_RESOLVE_MODEL:-}
+  [[ $b == auto ]] && b=$1
+  [[ -n $m ]] || m=$2
+  if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
+  case $b in
+    claude) echo "claude -p${m:+ --model $m} --permission-mode ${KANBAN_CLAUDE_PERMS:-acceptEdits}" ;;
+    codex) echo "codex exec --skip-git-repo-check -s ${KANBAN_CODEX_SANDBOX:-workspace-write}${m:+ -m $m}" ;;
+    *) die "unknown resolver backend: $b" ;;
+  esac
+}
+
+detect_blocked() { # detect_blocked <worker-output> -> sets BLOCKED_REASON (empty = not blocked)
+  BLOCKED_REASON=""
+  local first_line
+  first_line=$(printf '%s\n' "$1" | sed -n '1p')
+  case $first_line in
+    BLOCKED:*) BLOCKED_REASON=${first_line#BLOCKED:} ;;
+  esac
+}
+
 parse_score() { # stdin: reviewer output -> "score<TAB>feedback" (empty on failure)
   python3 -c '
 import json, re, sys
@@ -298,9 +341,10 @@ for m in reversed(re.findall(r"\{[^{}]*\}", text, re.S)):
 '
 }
 
-run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK
+run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK / ATT_BLOCKED_REASON
   local file=$1 workdir=$2
   local backend model wcmd out title
+  ATT_BLOCKED_REASON=""
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
   title=$(fm_get "$file" title "")
@@ -310,6 +354,18 @@ run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK
   out=$( (cd "$workdir" && card_body "$file" |
     KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || true
   echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
+
+  # A worker that discovers a real-time ordering dependency (e.g. it needs
+  # another card's result that is not merged yet) signals it instead of
+  # guessing; the dialogue secretary is never consulted for this. See
+  # detect_blocked().
+  detect_blocked "$out"
+  ATT_BLOCKED_REASON=$BLOCKED_REASON
+  if [[ -n $ATT_BLOCKED_REASON ]]; then
+    ATT_SCORE=0
+    ATT_FEEDBACK=""
+    return
+  fi
 
   local rcmd review_out parsed
   rcmd=$(review_cmd)
@@ -362,6 +418,135 @@ merge_lock() { # merge_lock <acquire|release>
   fi
 }
 
+run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict-files> <base-branch> <card-branch> -> sets ATT_SCORE/ATT_FEEDBACK
+  local file=$1 workdir=$2 conflict_files=$3 base_branch=$4 card_branch=$5
+  local backend model wcmd out title prompt
+  backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
+  model=$(fm_get "$file" model "")
+  title=$(fm_get "$file" title "")
+  wcmd=$(resolve_cmd "$backend" "$model")
+  prompt=$(printf 'You are the conflict-resolution role for MornKanban. Card branch %s passed review but conflicts with the current base branch %s. Resolve the conflict in this worktree, preserving the intent of BOTH sides -- never simply discard one side. Run any tests the task requires, then leave the tree conflict-free.\n\nConflicted files:\n%s\n\nOriginal task:\n%s\n' \
+    "$card_branch" "$base_branch" "$conflict_files" "$(card_body "$file")")
+  out=$( (cd "$workdir" && printf '%s' "$prompt" |
+    KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title \
+    KANBAN_CONFLICT_FILES=$conflict_files KANBAN_BASE_BRANCH=$base_branch KANBAN_CARD_BRANCH=$card_branch \
+    $wcmd 2>&1) ) || true
+  echo "$out" | tail -n 40 | append_history "$file" "resolver output (tail)"
+  git -C "$workdir" add -A
+  git -C "$workdir" commit -q --allow-empty -m "kanban: resolve conflict for $title"
+
+  if git -C "$workdir" diff --name-only --diff-filter=U | grep -q .; then
+    ATT_SCORE=0
+    ATT_FEEDBACK="conflict markers remain unresolved after the resolver's attempt"
+    return
+  fi
+
+  local rcmd review_out parsed
+  rcmd=$(review_cmd)
+  review_out=$( (cd "$workdir" && KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<EOF
+You are a strict reviewer. This worktree is the result of resolving a merge
+conflict between card branch $card_branch and base branch $base_branch.
+Inspect the actual files and diffs; do not trust the resolver's claims. Judge
+whether BOTH sides' intent was preserved and the task below is genuinely
+complete.
+
+$(card_body "$file")
+
+Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
+EOF
+  ) ) || true
+  parsed=$(echo "$review_out" | parse_score)
+  if [[ -z $parsed ]]; then
+    ATT_SCORE=0
+    ATT_FEEDBACK="reviewer output was not parseable JSON: $(echo "$review_out" | tail -c 200)"
+  else
+    ATT_SCORE=${parsed%%$'\t'*}
+    ATT_FEEDBACK=${parsed#*$'\t'}
+  fi
+}
+
+record_resolve_attempt() { # record_resolve_attempt <card> <threshold> -> increments resolve_attempts
+  local file=$1 threshold=$2 attempts
+  attempts=$(($(fm_get "$file" resolve_attempts 0) + 1))
+  fm_set "$file" resolve_attempts "$attempts"
+  printf 'score: %s / threshold: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$ATT_FEEDBACK" |
+    append_history "$file" "resolve review"
+}
+
+process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <card_wt> <conflict_files>
+  # Called when a card passed review but its branch conflicts with base at
+  # merge time. Dedicated resolver role: never discards either side, keeps
+  # both branches until it truly succeeds or gives up, and only ever merges
+  # the resolve branch into base (never the original card branch again --
+  # no double-merge).
+  local file=$1 base_branch=$2 card_branch=$3 card_wt=$4 conflict_files=$5
+  local id title threshold resolve_max_attempts resolve_attempts
+  id=$(fm_get "$file" id "?")
+  title=$(fm_get "$file" title "?")
+  threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
+  resolve_max_attempts=$(fm_get "$file" resolve_max_attempts "$DEFAULT_RESOLVE_MAX_ATTEMPTS")
+  resolve_attempts=$(fm_get "$file" resolve_attempts 0)
+  local resolve_branch=kanban-resolve/$id resolve_wt=$KB/wt/$id-resolve
+  local tag="[$title]"
+
+  move_card "$file" resolving >/dev/null
+  file=$KB/resolving/$(basename "$file")
+  git -C "$ROOT" worktree remove --force "$card_wt" 2>/dev/null || true
+
+  if ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
+    echo "resolve worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
+    git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
+    move_card "$file" failed >/dev/null
+    echo "$tag FAIL resolve worktree add failed -> failed"
+    notify_result failed "$title"
+    return
+  fi
+  git -C "$resolve_wt" merge --no-ff -q -m "kanban: merge $card_branch for conflict resolution" "$card_branch" \
+    2>>"$KB/wt/$id.log" || true
+
+  local resolved=false
+  while [[ $resolve_attempts -lt $resolve_max_attempts ]]; do
+    echo "$tag resolve attempt $((resolve_attempts + 1))/$resolve_max_attempts (branch: $resolve_branch)"
+    run_resolve_attempt "$file" "$resolve_wt" "$conflict_files" "$base_branch" "$card_branch"
+    record_resolve_attempt "$file" "$threshold"
+    resolve_attempts=$((resolve_attempts + 1))
+    if [[ $ATT_SCORE -ge $threshold ]]; then resolved=true; break; fi
+    echo "$tag RESOLVE RETRY score=$ATT_SCORE"
+    printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
+  done
+
+  if ! $resolved; then
+    printf 'conflict files: %s\nresolve branch %s and original card branch %s are kept for manual inspection.\n' \
+      "$conflict_files" "$resolve_branch" "$card_branch" | append_history "$file" "gave up (conflict unresolved)"
+    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    move_card "$file" failed >/dev/null
+    echo "$tag FAIL resolve score=$ATT_SCORE attempts exhausted -> failed (branches $resolve_branch, $card_branch kept)"
+    notify_result failed "$title"
+    return
+  fi
+
+  merge_lock acquire
+  if git -C "$ROOT" merge --no-ff -q -m "kanban: $title (conflict resolved)" "$resolve_branch" 2>>"$KB/wt/$id.log"; then
+    merge_lock release
+    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
+    rm -f "$KB/wt/$id.log"
+    move_card "$file" done >/dev/null
+    echo "$tag PASS resolve score=$ATT_SCORE -> done (merged into $base_branch)"
+    notify_result done "$title"
+  else
+    git -C "$ROOT" merge --abort 2>/dev/null || true
+    merge_lock release
+    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    printf 'resolve passed review (score %s) but merging %s into %s failed; branches %s and %s kept for manual merge.\n' \
+      "$ATT_SCORE" "$resolve_branch" "$base_branch" "$resolve_branch" "$card_branch" |
+      append_history "$file" "merge conflict (post-resolve)"
+    move_card "$file" failed >/dev/null
+    echo "$tag CONFLICT (post-resolve) -> failed (branches kept; merge manually)"
+    notify_result failed "$title"
+  fi
+}
+
 process_card_seq() { # non-git fallback: run in place, retry via todo
   local file=$1
   local title threshold max_attempts attempts
@@ -372,6 +557,13 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
 
   echo "==> [$title] attempt $((attempts + 1))/$max_attempts"
   run_attempt "$file" "$ROOT"
+  if [[ -n $ATT_BLOCKED_REASON ]]; then
+    printf 'worker reported a real-time ordering dependency:%s\n' "$ATT_BLOCKED_REASON" |
+      append_history "$file" "blocked"
+    move_card "$file" blocked >/dev/null
+    echo "    BLOCKED ->$ATT_BLOCKED_REASON -> blocked (reclaimed on next dispatcher pass)"
+    return
+  fi
   record_attempt "$file" "$threshold"
   attempts=$((attempts + 1))
 
@@ -413,6 +605,15 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   while [[ $attempts -lt $max_attempts ]]; do
     echo "$tag attempt $((attempts + 1))/$max_attempts (branch: $branch)"
     run_attempt "$file" "$wt"
+    if [[ -n $ATT_BLOCKED_REASON ]]; then
+      printf 'worker reported a real-time ordering dependency:%s\nworktree is discarded; the card restarts on a fresh worktree from the next pickup.\n' \
+        "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
+      git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+      git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
+      move_card "$file" blocked >/dev/null
+      echo "$tag BLOCKED ->$ATT_BLOCKED_REASON -> blocked"
+      return
+    fi
     git -C "$wt" add -A
     git -C "$wt" commit -q --allow-empty -m "kanban: $title (attempt $((attempts + 1)))"
     record_attempt "$file" "$threshold"
@@ -441,14 +642,13 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     echo "$tag PASS score=$ATT_SCORE -> done (merged into $base_branch)"
     notify_result done "$title"
   else
+    local conflict_files
+    conflict_files=$(git -C "$ROOT" diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')
     git -C "$ROOT" merge --abort 2>/dev/null || true
     merge_lock release
-    git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
-    printf 'work passed review (score %s) but merging %s into %s failed; merge it manually.\n' \
-      "$ATT_SCORE" "$branch" "$base_branch" | append_history "$file" "merge conflict"
-    move_card "$file" failed >/dev/null
-    echo "$tag CONFLICT -> failed (branch $branch kept; merge manually)"
-    notify_result failed "$title"
+    printf 'work passed review (score %s) but merging %s into %s conflicted on: %s\nhanding off to the resolver role instead of failing immediately.\n' \
+      "$ATT_SCORE" "$branch" "$base_branch" "$conflict_files" | append_history "$file" "merge conflict"
+    process_resolve_wt "$file" "$base_branch" "$branch" "$wt" "$conflict_files"
   fi
 }
 
@@ -473,9 +673,37 @@ cmd_run() {
   worker_cmd "$DEFAULT_BACKEND" "" >/dev/null
   review_cmd >/dev/null
   # Reclaim cards stranded by a crashed dispatcher (lock guarantees exclusivity).
-  local orphan
+  # resolving/blocked cards also fold back their leftover worktree/branch so
+  # the card restarts clean on its next pickup instead of colliding with
+  # `git worktree add -b` on a name that already exists.
+  local orphan is_git=false
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 && is_git=true
   for orphan in "$KB"/doing/*.md "$KB"/review/*.md; do
     if [[ -e $orphan ]]; then move_card "$orphan" todo >/dev/null; fi
+  done
+  for orphan in "$KB"/resolving/*.md; do
+    if [[ -e $orphan ]]; then
+      local rid
+      rid=$(fm_get "$orphan" id "?")
+      if $is_git && [[ $rid != "?" ]]; then
+        git -C "$ROOT" worktree remove --force "$KB/wt/$rid-resolve" 2>/dev/null || true
+        git -C "$ROOT" branch -q -D "kanban-resolve/$rid" 2>/dev/null || true
+        git -C "$ROOT" worktree remove --force "$KB/wt/$rid" 2>/dev/null || true
+        git -C "$ROOT" branch -q -D "kanban/$rid" 2>/dev/null || true
+      fi
+      move_card "$orphan" todo >/dev/null
+    fi
+  done
+  for orphan in "$KB"/blocked/*.md; do
+    if [[ -e $orphan ]]; then
+      local bid
+      bid=$(fm_get "$orphan" id "?")
+      if $is_git && [[ $bid != "?" ]]; then
+        git -C "$ROOT" worktree remove --force "$KB/wt/$bid" 2>/dev/null || true
+        git -C "$ROOT" branch -q -D "kanban/$bid" 2>/dev/null || true
+      fi
+      move_card "$orphan" todo >/dev/null
+    fi
   done
 
   if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -504,13 +732,17 @@ cmd_run() {
       # Crash net: an unexpected error inside the job (set -e) must not strand
       # the card in doing/ silently — record it and move the card to failed.
       job_crash_net() { # job_crash_net <status> <picked>
-        local st=$1 f=$KB/doing/$(basename "$2")
-        if [[ $st -ne 0 && -f $f ]]; then
-          local t
-          t=$(fm_get "$f" title "?" 2>/dev/null || basename "$2")
-          echo "job crashed unexpectedly (exit $st); see dispatcher output" | append_history "$f"
-          mv "$f" "$KB/failed/"
-          echo "[$t] CRASH exit=$st -> failed"
+        local st=$1 base=$(basename "$2") f
+        if [[ $st -ne 0 ]]; then
+          for f in "$KB/doing/$base" "$KB/resolving/$base"; do
+            if [[ -f $f ]]; then
+              local t
+              t=$(fm_get "$f" title "?" 2>/dev/null || basename "$2")
+              echo "job crashed unexpectedly (exit $st); see dispatcher output" | append_history "$f"
+              mv "$f" "$KB/failed/"
+              echo "[$t] CRASH exit=$st -> failed"
+            fi
+          done
         fi
       }
       if [[ -n ${KANBAN_DEBUG:-} ]]; then

@@ -43,7 +43,7 @@ Visible Herdr workers are the secretary default. The bootstrap must test `HERDR_
 
 `KANBAN.md` is the project's kanban contract, in two layers:
 
-- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `threshold`, `max_attempts`, `jobs`, `claude_perms`, `codex_sandbox`. Precedence: environment variable > `KANBAN.md` > built-in default.
+- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `resolver`, `resolve_model`, `threshold`, `max_attempts`, `resolve_max_attempts`, `jobs`, `claude_perms`, `codex_sandbox`. Precedence: environment variable > `KANBAN.md` > built-in default.
 - **Body** (secretary policy): how to split cards, which backend/model to route each kind of task to, whether to auto-start the dispatcher, escalation rules. The dialogue agent must read and follow it before cutting cards.
 
 ## Dialogue-Agent Contract
@@ -52,12 +52,14 @@ When the user assigns implementation work in a project that has `.kanban/`:
 
 1. Read `.kanban/KANBAN.md` and follow its policy; it overrides the generic steps below where they differ.
 2. Write a self-contained card: `echo "<full task description>" | kanban add "<title>" [-b claude|codex] [-m model] [-t threshold]`. The worker has no conversation context; include target paths, constraints, and completion conditions.
-3. In visible secretary mode, start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, and notification commands. Never substitute bare `kanban run`, which starts invisible headless workers. A nonstandard checkout uses its own absolute helper path.
+3. In visible secretary mode, start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, resolver, and notification commands. Never substitute bare `kanban run`, which starts invisible headless workers. A nonstandard checkout uses its own absolute helper path.
 4. Return to the user immediately. Do not implement the task in the dialogue session.
 5. Report `failed/` cards to the user; they need human judgment.
 6. **Verification is delegated too.** After implementation cards merge, cut a follow-up verification card (run the app, click through it, check the acceptance criteria) instead of verifying by hand. The dialogue agent never implements, verifies, or fixes directly — it cards, dispatches, and reports.
 7. **Browser role is exclusive.** Ordinary workers must not touch browser-automation tools; verification is curl/CLI level. When a check genuinely needs a browser, cut a dedicated browser-verification card and run it **alone** (`kanban-secretary.sh dispatch --once`) — at most one browser-role agent exists at a time, and no other agent (the dialogue agent included) touches browser tools while it runs.
 8. **No in-process delegation from the secretary pane.** Once bootstrapped, the secretary must not launch this CLI's own built-in subagent tool (Claude Code's `Agent`/`Task`; Codex's collaboration/subagent-spawning feature) to do the implementation/research/review/fix/verification itself — that bypasses cards, worktrees, and board history entirely. The only allowed actions in a bootstrapped secretary pane are reading project policy/board, `kanban add`/`kanban send`, `kanban-secretary.sh dispatch`/`dispatch --once`, and reporting to the user. If an in-process agent was started by mistake, stop immediately, do not merge or adopt its output, and file the same request as a card instead. See **Secretary Guard** below for the technical enforcement.
+
+**Never hold a card back over file overlap, dependency order, or a collision with a card already in flight.** Those are execution-time concerns, resolved by the dispatcher/worker/reviewer/resolver via the formal state transitions below (`resolving`, `blocked`) — never by the secretary. Investigating conflicts, rebasing/merging, fixing, or re-verifying are not secretary actions either; write the card and dispatch it as soon as its own task description is self-contained. `resolving` and `blocked` cards are handled automatically and never need secretary attention; only `failed/` needs a human.
 
 Leave `model` empty to use the backend's own default. Model names are backend-specific — never pass a Claude model name to a codex card.
 
@@ -87,7 +89,7 @@ Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and d
 
 ## Herdr Integration (no headless workers)
 
-`kanban-secretary.sh dispatch` opens the dispatcher in a sibling [Herdr](https://herdr.dev) pane and binds `herdr-agent-worker.sh` for both workers and reviewers. Every parallel card appears as a **visible interactive agent in its own pane**, so it can be watched or interrupted:
+`kanban-secretary.sh dispatch` opens the dispatcher in a sibling [Herdr](https://herdr.dev) pane and binds `herdr-agent-worker.sh` for workers, reviewers, and resolvers alike. Every parallel card, including a merge-conflict resolution, appears as a **visible interactive agent in its own pane**, so it can be watched or interrupted:
 
 ```sh
 ~/git/MornKanban/kanban-secretary.sh dispatch
@@ -97,7 +99,7 @@ The helper verifies that it is called from the current Herdr pane, keeps focus o
 
 The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, default `secretary`) to inspect and report, so `failed/` cards reach the user through the secretary instead of dying silently.
 
-The wrapper splits a pane below the dispatcher and starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, `auto` resolved via `KANBAN_BACKEND_ORDER` exactly like the headless path. A Claude worker gets `--permission-mode acceptEdits` and a model (from `KANBAN_CARD_MODEL`, default `sonnet`); a Claude reviewer gets no permission-mode override, keeping it read-only-ish. A Codex worker gets `-s <codex_sandbox> -a never`; a Codex reviewer gets `-s read-only -a never`; either only adds `-m <model>` when one is set — Codex never inherits the Claude default of `sonnet`. It accepts the folder-trust dialog for the card's own worktree, prompts it with the card body, and waits. Because both Claude Code and Codex render on the terminal's alternate screen, the final answer cannot be read back from scrollback — the wrapper instructs the agent to also write its answer (the review JSON included) to `.kanban-answer.md` in the worktree, reads that, and deletes it before the card is committed. Panes are closed when the attempt ends.
+The wrapper splits a pane below the dispatcher and starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, resolver backend from `KANBAN_RESOLVER`, `auto` resolved via `KANBAN_BACKEND_ORDER` exactly like the headless path. A Claude worker or resolver gets `--permission-mode acceptEdits` and a model (`KANBAN_CARD_MODEL` for workers, `KANBAN_RESOLVE_MODEL` for resolvers; default `sonnet`); a Claude reviewer gets no permission-mode override, keeping it read-only-ish. A Codex worker or resolver gets `-s <codex_sandbox> -a never`; a Codex reviewer gets `-s read-only -a never`; either only adds `-m <model>` when one is set — Codex never inherits the Claude default of `sonnet`. It accepts the folder-trust dialog for the card's own worktree, prompts it with the card body (or, for a resolver, the conflict-resolution prompt described below), and waits. Because both Claude Code and Codex render on the terminal's alternate screen, the final answer cannot be read back from scrollback — the wrapper instructs the agent to also write its answer (the review JSON included) to `.kanban-answer.md` in the worktree, reads that, and deletes it before the card is committed. Panes are closed when the attempt ends.
 
 ## Dispatcher Behavior
 
@@ -107,9 +109,25 @@ The wrapper splits a pane below the dispatcher and starts an interactive agent w
 2. Pipe the card body (task + accumulated rework instructions) into the worker backend (a headless CLI or the visible Herdr wrapper) inside the worktree; commit the result on the card's branch.
 3. A separate review agent inspects the worktree itself (it must not trust the worker's claims) and outputs `{"score": 0-100, "feedback": "..."}`.
 4. `score >= threshold` (default 80) → merge into the base branch (merges are serialized by a lock), delete the branch and worktree, card → `done`. Below threshold, the feedback is appended and the worker retries **in the same worktree**; after `max_attempts` (default 3) the card moves to `failed` and the branch is kept for inspection.
-5. A merge conflict also moves the card to `failed` with its branch kept; merge it manually.
+5. A merge conflict does **not** fail the card immediately. The card moves to `resolving` and a dedicated resolver role takes over — see below.
 
-Outside a git repository the dispatcher falls back to sequential in-place execution (`-j` > 1 is refused). Worker output tail, every review score, and rework instructions are appended to the card's History section. A restarted dispatcher reclaims cards stranded in `doing/` or `review/`.
+### Conflict resolution (`resolving`)
+
+A card that passed review can still conflict with `main` at merge time if another card landed first. Instead of dropping straight to `failed`, the dispatcher hands the conflict to a resolver role, a formal state distinct from an ordinary worker retry:
+
+1. The card moves `doing`/passed review → `resolving`; the original card branch (`kanban/<id>`) is kept, never discarded.
+2. A fresh worktree/branch (`.kanban/wt/<id>-resolve` / `kanban-resolve/<id>`) is created from the current `main`, and the card branch is merged into it, reproducing the conflict.
+3. The resolver backend (`KANBAN_RESOLVE_CMD`, or the card's own backend/model by default) is given the conflicted file list, both branch names, and the original task, and is instructed to **preserve both sides' intent — never discard one side outright** — and to run whatever tests the task requires.
+4. Once conflict markers are gone, the same review agent inspects the resolve worktree and scores it exactly like a normal attempt.
+5. `score >= threshold` → only the **resolve branch** is merged into `main` (the original card branch is deleted without ever being merged itself, so nothing merges twice); both worktrees are removed, card → `done`.
+6. Below threshold → feedback is appended and the resolver retries in the same resolve worktree; after `resolve_max_attempts` (default 2, `KANBAN.md`/card frontmatter `resolve_max_attempts`) the card moves to `failed`. Its History records the conflicted files, every resolve attempt's score/feedback, and the two branches (`kanban-resolve/<id>`, `kanban/<id>`) kept for manual inspection.
+7. A merge of the passing resolve branch into `main` that itself fails (a rare race) also moves the card to `failed` with both branches kept, instead of silently retrying forever.
+
+### Real-time ordering dependencies (`blocked`)
+
+If a worker or resolver discovers mid-run that it genuinely needs another card's result first (its stdout's first line starts with `BLOCKED: <reason>`), the dispatcher — never the dialogue secretary — handles it: the attempt doesn't count against `attempts`, its worktree/branch are discarded, the reason is recorded in History, and the card moves to `blocked`. A restarted dispatcher (and a normal `kanban run` startup) reclaims every `blocked` card back to `todo` for a fresh attempt from a clean worktree.
+
+Outside a git repository the dispatcher falls back to sequential in-place execution (`-j` > 1 is refused; `resolving` never applies since there is nothing to merge). Worker/resolver output tail, every review score, and rework instructions are appended to the card's History section. A restarted dispatcher reclaims cards stranded in `doing/`, `review/`, `resolving/`, or `blocked/` — folding back any leftover worktree/branch first so the card can restart cleanly, and the dispatcher's single-instance lock (`.kanban/.lock`) guarantees no card is ever picked up twice.
 
 ## Configuration (environment variables)
 
@@ -120,10 +138,12 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_BACKEND_ORDER` | `auto` resolution order (default `claude codex`) |
 | `KANBAN_REVIEWER` | Reviewer backend: `auto`, `claude`, or `codex` |
 | `KANBAN_REVIEW_MODEL` | Reviewer model (empty = backend default) |
-| `KANBAN_CLAUDE_PERMS` | claude worker `--permission-mode` (default `acceptEdits`; use `bypassPermissions` only for fully unattended runs in trusted repositories) |
-| `KANBAN_CODEX_SANDBOX` | codex worker `-s` mode (default `workspace-write`) |
+| `KANBAN_RESOLVER` | Resolver backend for merge-conflict handling: `auto`, `claude`, or `codex` (default: the card's own backend) |
+| `KANBAN_RESOLVE_MODEL` | Resolver model (empty = card's own model / backend default) |
+| `KANBAN_CLAUDE_PERMS` | claude worker/resolver `--permission-mode` (default `acceptEdits`; use `bypassPermissions` only for fully unattended runs in trusted repositories) |
+| `KANBAN_CODEX_SANDBOX` | codex worker/resolver `-s` mode (default `workspace-write`) |
 | `KANBAN_JOBS` | Default parallelism for `kanban run` (overridden by `-j`) |
-| `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
+| `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` / `KANBAN_RESOLVE_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |
 | `KANBAN_DEBUG` | Write per-job xtrace logs to `.kanban/wt/job.*.trace` |
 
@@ -207,7 +227,7 @@ kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-t threshold] [--
 ## Constraints
 
 - One dispatcher per project (`.kanban/.lock`); parallelism comes from `-j`, not from extra dispatchers.
-- Parallel cards that edit the same files will collide at merge time and land in `failed`; split cards along file boundaries, or accept manual merges.
+- Parallel cards that edit the same files will collide at merge time; the resolver role handles that automatically (see `resolving` above) and only lands in `failed` if it cannot genuinely resolve it. The secretary must not hold cards back to avoid this — split by file boundaries where convenient, but never as a precondition for adding a card.
 - Merging targets the branch checked out when `kanban run` started; keep the main checkout clean while the dispatcher runs, and do not switch branches under it.
 - The reviewer scores against the card text. A vague card passes vacuously; completion conditions belong in the card, not in the conversation.
 - The script targets bash 3.2 (macOS default). Inside it, never end a loop body with `[[ ... ]] && cmd` — when the test is false the status-1 list trips `set -e` and kills the job silently; use the `if` form.
