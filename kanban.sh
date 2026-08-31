@@ -180,6 +180,22 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - Herdr 環境ではカード追加後に `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
 - visible Herdr が利用不能なら、ユーザーが headless を明示しない限り勝手にフォールバックしない
 - (例) failed カードは秘書がユーザーへ即報告する
+
+## 秘書ペインの許可/禁止 (技術的ガード付き、詳細は MornKanban README の Secretary Guard)
+
+**実装しない。検証しない。commit/push/tag しない。in-process agent を起動しない。カードを起票して visible Herdr へ dispatch する。**
+
+- 許可: KANBAN.md/README/board の読み取り、read-only git (status/log/diff/show 等)、
+  `kanban add/show/list/init/send`、`kanban-secretary.sh bootstrap/dispatch/end`、ユーザーへの報告
+- 禁止: ファイルの直接編集・作成・削除、build/test/lint/formatter/server 起動、bare `kanban run`、
+  headless agent CLI (`claude -p`/`codex exec`)、Claude/Codex の in-process Agent/Task/subagent、
+  git の変更系全般 (add/commit/push/merge/rebase/reset/checkout/branch作成削除/tag/worktree等)、
+  GitHub/GitLab 等の外部変更 (push/release/PR/issue/tag publish)、package publish、deploy
+- Claude Code では上記の多くが `PreToolUse` フックで実行前に技術的に拒否される
+  (`kanban-setup.sh` の状態表示や `kanban-secretary.sh bootstrap` の一行応答に `claude=enforced` 等が出る)。
+  Codex は現状 `partial` (契約文言のみ)。ガードが拒否したら再確認を求めず、カード化して dispatch する
+- 事故的に直接操作してしまったと気づいたら即停止し、自分でrollback/追加commit/push/tag削除をせず、
+  ユーザーへ事実 (push/tag が既にリモートへ届いたか等) を報告し、監査・回収を別カードにする
 EOF
   fi
   echo "initialized $base"
