@@ -427,5 +427,171 @@ class ArgumentForwardingTests(unittest.TestCase):
         self.assertIn("bogus-command", result.stdout + result.stderr)
 
 
+class HerdrAgentWorkerBackendTests(unittest.TestCase):
+    """herdr-agent-worker.sh must pick --kind claude|codex from the card's own
+    routing (KANBAN_CARD_BACKEND / KANBAN_REVIEWER), never a hardcoded
+    --kind claude, and must never mix Claude-only args (--permission-mode,
+    --model) with Codex-only args (-s, -a, -m) or vice versa. Regression for
+    a visible codex/gpt-5.6-terra card being started as Claude and failing
+    immediately on the unknown model name."""
+
+    WORKER = REPO / "herdr-agent-worker.sh"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.log = self.root / "herdr.log"
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self._write_fake_herdr()
+        self.worktree = self.root / "worktree"
+        self.worktree.mkdir()
+        self.base_env = os.environ.copy()
+        self.base_env.update(
+            {
+                # Minimal, real-CLI-free PATH: a test asserting "no backend
+                # CLI available" must not accidentally see this machine's own
+                # installed claude/codex from the inherited PATH.
+                "PATH": str(self.bin) + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": "w1:p1",
+                "HERDR_TEST_LOG": str(self.log),
+            }
+        )
+        # KANBAN_HERDR_ROLE etc. must come only from each test's overrides.
+        for stray in ("KANBAN_HERDR_ROLE", "KANBAN_CARD_BACKEND", "KANBAN_REVIEWER",
+                      "KANBAN_CARD_MODEL", "KANBAN_REVIEW_MODEL", "KANBAN_BACKEND_ORDER",
+                      "KANBAN_CODEX_SANDBOX", "KANBAN_ALLOWED_TOOLS"):
+            self.base_env.pop(stray, None)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _write_fake_herdr(self):
+        herdr = self.bin / "herdr"
+        herdr.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                echo "$*" >>"$HERDR_TEST_LOG"
+                case "$1 $2" in
+                  "pane layout")
+                    printf '%s\n' '{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":160,"height":40}}]}}}'
+                    ;;
+                  "pane split")
+                    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}'
+                    ;;
+                  "agent get")
+                    printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+                    ;;
+                  "agent read")
+                    echo "mock agent transcript"
+                    ;;
+                  *) printf '%s\n' '{"result":{}}' ;;
+                esac
+                """
+            ),
+            encoding="utf-8",
+        )
+        herdr.chmod(0o755)
+
+    def _write_fake_cli(self, *names):
+        for n in names:
+            p = self.bin / n
+            p.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            p.chmod(0o755)
+
+    def _run_worker(self, env_overrides, stdin_text="task body"):
+        env = self.base_env.copy()
+        env.update(env_overrides)
+        return subprocess.run(
+            [str(self.WORKER)],
+            input=stdin_text,
+            text=True,
+            capture_output=True,
+            env=env,
+            cwd=str(self.worktree),
+            check=False,
+        )
+
+    def _start_call(self):
+        log = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+        starts = [ln for ln in log.splitlines() if ln.startswith("agent start ")]
+        self.assertEqual(len(starts), 1, log)
+        return starts[0]
+
+    def test_claude_worker_gets_claude_only_args(self):
+        self._write_fake_cli("claude")
+        result = self._run_worker({"KANBAN_CARD_BACKEND": "claude", "KANBAN_CARD_MODEL": "sonnet"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertIn("--kind claude", start)
+        self.assertIn("--permission-mode acceptEdits", start)
+        self.assertIn("--model sonnet", start)
+        self.assertNotIn("-s ", start)
+        self.assertNotIn("-a never", start)
+
+    def test_codex_worker_gets_codex_only_args(self):
+        self._write_fake_cli("codex")
+        result = self._run_worker({"KANBAN_CARD_BACKEND": "codex", "KANBAN_CARD_MODEL": "gpt-5.6-terra"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertIn("--kind codex", start)
+        self.assertIn("-s workspace-write", start)
+        self.assertIn("-a never", start)
+        self.assertIn("-m gpt-5.6-terra", start)
+        self.assertNotIn("--permission-mode", start)
+        self.assertNotIn("--model", start)
+        self.assertNotIn("sonnet", start)
+
+    def test_codex_reviewer_is_read_only_with_review_model(self):
+        self._write_fake_cli("codex")
+        result = self._run_worker(
+            {
+                "KANBAN_HERDR_ROLE": "reviewer",
+                "KANBAN_REVIEWER": "codex",
+                "KANBAN_REVIEW_MODEL": "gpt-5.6-terra",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertIn("--kind codex", start)
+        self.assertIn("-s read-only", start)
+        self.assertIn("-a never", start)
+        self.assertIn("-m gpt-5.6-terra", start)
+        self.assertNotIn("workspace-write", start)
+
+    def test_codex_worker_without_model_omits_dash_m_and_sonnet(self):
+        self._write_fake_cli("codex")
+        result = self._run_worker({"KANBAN_CARD_BACKEND": "codex"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertNotIn(" -m ", start)
+        self.assertNotIn("sonnet", start)
+
+    def test_auto_backend_resolves_via_backend_order(self):
+        self._write_fake_cli("codex")  # claude intentionally absent from PATH
+        result = self._run_worker(
+            {"KANBAN_CARD_BACKEND": "auto", "KANBAN_BACKEND_ORDER": "codex claude"}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertIn("--kind codex", start)
+
+    def test_unsupported_backend_fails_before_creating_a_pane(self):
+        self._write_fake_cli("claude", "codex")
+        result = self._run_worker({"KANBAN_CARD_BACKEND": "gpt-5.6-terra"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("gpt-5.6-terra", result.stderr)
+        log = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+        self.assertNotIn("pane split", log)
+
+    def test_auto_backend_with_no_cli_available_fails_clearly(self):
+        result = self._run_worker({"KANBAN_CARD_BACKEND": "auto", "KANBAN_BACKEND_ORDER": "claude codex"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no agent CLI found", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
