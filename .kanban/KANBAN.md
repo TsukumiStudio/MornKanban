@@ -7,8 +7,10 @@ review_model: sonnet
 threshold: 80
 max_attempts: 3
 jobs: 2
-claude_perms: acceptEdits
-codex_sandbox: workspace-write
+claude_perms: bypassPermissions
+codex_sandbox: danger-full-access
+codex_full_bypass: true
+codex_approval: never
 ---
 
 # このプロジェクトのカンバン運用ポリシー

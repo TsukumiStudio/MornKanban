@@ -99,6 +99,8 @@ load_project_config() { # .kanban/KANBAN.md frontmatter -> defaults (env still w
   cfg_env "$cfg" jobs KANBAN_JOBS
   cfg_env "$cfg" claude_perms KANBAN_CLAUDE_PERMS
   cfg_env "$cfg" codex_sandbox KANBAN_CODEX_SANDBOX
+  cfg_env "$cfg" codex_full_bypass KANBAN_CODEX_FULL_BYPASS
+  cfg_env "$cfg" codex_approval KANBAN_CODEX_APPROVAL
 }
 
 fm_get() { # fm_get <file> <key> <default>
@@ -170,8 +172,14 @@ resolve_max_attempts: 2
 review_infra_max_retries: 2
 review_infra_backoff_seconds: 2
 jobs: 2
-claude_perms: acceptEdits
-codex_sandbox: workspace-write
+# 既定は無制限権限 (worker/reviewer 共通、resolver 実装時も同キーを流用する)。
+# claude_perms: bypassPermissions -> `--dangerously-skip-permissions` (permission prompt 全skip)
+# codex_full_bypass: true         -> `--dangerously-bypass-approvals-and-sandbox` (approval/sandbox 両方skip)
+# 安全側へ戻す例: claude_perms: acceptEdits / codex_full_bypass: false + codex_sandbox: workspace-write + codex_approval: on-request
+claude_perms: bypassPermissions
+codex_sandbox: danger-full-access
+codex_full_bypass: true
+codex_approval: never
 # secretary_agent: secretary-my-project
 ---
 
@@ -195,6 +203,22 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - 既定: 通常実装は claude / sonnet、軽微な修正は codex / gpt-5.3-codex-spark (codex カードは -m 必須。model 名はバックエンド固有)
 - 設計・難所のカードだけ例外的に -m opus 等へ上げる (理由をカードに書く)
 - resolver も既定では worker と同じ下位モデル (`resolver` / `resolve_model`)
+
+## worker/reviewer 権限ポリシー (UNRESTRICTED)【要リスク理解】
+
+既定で worker/reviewer は **承認プロンプト・sandbox制限なし** (`UNRESTRICTED`) で起動する
+(Claude: `--dangerously-skip-permissions` / Codex: `--dangerously-bypass-approvals-and-sandbox`)。
+resolver ロールは本バージョンの kanban.sh に未実装のため対象外 (実装時は同じ
+`claude_perms`/`codex_sandbox`系キーを流用する想定。役割別に分けたい場合のみ
+`resolver_claude_perms`/`resolver_codex_sandbox` を予約キーとして追加すること)。
+
+- リスク: worktree 外のファイル・認証情報・ネットワーク・git remote・任意プロセスへ
+  制限なくアクセスできる。信頼できないカード本文やプロンプトインジェクションを
+  そのまま実行しうる
+- 安全 mode へ戻す例 (このファイルの frontmatter で上書き):
+  `claude_perms: acceptEdits` / `codex_full_bypass: false` + `codex_sandbox: workspace-write` + `codex_approval: on-request`
+- 環境変数 `KANBAN_CLAUDE_PERMS` / `KANBAN_CODEX_SANDBOX` / `KANBAN_CODEX_FULL_BYPASS` /
+  `KANBAN_CODEX_APPROVAL` が上記 frontmatter より優先する
 
 ## カードの切り方
 
@@ -324,13 +348,30 @@ resolve_backend() { # echo first installed backend from KANBAN_BACKEND_ORDER
   return 1
 }
 
+claude_perm_flag() { # claude_perm_flag -> echoes the CLI flag(s) for KANBAN_CLAUDE_PERMS
+  local perms=${KANBAN_CLAUDE_PERMS:-bypassPermissions}
+  if [[ $perms == bypassPermissions ]]; then
+    echo "--dangerously-skip-permissions"
+  else
+    echo "--permission-mode $perms"
+  fi
+}
+
+codex_sandbox_flag() { # codex_sandbox_flag -> echoes the CLI flag(s) for KANBAN_CODEX_*
+  if [[ ${KANBAN_CODEX_FULL_BYPASS:-true} == true ]]; then
+    echo "--dangerously-bypass-approvals-and-sandbox"
+  else
+    echo "-s ${KANBAN_CODEX_SANDBOX:-danger-full-access} -a ${KANBAN_CODEX_APPROVAL:-never}"
+  fi
+}
+
 worker_cmd() { # worker_cmd <backend> <model> (model may be empty = backend default)
   if [[ -n ${KANBAN_WORKER_CMD:-} ]]; then echo "$KANBAN_WORKER_CMD"; return; fi
   local b=$1
   if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
   case $b in
-    claude) echo "claude -p${2:+ --model $2} --permission-mode ${KANBAN_CLAUDE_PERMS:-acceptEdits}" ;;
-    codex) echo "codex exec --skip-git-repo-check -s ${KANBAN_CODEX_SANDBOX:-workspace-write}${2:+ -m $2}" ;;
+    claude) echo "claude -p${2:+ --model $2} $(claude_perm_flag)" ;;
+    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${2:+ -m $2}" ;;
     *) die "unknown backend: $b" ;;
   esac
 }
@@ -340,8 +381,8 @@ review_cmd() {
   local b=${KANBAN_REVIEWER:-auto} m=${KANBAN_REVIEW_MODEL:-}
   if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
   case $b in
-    claude) echo "claude -p${m:+ --model $m}" ;;
-    codex) echo "codex exec --skip-git-repo-check -s read-only${m:+ -m $m}" ;;
+    claude) echo "claude -p${m:+ --model $m} $(claude_perm_flag)" ;;
+    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}" ;;
     *) die "unknown reviewer backend: $b" ;;
   esac
 }
@@ -962,6 +1003,7 @@ cmd_run() {
   # of silently inside a background job).
   worker_cmd "$DEFAULT_BACKEND" "" >/dev/null
   review_cmd >/dev/null
+  echo "[UNRESTRICTED] worker/reviewer permission policy: claude=$(claude_perm_flag) codex=$(codex_sandbox_flag)" >&2
   # Reclaim cards stranded by a crashed dispatcher (lock guarantees exclusivity).
   # resolving/blocked cards also fold back their leftover worktree/branch so
   # the card restarts clean on its next pickup instead of colliding with
