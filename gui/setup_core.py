@@ -3,10 +3,12 @@
 setup_gui.py から抽出した UI 非依存のロジック関数群。python3 標準ライブラリのみ使用。
 """
 import importlib
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -21,6 +23,17 @@ SKILL_TARGETS = {
     "Codex": os.path.expanduser("~/.codex/skills/kanban-dispatch"),
 }
 TIMEOUT = 30
+
+# --- secretary in-process-delegation guard -----------------------------------
+# Claude Code has a real PreToolUse hook we can deny through (settings.json,
+# see below). Codex has no equivalent documented pre-tool-call deny hook as
+# of this writing, so its enforcement stays prompt/contract-level only
+# (skill text + KANBAN.md); guard_status() reports that honestly instead of
+# claiming it is enforced.
+GUARD_SOURCE_DIR = os.path.join(REPO, "guard")
+GUARD_HOOK_SCRIPT = os.path.join(GUARD_SOURCE_DIR, "claude_secretary_guard.py")
+CLAUDE_SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
+GUARD_MATCHER = "Task"
 
 # raw VERSION on GitHub main: treated as "latest published version" because
 # this repository currently has no tags or GitHub Releases.
@@ -169,11 +182,133 @@ def install_skills(force=False):
     return messages
 
 
+def _guard_command():
+    return "python3 %s" % GUARD_HOOK_SCRIPT
+
+
+def _is_guard_hook(hook):
+    return hook.get("type") == "command" and GUARD_HOOK_SCRIPT in hook.get("command", "")
+
+
+def _read_json_settings(path):
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as fh:
+        content = fh.read().strip()
+    if not content:
+        return {}
+    return json.loads(content)
+
+
+def _write_json_settings(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def install_claude_guard(settings_path=None):
+    """Idempotently add the secretary PreToolUse deny hook to settings.json.
+
+    Never overwrites unrelated hooks/keys: existing content is loaded as-is,
+    backed up once (settings.json.mornkanban-guard.bak, only if that backup
+    does not already exist), and only our own PreToolUse entry is
+    added/removed. Matched by GUARD_HOOK_SCRIPT appearing in a hook's
+    `command`, so re-running install/update is a no-op once installed.
+    """
+    path = settings_path or CLAUDE_SETTINGS_PATH
+    try:
+        data = _read_json_settings(path)
+    except (OSError, ValueError) as e:
+        return "Claude guard: %s の読み込みに失敗しました (%s); 変更を中止しました" % (path, e)
+
+    hooks = data.setdefault("hooks", {})
+    pretooluse = hooks.setdefault("PreToolUse", [])
+    for entry in pretooluse:
+        if any(_is_guard_hook(h) for h in entry.get("hooks", [])):
+            return "Claude guard: 導入済み (%s)" % path
+
+    if os.path.isfile(path):
+        backup = path + ".mornkanban-guard.bak"
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
+
+    pretooluse.append(
+        {
+            "matcher": GUARD_MATCHER,
+            "hooks": [{"type": "command", "command": _guard_command()}],
+        }
+    )
+    _write_json_settings(path, data)
+    return "Claude guard: 導入しました (%s, matcher=%s)" % (path, GUARD_MATCHER)
+
+
+def uninstall_claude_guard(settings_path=None):
+    """Remove only our managed PreToolUse entry; leaves everything else intact."""
+    path = settings_path or CLAUDE_SETTINGS_PATH
+    if not os.path.isfile(path):
+        return "Claude guard: 未導入"
+    try:
+        data = _read_json_settings(path)
+    except (OSError, ValueError) as e:
+        return "Claude guard: %s の読み込みに失敗しました (%s); 変更を中止しました" % (path, e)
+
+    pretooluse = data.get("hooks", {}).get("PreToolUse", [])
+    changed = False
+    kept = []
+    for entry in pretooluse:
+        entry_hooks = entry.get("hooks", [])
+        remaining = [h for h in entry_hooks if not _is_guard_hook(h)]
+        if len(remaining) != len(entry_hooks):
+            changed = True
+            if remaining:
+                kept.append(dict(entry, hooks=remaining))
+            # else: entry existed only for our hook -> drop it entirely
+        else:
+            kept.append(entry)
+
+    if not changed:
+        return "Claude guard: 未導入"
+
+    data.setdefault("hooks", {})["PreToolUse"] = kept
+    _write_json_settings(path, data)
+    return "Claude guard: 削除しました (%s)" % path
+
+
+def guard_status(settings_path=None):
+    """{"claude": ..., "codex": ...} enforcement status strings."""
+    path = settings_path or CLAUDE_SETTINGS_PATH
+    if not os.path.isfile(GUARD_HOOK_SCRIPT):
+        claude = "misconfigured (guard script missing: %s)" % GUARD_HOOK_SCRIPT
+    else:
+        try:
+            data = _read_json_settings(path)
+        except (OSError, ValueError) as e:
+            data = None
+            claude = "misconfigured (%s unreadable: %s)" % (path, e)
+        if data is not None:
+            pretooluse = data.get("hooks", {}).get("PreToolUse", [])
+            installed = any(
+                _is_guard_hook(h) for entry in pretooluse for h in entry.get("hooks", [])
+            )
+            claude = "enforced" if installed else "not_installed"
+    return {
+        "claude": claude,
+        "codex": "not_supported (no documented pre-tool deny hook; enforced via skill/AGENTS contract text only)",
+    }
+
+
 def run_setup():
     if in_worktree():
         return ["refused: kanban worktree 内"]
     _, cli_msg = install_cli()
-    return [cli_msg] + install_skills(force=True)
+    return [cli_msg] + install_skills(force=True) + [install_claude_guard()]
 
 
 def _uninstall_cli():
@@ -212,7 +347,7 @@ def run_uninstall():
     return [_uninstall_cli()] + [
         _uninstall_skill(name, directory)
         for name, directory in SKILL_TARGETS.items()
-    ]
+    ] + [uninstall_claude_guard()]
 
 
 # --- update (git pull --ff-only + reinstall) ---------------------------------
@@ -282,4 +417,5 @@ def run_update():
     _, cli_msg = reloaded.install_cli()
     messages.append(cli_msg)
     messages += reloaded.install_skills(force=True)
+    messages.append(reloaded.install_claude_guard())
     return True, messages
