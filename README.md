@@ -8,14 +8,11 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 - Per project: `kanban init` creates `.kanban/{todo,doing,review,done,failed}/` plus a `KANBAN.md` policy template (commit them; cards are git history).
 - When asked to set up kanban for a project, run `kanban init`, then fill `.kanban/KANBAN.md` with the project's agent/model composition and card policy through dialogue with the user. A second `kanban init` never overwrites an existing `KANBAN.md`.
 
-## GUI
+## Setup Wizard
 
-- `./kanban-gui.sh` opens **one setup screen** — a tkinter window, a native macOS dialog (osascript) when tkinter is missing, or a CLI prompt anywhere else — for environment setup only.
-- One "run setup" action installs the `kanban` CLI symlink (`~/.local/bin`) and the Claude Code skill (`~/.claude/skills/kanban-dispatch`); it's idempotent.
-- Project onboarding is **not** in the GUI: open a Herdr pane in the project and tell Claude 「**kanban の秘書として待機して**」 — the secretary runs `kanban init` and everything else (see Secretary Bootstrap below).
+- `./kanban-setup.sh` runs an interactive CLI wizard: it shows the environment status and asks once — `y` installs (CLI symlink + Claude Code skill, idempotent), `u` uninstalls (removes only what this installer created), `N` does nothing.
+- Project onboarding is **not** part of the wizard: open a Herdr pane in the project and tell Claude 「**kanban の秘書として待機して**」 — the secretary runs `kanban init` and everything else (see Secretary Bootstrap below).
 - Requirements: bash + python3 (the same as `kanban.sh` itself).
-- The same screen also uninstalls: it removes only what this installer created
-  (the CLI symlink pointing into this repo, and the installer-generated skill) and leaves anything else alone.
 
 ## Secretary Bootstrap (one-liner)
 
