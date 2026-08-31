@@ -14,6 +14,7 @@ from setup_core import (  # noqa: E402
     check_deps,
     cli_installed,
     run_setup,
+    run_uninstall,
     skill_installed,
 )
 
@@ -59,6 +60,15 @@ def main():
         result_var.set("\n".join(messages))
         refresh()
 
+    def on_run_uninstall():
+        try:
+            messages = run_uninstall()
+        except OSError as exc:
+            messagebox.showerror("アンインストール", str(exc))
+            return
+        result_var.set("\n".join(messages))
+        refresh()
+
     frame = tk.Frame(root, padx=12, pady=12)
     frame.pack(fill=tk.BOTH, expand=True)
 
@@ -70,7 +80,14 @@ def main():
     tk.Label(frame, text="Claude Code スキル", anchor="w", font=("", 10, "bold")).pack(fill=tk.X)
     tk.Label(frame, textvariable=step2_var, anchor="w").pack(fill=tk.X, pady=(0, 8))
 
-    tk.Button(frame, text="セットアップ実行", command=on_run_setup).pack(fill=tk.X, pady=(0, 8))
+    button_row = tk.Frame(frame)
+    button_row.pack(fill=tk.X, pady=(0, 8))
+    tk.Button(button_row, text="セットアップ実行", command=on_run_setup).pack(
+        side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
+    )
+    tk.Button(button_row, text="アンインストール", command=on_run_uninstall).pack(
+        side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0)
+    )
 
     tk.Label(
         frame,
