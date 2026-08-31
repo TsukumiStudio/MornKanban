@@ -144,6 +144,7 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - (例) カード追加後、秘書が kanban run -j 2 をバックグラウンド起動する
 - (例) Herdr 環境では KANBAN_NOTIFY_CMD=~/git/MornKanban/herdr-notify-secretary.sh を付けて起動し、
   カード決着が秘書へ push されるようにする
+- (例) Herdr のディスパッチャペインは起動コマンド末尾に「; exit」を付け、終了時に自動で閉じる
 - (例) failed カードは秘書がユーザーへ即報告する
 EOF
   fi

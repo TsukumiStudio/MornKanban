@@ -49,8 +49,10 @@ When the dispatcher runs inside a [Herdr](https://herdr.dev) pane, `herdr-agent-
 ```sh
 KANBAN_WORKER_CMD=~/git/MornKanban/herdr-agent-worker.sh \
 KANBAN_REVIEW_CMD='env KANBAN_HERDR_ROLE=reviewer /Users/<you>/git/MornKanban/herdr-agent-worker.sh' \
-kanban run -j 2
+kanban run -j 2; exit
 ```
+
+The trailing `; exit` closes the dispatcher's pane when the run finishes; without it an empty shell pane is left behind.
 
 The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, default `secretary`) to inspect and report, so `failed/` cards reach the user through the secretary instead of dying silently.
 
