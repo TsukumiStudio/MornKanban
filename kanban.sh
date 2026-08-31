@@ -237,7 +237,7 @@ review_enabled: true
 jobs: 2
 diagnosis_target_minutes: 5
 diagnosis_max_minutes: 10
-# 既定は無制限権限 (worker/reviewer 共通、resolver 実装時も同キーを流用する)。
+# 既定は無制限権限 (worker/reviewer/resolver 共通)。
 # claude_perms: bypassPermissions -> `--dangerously-skip-permissions` (permission prompt 全skip)
 # codex_full_bypass: true         -> `--dangerously-bypass-approvals-and-sandbox` (approval/sandbox 両方skip)
 # 安全側へ戻す例: claude_perms: acceptEdits / codex_full_bypass: false + codex_sandbox: workspace-write + codex_approval: on-request
@@ -287,9 +287,8 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 
 既定で worker/reviewer は **承認プロンプト・sandbox制限なし** (`UNRESTRICTED`) で起動する
 (Claude: `--dangerously-skip-permissions` / Codex: `--dangerously-bypass-approvals-and-sandbox`)。
-resolver ロールは本バージョンの kanban.sh に未実装のため対象外 (実装時は同じ
-`claude_perms`/`codex_sandbox`系キーを流用する想定。役割別に分けたい場合のみ
-`resolver_claude_perms`/`resolver_codex_sandbox` を予約キーとして追加すること)。
+resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/reviewerと
+同じ無制限権限で起動する。
 
 - リスク: worktree 外のファイル・認証情報・ネットワーク・git remote・任意プロセスへ
   制限なくアクセスできる。信頼できないカード本文やプロンプトインジェクションを
@@ -515,8 +514,8 @@ resolve_cmd() { # resolve_cmd <card-backend> <card-model> -> resolver invocation
   [[ -n $m ]] || m=$2
   if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
   case $b in
-    claude) echo "claude -p${m:+ --model $m} --permission-mode ${KANBAN_CLAUDE_PERMS:-acceptEdits}" ;;
-    codex) echo "codex exec --skip-git-repo-check -s ${KANBAN_CODEX_SANDBOX:-workspace-write}${m:+ -m $m}" ;;
+    claude) echo "claude -p${m:+ --model $m} $(claude_perm_flag)" ;;
+    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}" ;;
     *) die "unknown resolver backend: $b" ;;
   esac
 }
@@ -1215,6 +1214,7 @@ cmd_run() {
   local jobs_env=${KANBAN_JOBS:-}
   require_root
   local once=false jobs_pinned=false jobs_max
+  local dispatch_poll_interval=${KANBAN_DISPATCH_POLL_INTERVAL:-1}
   if [[ -n $jobs_env ]]; then
     jobs_max=$jobs_env
     jobs_pinned=true
@@ -1229,6 +1229,8 @@ cmd_run() {
     esac
   done
   [[ $jobs_max =~ ^[1-9][0-9]*$ ]] || die "jobs must be a positive integer (got: $jobs_max)"
+  python3 -c 'import sys; assert float(sys.argv[1]) > 0' "$dispatch_poll_interval" 2>/dev/null ||
+    die "KANBAN_DISPATCH_POLL_INTERVAL must be a positive number"
   local lock=$KB/.lock
   if [[ -f $lock ]] && kill -0 "$(cat "$lock")" 2>/dev/null; then
     die "dispatcher already running (pid $(cat "$lock"))"
@@ -1365,7 +1367,7 @@ cmd_run() {
     if [[ $running -eq 0 ]]; then
       if [[ ! -e ${cards[0]} ]] || $once; then break; fi
     fi
-    sleep 2
+    sleep "$dispatch_poll_interval"
   done
   wait
   echo "todo is empty"

@@ -42,7 +42,10 @@ class DiagnosisTimeboxTests(unittest.TestCase):
         self.worker.write_text("#!/usr/bin/env bash\nset -eu\n" + worker_body, encoding="utf-8")
         self.worker.chmod(0o755)
         env = os.environ.copy()
-        env.update({"KANBAN_WORKER_CMD": str(self.worker), "KANBAN_JOBS": "1"})
+        env.update({
+            "KANBAN_WORKER_CMD": str(self.worker), "KANBAN_JOBS": "1",
+            "KANBAN_DISPATCH_POLL_INTERVAL": "0.05",
+        })
         return subprocess.run(
             [str(KANBAN), "run", "--once"], cwd=self.project, env=env,
             text=True, capture_output=True, timeout=15,

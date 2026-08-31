@@ -56,11 +56,9 @@ tier で 10.5s。3回計測の中央値、同一 machine、`TestTierContractTest
 - **full**: `KANBAN_TEST_TIER` を設定しない (未設定がデフォルト)。上記6本を含む
   全156本 + node 9件 + skill validation を実行する。**マージ前の最終gate
   として必ず1回はfullを実行する。** MornKanban の dispatcher (`kanban.sh`) には
-  現状 reviewer を無効化する `review_enabled: false` 相当の設定は存在しない
-  (常にレビューを1回走らせる) ため、「reviewerをfullゲート目的だけに起動しない」
-  という要件はこのリポジトリでは非該当。将来そうした設定を追加する場合は、
-  reviewer OFF でもマージ前fullを誰が (ワーカー自身 or 専用ステップ) 走らせるかを
-  ここに明記すること。
+  reviewer は `review_enabled: false` またはcardの `--no-review` で省略できる。
+  reviewer OFFでも、マージ前full gateはworker自身または明示した検証ステップが
+  必ず1回だけ実行する。
 - fastで緑になったことは「回帰なし」の証明にはならない。上記6本が担保する
   git worktree/merge/conflict/resolver/retry の実結合動作はfullでしか検証されない。
 - **173件前後という当初見積もりについて**: 実測は156本 (python) + 9本 (node) =

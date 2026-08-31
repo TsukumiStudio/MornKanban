@@ -286,6 +286,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_CODEX_FULL_BYPASS` | `true` (default) → `--dangerously-bypass-approvals-and-sandbox`; `false` → `-s <sandbox> -a <approval>` |
 | `KANBAN_CODEX_APPROVAL` | Codex worker/reviewer/resolver `-a` approval policy, used only when `KANBAN_CODEX_FULL_BYPASS=false` (default `never`) |
 | `KANBAN_JOBS` | Default parallelism for `kanban run` (overridden by `-j`) |
+| `KANBAN_DISPATCH_POLL_INTERVAL` | Dispatcher scheduling/config-refresh interval in seconds (default `1`; tests may use a smaller decimal value) |
 | `KANBAN_REVIEW_ENABLED` | `true`/`false` (aliases: `1`/`0`, `yes`/`no`, `on`/`off`); overrides `KANBAN.md`'s `review_enabled`, but a card's own explicit `--review`/`--no-review` still wins — see **Review on/off** above |
 | `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` / `KANBAN_RESOLVE_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |

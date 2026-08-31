@@ -83,10 +83,14 @@ class ReviewToggleTests(unittest.TestCase):
 
         self.env = dict(os.environ)
         self.env["HOME"] = str(self.root / "home")
+        self.env["KANBAN_DISPATCH_POLL_INTERVAL"] = "0.05"
         (self.root / "home").mkdir()
         self.env.pop("KANBAN_REVIEW_ENABLED", None)
 
         self._run("init")
+
+    def tearDown(self):
+        self.temp.cleanup()
 
     def _run(self, *args, input_text=None, env=None, check=True):
         result = subprocess.run(

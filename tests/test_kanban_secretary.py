@@ -1085,6 +1085,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env.get("PATH", "")
         self.env["KANBAN_TEST_MAIN_ROOT"] = str(self.project)
+        self.env["KANBAN_DISPATCH_POLL_INTERVAL"] = "0.05"
 
     def tearDown(self):
         self.temp.cleanup()
@@ -1435,7 +1436,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 set -eu
                 cat >/dev/null
                 echo "start $KANBAN_CARD_TITLE" >> "{events}"
-                sleep 4
+                sleep 1
                 echo "end $KANBAN_CARD_TITLE" >> "{events}"
                 """
             ),

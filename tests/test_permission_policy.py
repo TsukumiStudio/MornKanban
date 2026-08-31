@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""worker/reviewer permission policy: unrestricted-by-default argv, and the
-override precedence (env > KANBAN.md > built-in default) for both the
-headless `kanban run` path and the visible Herdr wrapper
-(herdr-agent-worker.sh). Resolver is not implemented on this branch (see
-README's "resolver role" note); only worker/reviewer are covered here.
+"""Agent permission policy: unrestricted-by-default argv, and the override
+precedence (env > KANBAN.md > built-in default) for worker, reviewer, and
+resolver in the headless `kanban run` path and visible Herdr wrapper.
 
 All backends are fakes (argv/stdin captured to files); no real Claude/Codex
 call is made, no real HOME/credentials/remote/tag/LaunchAgent is touched.
@@ -64,6 +62,7 @@ class HeadlessPermissionPolicyTests(unittest.TestCase):
 
         self.env = os.environ.copy()
         self.env["PATH"] = str(fake_bin) + os.pathsep + self.env.get("PATH", "")
+        self.env["KANBAN_DISPATCH_POLL_INTERVAL"] = "0.05"
         for k in ("KANBAN_CLAUDE_PERMS", "KANBAN_CODEX_SANDBOX", "KANBAN_CODEX_FULL_BYPASS", "KANBAN_CODEX_APPROVAL"):
             self.env.pop(k, None)
 
@@ -245,6 +244,8 @@ class HerdrWorkerPermissionPolicyTests(unittest.TestCase):
                     printf '%s\\n' '{"result":{"agent":{"agent_status":"idle"}}}'
                     ;;
                   "agent prompt")
+                    printf 'KANBAN_ANSWER_ID: test-card|wt|%s|attempt-1\\n{"score":90,"feedback":"ok"}\\n' \
+                      "$KANBAN_HERDR_ROLE" > "$PWD/.kanban-answer.md"
                     printf '%s\\n' '{"result":{}}'
                     ;;
                   "agent read")
@@ -264,6 +265,11 @@ class HerdrWorkerPermissionPolicyTests(unittest.TestCase):
                 "HERDR_ENV": "1",
                 "HERDR_PANE_ID": "w1:p1",
                 "HERDR_TEST_LOG": str(self.log),
+                "KANBAN_CARD_ID": "test-card",
+                "KANBAN_CARD_ATTEMPT": "attempt-1",
+                "KANBAN_HERDR_POLL_INTERVAL": "0.1",
+                "KANBAN_HERDR_STABLE_SLEEP": "0.05",
+                "KANBAN_HERDR_ANSWER_WAIT_SECS": "3",
             }
         )
         for k in ("KANBAN_CLAUDE_PERMS", "KANBAN_CODEX_SANDBOX", "KANBAN_CODEX_FULL_BYPASS", "KANBAN_CODEX_APPROVAL"):
@@ -277,6 +283,8 @@ class HerdrWorkerPermissionPolicyTests(unittest.TestCase):
         env["KANBAN_HERDR_ROLE"] = role
         if role == "reviewer":
             env["KANBAN_REVIEWER"] = backend
+        elif role == "resolver":
+            env["KANBAN_RESOLVER"] = backend
         else:
             env["KANBAN_CARD_BACKEND"] = backend
         env.update(env_extra or {})
@@ -328,6 +336,14 @@ class HerdrWorkerPermissionPolicyTests(unittest.TestCase):
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", line)
         self.assertIn("-s read-only", line)
         self.assertIn("-a on-request", line)
+
+    def test_claude_resolver_unrestricted(self):
+        line = self._run("resolver", "claude")
+        self.assertIn("--dangerously-skip-permissions", line)
+
+    def test_codex_resolver_unrestricted(self):
+        line = self._run("resolver", "codex")
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", line)
 
 
 if __name__ == "__main__":
