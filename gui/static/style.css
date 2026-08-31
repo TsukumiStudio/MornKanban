@@ -171,6 +171,9 @@ button:hover {
 
 #view-policy {
   padding: 16px 20px;
+}
+
+#view-policy:not([hidden]) {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -186,10 +189,13 @@ button:hover {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+}
+
+#card-modal:not([hidden]) {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
 }
 
 .modal-box {
