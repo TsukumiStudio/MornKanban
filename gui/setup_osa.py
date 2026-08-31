@@ -17,6 +17,7 @@ from setup_core import (  # noqa: E402
     check_deps,
     cli_installed,
     run_setup,
+    run_uninstall,
     skill_installed,
 )
 
@@ -54,7 +55,7 @@ def status_message():
 
 def show_status_dialog():
     already_done = cli_installed() and skill_installed()
-    buttons = '{"閉じる"}' if already_done else '{"閉じる", "セットアップ実行"}'
+    buttons = '{"閉じる", "アンインストール"}' if already_done else '{"閉じる", "アンインストール", "セットアップ実行"}'
     default_button = "閉じる" if already_done else "セットアップ実行"
     script = (
         "set theResult to display dialog %s buttons %s "
@@ -92,6 +93,9 @@ def main():
 
     if choice == "セットアップ実行":
         messages = run_setup()
+        show_result_dialog(messages)
+    elif choice == "アンインストール":
+        messages = run_uninstall()
         show_result_dialog(messages)
 
     sys.exit(0)
