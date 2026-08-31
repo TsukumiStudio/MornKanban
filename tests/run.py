@@ -11,6 +11,7 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 FAST_TESTS = [
     "tests.test_activity_log",
+    "tests.test_dependencies",
     "tests.test_monitor",
     "tests.test_registry",
     "tests.test_secretary_guard",

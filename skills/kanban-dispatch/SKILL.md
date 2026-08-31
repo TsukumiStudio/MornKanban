@@ -67,13 +67,17 @@ While secretary mode is active:
    Set card effort with `-e`: for `gpt-5.6-sol`, use `medium` for normal work
    and `high` for complex work unless project policy gives a different reason;
    do not let every worker/reviewer/resolver inherit a shared `xhigh` by default.
-   Add each card **as soon as its own description is self-contained.** Never hold a
-   card back over file overlap, dependency order, or a collision with a card
-   already in flight — those are execution-time concerns that the
-   dispatcher/worker/reviewer/resolver resolve on their own through the
-   formal `resolving` and `blocked` states. Investigating conflicts, rebasing
-   or merging, fixing, or re-verifying are not secretary actions. If the
-   request is actually work for a *different* registered project, use
+   Add each card **as soon as its own description is self-contained.** Never
+   hold a card back over file overlap, dependency order inferred by the
+   secretary, or another running card. Never invent a dependency or release
+   gate: only the user or project policy may require one, recorded with
+   `--depends-on <card-id>`. Stop only explicitly dependent,
+   irreversible external work such as push/deploy; still file independent
+   local test, build, and status-check cards. A worker that discovers a real
+   undeclared dependency must return `BLOCKED: <reason>` as its first line,
+   never deliberately fail so that attempts/reviews are wasted. Investigating
+   conflicts, rebasing or merging, fixing, or re-verifying are not secretary
+   actions. If the request is actually work for a *different* registered project, use
    `kanban send <alias> "title"` instead (see README's **Cross-Project
    Send**) — it files the card into that project's own `.kanban/todo/`, not
    this one, and applies that project's own KANBAN.md defaults.
@@ -92,12 +96,15 @@ the secretary. After implementation merges, create the required verification
 card. Use `dispatch --once "$PWD"` for a browser-exclusive card as required
 by project policy.
 
-Cards in `resolving` (conflict resolution in progress) or `blocked` (an
-execution-time ordering dependency) are being handled automatically and need
-no secretary action. If dispatch cannot start, do not take over the
-implementation. Report the failed command and cause. When a notification
-arrives, inspect the board; report `failed/` immediately and summarize only
-after the board settles.
+Cards in `resolving` or `blocked` are handled by their structured state. A
+declared dependency resumes only after its target reaches `done`; a
+`review_infra` block means verification was not performed. If dispatch cannot
+start, do not take over implementation. On notifications, inspect
+`failure_kind`/`blocked_kind` and History: `failed` is a work-process failure,
+not automatically a product failure. Distinguish product defects,
+infrastructure failures, and unverified results. For missing verification,
+report **unverified / user decision required** instead of inferring that
+deployment is prohibited.
 
 ## What a secretary pane may and may not do
 

@@ -115,6 +115,8 @@ def card_summary(kanban_dir, state, filename):
         "title": fm.get("title", filename),
         "backend": fm.get("backend", ""),
         "model": fm.get("model", ""),
+        "depends_on": fm.get("depends_on", ""),
+        "dependency_state": fm.get("dependency_state", ""),
         "threshold": fm.get("threshold", ""),
         "attempts": fm.get("attempts", ""),
         "max_attempts": fm.get("max_attempts", ""),
@@ -126,6 +128,7 @@ def card_summary(kanban_dir, state, filename):
         # instead of leaving it indistinguishable from the older "worker
         # reported an ordering dependency" blocked kind.
         "blocked_kind": fm.get("blocked_kind", ""),
+        "failure_kind": fm.get("failure_kind", ""),
         "review_infra_retries": fm.get("review_infra_retries", ""),
         "worker_infra_retries": fm.get("worker_infra_retries", ""),
         "review_enabled": rv,

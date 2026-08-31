@@ -220,6 +220,70 @@ move_card() { # move_card <file> <state> -> echoes new path
   echo "$dest"
 }
 
+card_state_by_id() { # card_state_by_id <full-id> -> state
+  local wanted=$1 state file
+  for state in "${STATES[@]}"; do
+    for file in "$KB/$state"/*.md; do
+      [[ -e $file ]] || continue
+      if [[ $(fm_get "$file" id "") == "$wanted" ]]; then
+        echo "$state"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+dependency_state() { # dependency_state <card> -> ready|missing|<card-state>
+  local dep state
+  dep=$(fm_get "$1" depends_on "")
+  if [[ -z $dep ]]; then echo ready; return; fi
+  if state=$(card_state_by_id "$dep"); then echo "$state"; else echo missing; fi
+}
+
+refresh_dependency_cards() {
+  local file dep state old title
+  for file in "$KB/blocked"/*.md; do
+    [[ -e $file ]] || continue
+    [[ $(fm_get "$file" blocked_kind "") == dependency ]] || continue
+    dep=$(fm_get "$file" depends_on "")
+    state=$(dependency_state "$file")
+    old=$(fm_get "$file" dependency_state "")
+    if [[ $state == done ]]; then
+      fm_set "$file" blocked_kind ""
+      fm_set "$file" dependency_state ""
+      printf 'dependency %s reached done; card returned to todo without consuming an attempt.\n' "$dep" |
+        append_history "$file" "dependency ready"
+      title=$(fm_get "$file" title "?")
+      move_card "$file" todo >/dev/null
+      echo "[$title] dependency $dep done -> todo"
+    elif [[ $state != "$old" ]]; then
+      fm_set "$file" dependency_state "$state"
+      printf 'dependency %s changed state: %s -> %s; card remains blocked.\n' "$dep" "${old:-unknown}" "$state" |
+        append_history "$file" "dependency wait"
+    fi
+  done
+  for file in "$KB/todo"/*.md; do
+    [[ -e $file ]] || continue
+    dep=$(fm_get "$file" depends_on "")
+    [[ -n $dep ]] || continue
+    state=$(dependency_state "$file")
+    [[ $state == done ]] && continue
+    fm_set "$file" blocked_kind dependency
+    fm_set "$file" dependency_state "$state"
+    printf 'dependency %s is %s; card blocked before worker/reviewer start, so no attempt is consumed.\n' "$dep" "$state" |
+      append_history "$file" "dependency wait"
+    title=$(fm_get "$file" title "?")
+    move_card "$file" blocked >/dev/null
+    echo "[$title] dependency $dep is $state -> blocked"
+  done
+}
+
+fail_card() { # fail_card <card> <infrastructure|worker|review|resolve|merge|dispatcher>
+  fm_set "$1" failure_kind "$2"
+  move_card "$1" failed
+}
+
 cmd_init() {
   local base=${1:-$PWD}/.kanban
   for s in "${STATES[@]}"; do mkdir -p "$base/$s"; done
@@ -290,6 +354,15 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - effort はカード単位で `-e low|medium|high|xhigh|max`。gpt-5.6-solは通常medium、難所highとし、共通設定のxhighを無条件に継承させない
 - 設計・難所のカードだけ例外的に -m opus 等へ上げる (理由をカードに書く)
 - resolver も既定では worker と同じ下位モデル (`resolver` / `resolve_model`)
+
+## 依存関係・リリースゲート・失敗の意味
+
+- ユーザーまたはこのポリシーが明示していない先行カードを、秘書がリリースゲートにしてはならない
+- 明示された依存だけ `kanban add --depends-on <card-id>` で構造化する。依存先がdoneになるまで後続はworker/reviewerを起動せず、attemptを消費しない
+- 実行中に真の依存が判明したworker/resolverは、失敗させず最初の行を `BLOCKED: <理由>` として終了する
+- `failed` は作業プロセスの失敗であり、製品の検証不合格を意味しない。`failure_kind` とHistoryから製品不具合・インフラ障害・未検証を区別する
+- 依存で止めるのはpush/deploy等の不可逆な外部変更だけ。独立したtest/build/状態確認は止めず、別カードとして投入する
+- インフラ障害で検証未実施なら、デプロイ不可と推測せず「未検証・ユーザー判断が必要」と報告する
 
 ## worker/reviewer 権限ポリシー (UNRESTRICTED)【要リスク理解】
 
@@ -364,13 +437,14 @@ EOF
 
 cmd_add() {
   require_root
-  local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL effort="" threshold=$DEFAULT_THRESHOLD
+  local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL effort="" depends_on="" threshold=$DEFAULT_THRESHOLD
   local review_enabled=auto review_source=auto task_kind=implementation
   while [[ $# -gt 0 ]]; do
     case $1 in
       -b|--backend) backend=$2; shift 2 ;;
       -m|--model) model=$2; shift 2 ;;
       -e|--effort) effort=$2; shift 2 ;;
+      --depends-on) depends_on=$2; shift 2 ;;
       -t|--threshold) threshold=$2; shift 2 ;;
       --review) review_enabled=true; review_source=card; shift ;;
       --no-review) review_enabled=false; review_source=card; shift ;;
@@ -378,12 +452,15 @@ cmd_add() {
       *) title=$1; shift ;;
     esac
   done
-  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-e effort] [-t threshold] [--review|--no-review] [--diagnose] < description"
+  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-e effort] [--depends-on card-id] [-t threshold] [--review|--no-review] [--diagnose] < description"
   case $backend in
     auto|claude|codex) ;;
     *) die "unknown backend: $backend (auto|claude|codex)" ;;
   esac
   validate_effort "$effort"
+  if [[ -n $depends_on ]] && ! card_state_by_id "$depends_on" >/dev/null; then
+    die "dependency card not found: $depends_on"
+  fi
   [[ $DEFAULT_DIAGNOSIS_TARGET_MINUTES =~ ^[1-9][0-9]*$ ]] || die "diagnosis_target_minutes must be a positive integer"
   [[ $DEFAULT_DIAGNOSIS_MAX_MINUTES =~ ^[1-9][0-9]*$ ]] || die "diagnosis_max_minutes must be a positive integer"
   [[ $DEFAULT_DIAGNOSIS_TARGET_MINUTES -le $DEFAULT_DIAGNOSIS_MAX_MINUTES ]] || die "diagnosis_target_minutes must not exceed diagnosis_max_minutes"
@@ -404,6 +481,10 @@ title: $title
 backend: $backend
 model: $model
 effort: $effort
+depends_on: $depends_on
+dependency_state:
+blocked_kind:
+failure_kind:
 threshold: $threshold
 max_attempts: $DEFAULT_MAX_ATTEMPTS
 resolve_max_attempts: $DEFAULT_RESOLVE_MAX_ATTEMPTS
@@ -782,7 +863,7 @@ record_attempt() { # record_attempt <card> <threshold> -> increments attempts
     append_history "$file" "review"
 }
 
-notify_result() { # notify_result <done|failed> <title> ; optional hook, never fatal
+notify_result() { # notify_result <done|failed|blocked> <title> ; optional hook, never fatal
   if [[ -n ${KANBAN_NOTIFY_CMD:-} ]]; then
     local out
     if ! out=$($KANBAN_NOTIFY_CMD "$1" "$2" 2>&1); then
@@ -900,7 +981,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   elif ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
     echo "resolve worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
     git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
-    move_card "$file" failed >/dev/null
+    fail_card "$file" infrastructure >/dev/null
     echo "$tag FAIL resolve worktree add failed -> failed"
     notify_result failed "$title"
     return
@@ -956,7 +1037,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     printf 'conflict files: %s\nresolve branch %s and original card branch %s are kept for manual inspection.\n' \
       "$conflict_files" "$resolve_branch" "$card_branch" | append_history "$file" "gave up (conflict unresolved)"
     git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
-    move_card "$file" failed >/dev/null
+    fail_card "$file" resolve >/dev/null
     if [[ $review_enabled == true ]]; then
       echo "$tag FAIL resolve score=$ATT_SCORE attempts exhausted -> failed (branches $resolve_branch, $card_branch kept)"
     else
@@ -991,7 +1072,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     printf '%s but merging %s into %s failed; branches %s and %s kept for manual merge.\n' \
       "$resolve_note" "$resolve_branch" "$base_branch" "$resolve_branch" "$card_branch" |
       append_history "$file" "merge conflict (post-resolve)"
-    move_card "$file" failed >/dev/null
+    fail_card "$file" merge >/dev/null
     echo "$tag CONFLICT (post-resolve) -> failed (branches kept; merge manually)"
     notify_result failed "$title"
   fi
@@ -1022,6 +1103,7 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
     return
   fi
   if [[ -n $ATT_BLOCKED_REASON ]]; then
+    fm_set "$file" blocked_kind ordering
     printf 'worker reported a real-time ordering dependency:%s\n' "$ATT_BLOCKED_REASON" |
       append_history "$file" "blocked"
     move_card "$file" blocked >/dev/null
@@ -1039,7 +1121,7 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
       notify_result done "$title"
     else
       echo "worker exited with status $ATT_WORKER_STATUS" | append_history "$file" "worker failure"
-      move_card "$file" failed >/dev/null
+      fail_card "$file" worker >/dev/null
       echo "    FAIL worker exit=$ATT_WORKER_STATUS (review disabled) -> failed (needs human)"
       notify_result failed "$title"
     fi
@@ -1066,7 +1148,7 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
     echo "    PASS score=$ATT_SCORE -> done"
     notify_result done "$title"
   elif [[ $attempts -ge $max_attempts ]]; then
-    move_card "$file" failed >/dev/null
+    fail_card "$file" review >/dev/null
     echo "    FAIL score=$ATT_SCORE attempts exhausted -> failed (needs human)"
     notify_result failed "$title"
   else
@@ -1102,7 +1184,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     echo "$tag resuming existing worktree/branch after restart"
   elif ! git -C "$ROOT" worktree add -q -b "$branch" "$wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
     echo "worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
-    move_card "$file" failed >/dev/null
+    fail_card "$file" infrastructure >/dev/null
     echo "$tag FAIL worktree add failed -> failed"
     notify_result failed "$title"
     return
@@ -1122,6 +1204,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         break
       fi
       if [[ -n $ATT_BLOCKED_REASON ]]; then
+        fm_set "$file" blocked_kind ordering
         printf 'worker reported a real-time ordering dependency:%s\nworktree is discarded; the card restarts on a fresh worktree from the next pickup.\n' \
           "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
         git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
@@ -1185,10 +1268,11 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   if ! $passed; then
     printf 'branch %s is kept for manual inspection.\n' "$branch" | append_history "$file" "gave up"
     git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
-    move_card "$file" failed >/dev/null
     if [[ $review_enabled == true ]]; then
+      fail_card "$file" review >/dev/null
       echo "$tag FAIL score=$ATT_SCORE attempts exhausted -> failed (branch $branch kept)"
     else
+      fail_card "$file" worker >/dev/null
       echo "$tag FAIL worker exit=$ATT_WORKER_STATUS (review disabled) -> failed (branch $branch kept)"
     fi
     notify_result failed "$title"
@@ -1299,16 +1383,14 @@ cmd_run() {
   done
   for orphan in "$KB"/blocked/*.md; do
     if [[ -e $orphan ]]; then
-      # review-infra blocked cards are a deliberate, terminal stop: their
-      # worktree/branch/commits are the whole point of keeping them, and
-      # they wait for an explicit `kanban resume <id>` rather than being
-      # silently requeued (which would either re-run the worker for no
-      # reason, or collide with the surviving worktree/branch). Only the
-      # older "worker-reported ordering dependency" blocked kind is
-      # auto-reclaimed to todo on every restart, same as before.
-      if [[ $(fm_get "$orphan" blocked_kind "") == review_infra ]]; then
-        continue
-      fi
+      # review-infra and explicit-dependency cards remain parked: the former
+      # waits for `kanban resume`, while the latter is refreshed below and
+      # returns to todo only after its declared dependency reaches done.
+      # Review-infra worktree/branch/commits are the whole point of keeping them.
+      # Worker-reported ordering blocks are still reclaimed on restart.
+      case $(fm_get "$orphan" blocked_kind "") in
+        review_infra|dependency) continue ;;
+      esac
       local bid
       bid=$(fm_get "$orphan" id "?")
       if $is_git && [[ $bid != "?" ]]; then
@@ -1322,6 +1404,7 @@ cmd_run() {
   if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     if [[ $jobs_max -gt 1 ]]; then die "parallel mode requires a git repository (worktrees)"; fi
     while :; do
+      refresh_dependency_cards
       local cards=("$KB"/todo/*.md)
       [[ -e ${cards[0]} ]] || { echo "todo is empty"; break; }
       process_card_seq "$(move_card "${cards[0]}" doing)"
@@ -1336,6 +1419,7 @@ cmd_run() {
     die "detached HEAD; check out a branch first"
   local spawned=0
   while :; do
+    refresh_dependency_cards
     if ! $jobs_pinned; then
       local configured_jobs
       configured_jobs=$(fm_get "$KB/KANBAN.md" jobs "$jobs_max")
@@ -1364,7 +1448,7 @@ cmd_run() {
               local t
               t=$(fm_get "$f" title "?" 2>/dev/null || basename "$2")
               echo "job crashed unexpectedly (exit $st); see dispatcher output" | append_history "$f"
-              mv "$f" "$KB/failed/"
+              fail_card "$f" dispatcher >/dev/null
               echo "[$t] CRASH exit=$st -> failed"
             fi
           done

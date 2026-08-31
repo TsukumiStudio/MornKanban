@@ -8,7 +8,7 @@ Invoked by kanban.sh as:
   python3 registry/cli.py projects show <alias>
   python3 registry/cli.py projects update <alias> <path>
   python3 registry/cli.py projects remove <alias>
-  python3 registry/cli.py send <alias> <title> [-b ...] [-m ...] [-e ...] [-t ...] [--from PATH]
+  python3 registry/cli.py send <alias> <title> [-b ...] [-m ...] [-e ...] [--depends-on ID] [-t ...] [--from PATH]
   python3 registry/cli.py secretary resolve <project-root>
 
 python3 standard library only (no pip dependencies), matching the rest of
@@ -33,6 +33,7 @@ from registry import secretary, store  # noqa: E402
 
 BACKENDS = ("auto", "claude", "codex")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CARD_STATES = ("todo", "doing", "review", "resolving", "blocked", "done", "failed")
 DEFAULTS = {
     "default_backend": "auto",
     "default_model": "",
@@ -169,7 +170,20 @@ def _resolve_source(explicit_from):
     return source_alias, source_path
 
 
-def _write_card_atomic(todo_dir, title, body, backend, model, effort, threshold, max_attempts,
+def _card_state_by_id(kanban_dir, card_id):
+    for state in CARD_STATES:
+        state_dir = os.path.join(kanban_dir, state)
+        try:
+            names = os.listdir(state_dir)
+        except OSError:
+            continue
+        if any(name.endswith(".md") and name.startswith(card_id + "-") for name in names):
+            return state
+    return None
+
+
+def _write_card_atomic(todo_dir, title, body, backend, model, effort, depends_on,
+                        threshold, max_attempts,
                         source_alias, source_path, diagnose=False,
                         diagnosis_target_minutes="5", diagnosis_max_minutes="10"):
     slug = _slugify(title)
@@ -187,6 +201,10 @@ def _write_card_atomic(todo_dir, title, body, backend, model, effort, threshold,
             "backend: %s\n"
             "model: %s\n"
             "effort: %s\n"
+            "depends_on: %s\n"
+            "dependency_state: \n"
+            "blocked_kind: \n"
+            "failure_kind: \n"
             "threshold: %s\n"
             "max_attempts: %s\n"
             "review_enabled: %s\n"
@@ -202,7 +220,7 @@ def _write_card_atomic(todo_dir, title, body, backend, model, effort, threshold,
             "---\n\n"
             "## Task\n\n%s\n\n## History\n"
         ) % (
-            card_id, title, backend, model, effort, threshold, max_attempts,
+            card_id, title, backend, model, effort, depends_on, threshold, max_attempts,
             "false" if diagnose else "auto", "diagnose" if diagnose else "auto",
             "diagnose" if diagnose else "implementation",
             diagnosis_target_minutes, diagnosis_max_minutes, created,
@@ -250,6 +268,10 @@ def cmd_send(args):
     if effort and effort not in EFFORTS:
         print("kanban send: invalid effort: %s (%s)" % (effort, "|".join(EFFORTS)), file=sys.stderr)
         return 1
+    depends_on = args.depends_on or ""
+    if depends_on and not _card_state_by_id(kanban_dir, depends_on):
+        print("kanban send: dependency card not found: %s" % depends_on, file=sys.stderr)
+        return 1
     threshold = args.threshold if args.threshold is not None else defaults["threshold"]
     max_attempts = defaults["max_attempts"]
 
@@ -262,7 +284,8 @@ def cmd_send(args):
 
     try:
         dest = _write_card_atomic(
-            todo_dir, args.title, body, backend, model, effort, threshold, max_attempts,
+            todo_dir, args.title, body, backend, model, effort, depends_on,
+            threshold, max_attempts,
             source_alias, source_path, diagnose=args.diagnose,
             diagnosis_target_minutes=defaults["diagnosis_target_minutes"],
             diagnosis_max_minutes=defaults["diagnosis_max_minutes"],
@@ -331,6 +354,7 @@ def build_parser():
     send_p.add_argument("-b", "--backend", default=None)
     send_p.add_argument("-m", "--model", default=None)
     send_p.add_argument("-e", "--effort", default=None)
+    send_p.add_argument("--depends-on", default=None, metavar="CARD_ID")
     send_p.add_argument("-t", "--threshold", default=None)
     send_p.add_argument("--diagnose", action="store_true",
                         help="file a read-only 5/10-minute diagnosis card")

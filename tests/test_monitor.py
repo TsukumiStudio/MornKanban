@@ -169,6 +169,20 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(fm["title"], "hello")
         self.assertIn("body text", body)
 
+    def test_card_summary_exposes_dependency_and_failure_semantics(self):
+        write_card(self.kb, "failed", "a.md", {
+            "id": "2", "title": "dependent", "depends_on": "1",
+            "dependency_state": "failed", "blocked_kind": "dependency",
+            "failure_kind": "infrastructure",
+        })
+
+        summary = board.card_summary(self.kb, "failed", "a.md")
+
+        self.assertEqual(summary["depends_on"], "1")
+        self.assertEqual(summary["dependency_state"], "failed")
+        self.assertEqual(summary["blocked_kind"], "dependency")
+        self.assertEqual(summary["failure_kind"], "infrastructure")
+
     def test_dispatcher_status_live_pid(self):
         proc = subprocess.Popen(["sleep", "5"])
         try:

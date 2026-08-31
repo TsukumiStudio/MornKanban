@@ -541,6 +541,21 @@ class NotifySecretaryRoutingTests(unittest.TestCase):
         self.assertIn("failed to notify", result.stderr)
         self.assertIn("agent not found", result.stderr)
 
+    def test_failure_and_blocked_prompts_preserve_workflow_semantics(self):
+        env = self.base_env.copy()
+        env["KANBAN_HERDR_SECRETARY"] = "secretary-project-a"
+
+        failed = self.run_notify("failed", "failed card", env=env)
+        blocked = self.run_notify("blocked", "blocked card", env=env)
+
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        self.assertEqual(blocked.returncode, 0, blocked.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("製品の検証不合格とは限らない", log)
+        self.assertIn("failure_kind", log)
+        self.assertIn("review_infra は未検証", log)
+        self.assertIn("デプロイ不可と推測しない", log)
+
     def test_falls_back_to_resolved_name_from_cwd_when_env_unset(self):
         project = self._project("standalone-app")
 

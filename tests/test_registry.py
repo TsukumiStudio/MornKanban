@@ -197,6 +197,22 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("invalid effort", result.stderr)
         self.assertEqual(self._card_files(self.b), [])
 
+    def test_send_records_only_existing_destination_dependency(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        upstream = Path(self._run("send", "project-b", "upstream", input_text="u").stdout.strip())
+        upstream_id = re.search(r"^id: (\S+)$", upstream.read_text(encoding="utf-8"), re.M).group(1)
+
+        downstream = Path(self._run(
+            "send", "project-b", "downstream", "--depends-on", upstream_id, input_text="d"
+        ).stdout.strip())
+        self.assertIn("depends_on: %s" % upstream_id, downstream.read_text(encoding="utf-8"))
+
+        result = self._run(
+            "send", "project-b", "orphan", "--depends-on", "missing", input_text="x", check=False
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dependency card not found", result.stderr)
+
     def test_send_diagnose_preserves_read_only_timebox_metadata(self):
         self._run("projects", "add", "project-b", str(self.b))
         r = self._run("send", "project-b", "why slow", "--diagnose", input_text="evidence only")

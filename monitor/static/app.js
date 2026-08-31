@@ -134,6 +134,11 @@
         item.appendChild(el("div", null, c.title || c.filename));
         if (s === "blocked" && c.blocked_kind === "review_infra") {
           item.appendChild(el("div", "card-sub badge-infra-blocked", "review infrastructure stopped (not a code failure)"));
+        } else if (s === "blocked" && c.blocked_kind === "dependency") {
+          item.appendChild(el("div", "card-sub", "dependency " + c.depends_on + " is " + c.dependency_state));
+        }
+        if (s === "failed" && c.failure_kind) {
+          item.appendChild(el("div", "card-sub", "failure kind: " + c.failure_kind + " (inspect History; not automatically a product verdict)"));
         }
         const reviewLabel = c.review_enabled === "false" ? "Review: OFF" : "Review: ON";
         item.appendChild(el("div", "card-sub", [c.backend, c.model, "attempts " + c.attempts + "/" + c.max_attempts, reviewLabel].filter(Boolean).join(" · ")));
