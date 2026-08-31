@@ -1,8 +1,11 @@
 (() => {
   "use strict";
 
-  const STATES = ["todo", "doing", "review", "done", "failed"];
-  const STATE_LABELS = { todo: "Todo", doing: "Doing", review: "Review", done: "Done", failed: "Failed" };
+  const STATES = ["todo", "doing", "review", "resolving", "blocked", "done", "failed"];
+  const STATE_LABELS = {
+    todo: "Todo", doing: "Doing", review: "Review", resolving: "Resolving",
+    blocked: "Blocked", done: "Done", failed: "Failed",
+  };
   const POLL_MS = 8000;
 
   const el = (tag, cls, text) => {

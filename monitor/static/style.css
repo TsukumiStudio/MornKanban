@@ -9,6 +9,8 @@
   --todo: #8b8f98;
   --doing: #c98a1f;
   --review: #7a4fd1;
+  --resolving: #1f8a9c;
+  --blocked: #b1590c;
   --done: #2f9e44;
   --failed: #d64545;
 }
@@ -105,7 +107,7 @@ h2 { font-size: 1rem; color: var(--muted); margin: 24px 0 10px; }
 
 .board-columns {
   display: grid;
-  grid-template-columns: repeat(5, minmax(180px, 1fr));
+  grid-template-columns: repeat(7, minmax(180px, 1fr));
   gap: 10px;
   overflow-x: auto;
 }
@@ -128,6 +130,8 @@ h2 { font-size: 1rem; color: var(--muted); margin: 24px 0 10px; }
 .board-column h4 .badge-todo { color: var(--todo); }
 .board-column h4 .badge-doing { color: var(--doing); }
 .board-column h4 .badge-review { color: var(--review); }
+.board-column h4 .badge-resolving { color: var(--resolving); }
+.board-column h4 .badge-blocked { color: var(--blocked); }
 .board-column h4 .badge-done { color: var(--done); }
 .board-column h4 .badge-failed { color: var(--failed); }
 
