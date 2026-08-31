@@ -95,7 +95,7 @@ def main():
             if not path.strip():
                 continue
             norm = os.path.abspath(os.path.expanduser(path.strip()))
-            ok, msg = add_project(path)
+            ok, msg = add_project(norm)
             print(msg)
             if not ok:
                 continue

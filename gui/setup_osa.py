@@ -121,7 +121,7 @@ def handle_add_project():
     if path is None or not path.strip():
         return
     norm = os.path.abspath(os.path.expanduser(path.strip()))
-    ok, msg = add_project(path)
+    ok, msg = add_project(norm)
     if not ok:
         osa_display_ok("プロジェクト追加", msg)
         return
