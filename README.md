@@ -72,6 +72,10 @@ Leave `model` empty to use the backend's own default. Model names are backend-sp
 - Status of both is shown by `kanban-setup.sh` / `./kanban-setup.sh` (`秘書ガード (in-process delegation 拒否): claude=..., codex=...`), reporting `enforced`, `not_installed`, or `misconfigured`.
 - A denied call appends one capped audit line (timestamp, tool name, pane id — no conversation text) to `.kanban/.secretary-guard/audit.log`, capped at 200 lines.
 
+### Integration with the `resolving`/`blocked` contract (formerly branch `kanban/20260831-194719-16227`)
+
+That branch's "秘書をカード起票専任にして競合解決役を導入" work passed review (score 90) but was left in `failed/` only because its automated merge into `main` conflicted — it was never manually merged or discarded. This guard work (the present card) merged it into this branch instead of re-doing it: `resolving`/`blocked` states, the resolver role (`process_resolve_wt`, `KANBAN_RESOLVE_CMD`/`KANBAN_RESOLVER`/`KANBAN_RESOLVE_MODEL`), the monitor's extra columns, and its `tests/test_kanban_secretary.py` E2E coverage are unchanged carry-overs (`git merge kanban/20260831-194719-16227`, conflicts resolved additively in `kanban.sh`/`skills/kanban-dispatch/SKILL.md`/`VERSION`; `README.md`/`monitor/*`/`herdr-agent-worker.sh`/`kanban-secretary.sh`/`tests/test_kanban_secretary.py` auto-merged clean). The original failed branch itself is left untouched — nothing was deleted or force-pushed there. Both contracts now share one place: `kanban-secretary.sh bootstrap`'s marker/guard (this card) governs *whether* the secretary pane may delegate in-process; the merged-in "秘書契約" text in `KANBAN.md`/`SKILL.md`/README (that branch) governs that the secretary must not *hold back* a card over conflict/order concerns either way — both point at the same `kanban add` → `kanban-secretary.sh dispatch` path.
+
 ## Backends
 
 | Backend | Worker command | Reviewer command |
