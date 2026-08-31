@@ -167,11 +167,47 @@ def _slugify(name):
     return slug or "project"
 
 
+def _registered_projects():
+    """Explicit `kanban projects add` entries (registry/store.py), keyed by
+    realpath. Shares config_dir()/KANBAN_MONITOR_CONFIG_DIR with this module
+    so the two features never fork their config, and its own import failing
+    (e.g. an old checkout without the registry package) never breaks the
+    roots-based scan below."""
+    try:
+        from registry import store as project_registry
+    except ImportError:
+        return {}
+    try:
+        entries = project_registry.list_all()
+    except project_registry.RegistryError:
+        return {}
+    by_root = {}
+    for alias, entry in entries.items():
+        if os.path.isdir(entry.get("kanban_dir", "")):
+            by_root[entry["root"]] = alias
+    return by_root
+
+
 def build_registry(roots):
-    """Return {slug: project_info} with stable, unique slugs (sorted by root path)."""
+    """Return {slug: project_info} with stable, unique slugs (sorted by root
+    path). A project registered via `kanban projects add` always keeps its
+    registered alias as its slug here, so `kanban monitor`'s listing and
+    `kanban send <alias>` name the same project the same way, whether or not
+    that project also falls under a scanned root."""
     raw = discover_projects(roots)
+    registered = _registered_projects()
     registry = {}
     used = set()
+
+    for rp, alias in registered.items():
+        info = raw.pop(rp, None)
+        if info is None:
+            if not os.path.isdir(rp):
+                continue
+            info = {"root": rp, "kanban_dir": os.path.join(rp, ".kanban"), "name": os.path.basename(rp) or rp}
+        registry[alias] = dict(info, slug=alias)
+        used.add(alias)
+
     for rp in sorted(raw):
         info = raw[rp]
         base = _slugify(info["name"])

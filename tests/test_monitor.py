@@ -96,6 +96,40 @@ class DiscoveryTest(unittest.TestCase):
         registry = discovery.build_registry([self.git_root])
         self.assertEqual(sorted(registry.keys()), ["dup", "dup-2"])
 
+    def test_build_registry_uses_send_alias_when_project_is_registered(self):
+        # `kanban projects add` and the roots-scan must agree on a name: a
+        # project registered under an explicit alias always keeps that alias
+        # as its monitor slug, even though its basename would slugify to
+        # something else.
+        proj_root, _ = make_project(os.path.join(self.git_root, "some-repo"), "renamed-in-registry")
+        cfg_dir = os.path.join(self.tmp, "cfgdir")
+        os.environ["KANBAN_MONITOR_CONFIG_DIR"] = cfg_dir
+        try:
+            from registry import store as project_registry
+            project_registry.add("project-a", proj_root)
+            registry = discovery.build_registry([self.git_root])
+            self.assertIn("project-a", registry)
+            self.assertNotIn("some-repo", registry)
+            self.assertEqual(registry["project-a"]["root"], os.path.realpath(proj_root))
+        finally:
+            del os.environ["KANBAN_MONITOR_CONFIG_DIR"]
+
+    def test_build_registry_includes_registered_project_outside_roots(self):
+        # A `kanban projects add`-registered project need not live under any
+        # scanned root at all; it must still show up under its alias.
+        outside = os.path.join(self.tmp, "outside")
+        proj_root, _ = make_project(outside, "elsewhere")
+        cfg_dir = os.path.join(self.tmp, "cfgdir")
+        os.environ["KANBAN_MONITOR_CONFIG_DIR"] = cfg_dir
+        try:
+            from registry import store as project_registry
+            project_registry.add("project-b", proj_root)
+            registry = discovery.build_registry([self.git_root])
+            self.assertIn("project-b", registry)
+            self.assertEqual(registry["project-b"]["root"], os.path.realpath(proj_root))
+        finally:
+            del os.environ["KANBAN_MONITOR_CONFIG_DIR"]
+
     def test_config_roots_saved_under_overridden_home(self):
         cfg_dir = os.path.join(self.tmp, "cfgdir")
         os.environ["KANBAN_MONITOR_CONFIG_DIR"] = cfg_dir
