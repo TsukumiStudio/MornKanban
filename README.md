@@ -115,6 +115,47 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |
 | `KANBAN_DEBUG` | Write per-job xtrace logs to `.kanban/wt/job.*.trace` |
 
+## Monitor (read-only, multi-project)
+
+`kanban monitor` is a **read-only** localhost web viewer that shows every `.kanban` board on this machine — Kanban columns, card frontmatter/body/History, dispatcher running/stopped state, and recent activity — across multiple projects at once. It never adds cards, changes card state, or touches any process; every write HTTP method (`POST`/`PUT`/`PATCH`/`DELETE`) is rejected with `405`, and there is no UI control that mutates anything.
+
+- Start in the foreground: `kanban monitor` (equivalent to `kanban monitor run`). Open `http://127.0.0.1:8787/` (default port `8787`). Stop with Ctrl+C.
+- Flags: `--host` (default `127.0.0.1`; only change this if you intentionally want to expose the viewer beyond localhost — a warning is printed), `--port` (default `8787`), `--root <path>` (repeatable; adds a search root for this run only).
+- python3 standard library only, matching the rest of MornKanban's distribution constraints — no `pip install` is required.
+
+### Project discovery
+
+By default the monitor only looks for `.kanban` directories under `~/git`. It never scans the whole filesystem, never descends into a `.kanban` directory once found (so `.kanban/wt/<id>` worktree checkouts are never listed as separate projects), and deduplicates by `realpath` so symlink loops cannot cause repeats or hangs.
+
+Search roots are configured in a JSON file:
+
+- Default location: `${XDG_CONFIG_HOME:-~/.config}/mornkanban/monitor.json` — `{"roots": ["/path/one", "/path/two"]}`.
+- Manage it with the CLI: `kanban monitor config list-roots` / `add-root <path>` / `remove-root <path>`.
+- `KANBAN_MONITOR_ROOTS` (a `:`-separated list of paths) overrides the config file entirely — handy for one-off runs and for tests.
+- `KANBAN_MONITOR_CONFIG` (a file path) or `KANBAN_MONITOR_CONFIG_DIR` (a directory) overrides where the config file itself is read from/written to, independent of `$HOME` — used by the test suite so it never touches a real user's config.
+
+### Running it PC-resident (macOS user LaunchAgent)
+
+This is a **separate command namespace from `kanban install/update/uninstall`** (which manage the `kanban` CLI symlink and the secretary skill) — the monitor's own resident-process lifecycle lives entirely under `kanban monitor daemon`:
+
+```sh
+kanban monitor daemon install [--host H] [--port P] [--root R ...]   # write/refresh the LaunchAgent plist
+kanban monitor daemon start                                          # load + start it
+kanban monitor daemon status                                         # installed? running?
+kanban monitor daemon stop                                           # stop + unload it
+kanban monitor daemon uninstall                                      # stop it and remove the plist
+```
+
+All of these are idempotent and only ever touch one file: `~/Library/LaunchAgents/dev.mornkanban.monitor.plist` (plus its own log files under `~/Library/Logs/MornKanban/`). No other LaunchAgent or file is ever read, modified, or removed.
+
+### Security boundary
+
+- Binds to `127.0.0.1` by default; it is not exposed to the network unless you explicitly pass a different `--host`.
+- Only `GET`/`HEAD` are implemented; every other HTTP method gets `405`.
+- Every project, card, and static-file path is checked against a `realpath` allowlist before being read, rejecting directory traversal and any path outside a discovered project's `.kanban` directory.
+- All dynamic content is served as JSON and rendered client-side via `textContent` (never `innerHTML`), so card titles/bodies containing HTML-like text cannot inject markup into the page.
+- A project that fails to read (permission error, corrupt file, etc.) shows an inline error on its own card instead of breaking the rest of the page.
+
 ## Constraints
 
 - One dispatcher per project (`.kanban/.lock`); parallelism comes from `-j`, not from extra dispatchers.
