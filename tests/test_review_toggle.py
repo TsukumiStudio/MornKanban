@@ -337,6 +337,31 @@ class ReviewToggleTests(unittest.TestCase):
         r_off = self._run("show", off_id, env=env)
         self.assertIn("Review: OFF (fast iteration)", r_off.stdout)
 
+    def test_show_and_list_reflect_project_default_for_unresolved_card(self):
+        # Regression: a card still at review_enabled=auto (not yet picked up
+        # by the dispatcher) must show the *effective* policy from the
+        # card>env>project>default chain, not a hardcoded ON fallback.
+        env = dict(self.env)
+        (self.repo / ".kanban" / "KANBAN.md").write_text(
+            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+                "review_enabled: true", "review_enabled: false"
+            )
+        )
+        self._run("add", "auto card", input_text="task", env=env)  # no --review/--no-review
+        cards = glob.glob(str(self.repo / ".kanban" / "todo" / "*.md"))
+        self.assertEqual(len(cards), 1)
+        text = Path(cards[0]).read_text()
+        self.assertIn("review_enabled: auto", text)  # not yet resolved/frozen
+        cid = [ln for ln in text.splitlines() if ln.startswith("id:")][0].split(":", 1)[1].strip()
+
+        r_show = self._run("show", cid, env=env)
+        self.assertIn("Review: OFF (fast iteration)", r_show.stdout)
+        self.assertNotIn("Review: ON", r_show.stdout)
+
+        r_list = self._run("list", env=env)
+        self.assertIn("Review: OFF (fast iteration)", r_list.stdout)
+        self.assertNotIn("Review: ON", r_list.stdout)
+
     def test_add_usage_documents_review_flags(self):
         env = dict(self.env)
         r = self._run("add", env=env, check=False)
@@ -384,6 +409,27 @@ class ReviewToggleTests(unittest.TestCase):
         self._run("add", "card", "--no-review", input_text="task", env=env)
         detail = board.board_detail(str(self.repo / ".kanban"))
         matches = [c for c in detail["columns"]["todo"] if c.get("title") == "card"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["review_enabled"], "false")
+
+    def test_monitor_board_json_resolves_auto_via_project_default(self):
+        import sys
+
+        sys.path.insert(0, str(REPO / "monitor"))
+        import importlib
+
+        board = importlib.import_module("board")
+        importlib.reload(board)
+
+        env = dict(self.env)
+        (self.repo / ".kanban" / "KANBAN.md").write_text(
+            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+                "review_enabled: true", "review_enabled: false"
+            )
+        )
+        self._run("add", "auto card", input_text="task", env=env)  # no --review/--no-review
+        detail = board.board_detail(str(self.repo / ".kanban"))
+        matches = [c for c in detail["columns"]["todo"] if c.get("title") == "auto card"]
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["review_enabled"], "false")
 
