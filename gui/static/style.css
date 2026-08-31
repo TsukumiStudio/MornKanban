@@ -5,8 +5,8 @@
   --color-text: #1c1c1e;
   --color-muted: #6e6e73;
   --color-accent: #3b6fe0;
-  --color-done-bg: #e6f6ea;
-  --color-failed-bg: #fbe7e7;
+  --color-ok: #2e9e50;
+  --color-ng: #d33;
 }
 
 * {
@@ -48,22 +48,43 @@ body {
   border: 1px solid var(--color-border);
 }
 
-#project-row,
-#action-row {
+#setup-steps {
+  max-width: 720px;
+  margin: 32px auto;
+  padding: 0 20px;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 20px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 20px;
 }
 
-#project-row {
-  border-bottom: 1px solid var(--color-border);
+.step-card {
+  background: var(--color-surface);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 20px 24px;
+}
+
+.step-card.done {
+  border: 2px solid var(--color-ok);
+}
+
+.step-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.step-card p {
+  margin: 0 0 12px;
+  color: var(--color-muted);
+}
+
+.step-card .row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
 input,
-select,
-textarea,
 button {
   font: inherit;
   padding: 6px 10px;
@@ -89,141 +110,33 @@ button:hover {
   min-width: 200px;
 }
 
-#tabs {
-  display: flex;
-  gap: 4px;
-  padding: 8px 20px 0;
-}
-
-#tabs button {
-  background: var(--color-surface);
-  color: var(--color-text);
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
-}
-
-#view-board {
-  padding: 16px 20px;
-}
-
-#board {
-  display: flex;
-  gap: 12px;
-  overflow-x: auto;
-}
-
-.column {
-  flex: 1 1 0;
-  min-width: 200px;
-  max-height: 60vh;
-  display: flex;
-  flex-direction: column;
-  background: #eceef1;
-  border-radius: 8px;
-  padding: 8px;
-}
-
-.column[data-status="failed"] {
-  background: var(--color-failed-bg);
-}
-
-.column[data-status="done"] {
-  background: var(--color-done-bg);
-}
-
-.column h2 {
-  margin: 4px 8px;
-  font-size: 14px;
-  color: var(--color-muted);
-  text-transform: uppercase;
-}
-
-.card-list {
+#project-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow-y: auto;
-  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.card {
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
-  padding: 10px;
-  cursor: pointer;
-}
-
-.card:hover {
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-}
-
-#card-form {
-  margin-top: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 480px;
-}
-
-#view-policy {
-  padding: 16px 20px;
-}
-
-#view-policy:not([hidden]) {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-#policy-editor {
-  width: 100%;
-  min-height: 400px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
-}
-
-#card-modal {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 100;
-}
-
-#card-modal:not([hidden]) {
+#project-list li {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--color-bg);
+  border-radius: 6px;
 }
 
-.modal-box {
-  position: relative;
-  background: #fff;
-  max-width: 720px;
-  width: 90%;
-  max-height: 80vh;
-  overflow-y: auto;
-  border-radius: 8px;
-  padding: 20px;
+.ok {
+  color: var(--color-ok);
+  font-weight: 600;
 }
 
-.modal-box pre {
-  overflow-x: auto;
-  white-space: pre;
-}
-
-#modal-close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  background: transparent;
-  color: var(--color-text);
-  border: none;
-  font-size: 18px;
-  line-height: 1;
-  padding: 4px 8px;
+.ng {
+  color: var(--color-ng);
+  font-weight: 600;
 }
 
 #toast {
