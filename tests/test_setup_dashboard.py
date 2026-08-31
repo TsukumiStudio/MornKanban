@@ -142,6 +142,9 @@ class DashboardModuleTests(unittest.TestCase):
             self.dashboard.STATE_UPDATE,
             self.dashboard.STATE_RUNNING,
             self.dashboard.STATE_STOPPED,
+            self.dashboard.STATE_OPTIONAL,
+            self.dashboard.STATE_REGISTERED,
+            self.dashboard.STATE_EMPTY,
             self.dashboard.STATE_NEEDS_CHECK,
         ):
             badge = self.dashboard.state_badge(caps, state)
@@ -209,8 +212,8 @@ def _fake_status():
             "Codex": {"installed": False, "version": None, "repo": None, "state": "未導入"},
         },
         "version": {"current": "1.0.0", "latest": "1.0.0", "state": "up-to-date", "error": None, "badge_state": "導入済み"},
-        "monitor": {"installed": False, "running": False, "state": "未導入", "plist": "/tmp/x.plist", "url": "http://127.0.0.1:8787/"},
-        "registry": {"state": "未導入", "path": "/tmp/home/.config/mornkanban/projects.json", "count": 0, "error": None},
+        "monitor": {"installed": False, "running": False, "state": "任意・未設定", "plist": "/tmp/x.plist", "url": "http://127.0.0.1:8787/"},
+        "registry": {"state": "登録なし", "path": "/tmp/home/.config/mornkanban/projects.json", "count": 0, "error": None},
         "project": {"state": "未導入", "root": None},
         "deps": {"herdr": False, "claude": False, "codex": False},
         "guard": {"claude": "enforced", "codex": "partial"},
@@ -277,12 +280,12 @@ class CollectStatusFixtureTests(unittest.TestCase):
         self.env_patch.stop()
         self.temp.cleanup()
 
-    def test_all_uninstalled(self):
+    def test_optional_monitor_and_empty_registry_are_not_uninstalled(self):
         status = self.dashboard.collect_status(cwd=str(self.root))
         self.assertEqual(status["cli"]["state"], self.dashboard.STATE_NOT_INSTALLED)
         self.assertEqual(status["skills"]["Claude Code"]["state"], self.dashboard.STATE_NOT_INSTALLED)
-        self.assertEqual(status["monitor"]["state"], self.dashboard.STATE_NOT_INSTALLED)
-        self.assertEqual(status["registry"]["state"], self.dashboard.STATE_NOT_INSTALLED)
+        self.assertEqual(status["monitor"]["state"], self.dashboard.STATE_OPTIONAL)
+        self.assertEqual(status["registry"]["state"], self.dashboard.STATE_EMPTY)
         self.assertEqual(status["project"]["state"], self.dashboard.STATE_NOT_INSTALLED)
 
     def test_cli_installed_state(self):
@@ -370,7 +373,7 @@ class CollectStatusFixtureTests(unittest.TestCase):
             registry.add("regproj", str(project))
             status = self.dashboard.collect_status(cwd=str(self.root))
         self.assertEqual(status["registry"]["count"], 1)
-        self.assertEqual(status["registry"]["state"], self.dashboard.STATE_INSTALLED)
+        self.assertEqual(status["registry"]["state"], self.dashboard.STATE_REGISTERED)
 
 
 class InteractiveWizardPtyTests(unittest.TestCase):

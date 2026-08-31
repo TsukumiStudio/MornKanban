@@ -32,6 +32,9 @@ STATE_NOT_INSTALLED = "未導入"
 STATE_UPDATE = "更新あり"
 STATE_RUNNING = "稼働中"
 STATE_STOPPED = "停止中"
+STATE_OPTIONAL = "任意・未設定"
+STATE_REGISTERED = "登録あり"
+STATE_EMPTY = "登録なし"
 STATE_NEEDS_CHECK = "要確認"
 STATE_UNKNOWN = "不明"
 
@@ -42,6 +45,9 @@ _STATE_STYLE = {
     STATE_UPDATE: ("yellow", "[UP]", "▲"),
     STATE_RUNNING: ("green", "[ON]", "●"),
     STATE_STOPPED: ("gray", "[OFF]", "○"),
+    STATE_OPTIONAL: ("gray", "[--]", "○"),
+    STATE_REGISTERED: ("green", "[OK]", "✔"),
+    STATE_EMPTY: ("gray", "[--]", "○"),
     STATE_NEEDS_CHECK: ("red", "[!!]", "⚠"),
     STATE_UNKNOWN: ("gray", "[??]", "•"),
 }
@@ -246,7 +252,7 @@ def _version_detail():
 def _monitor_detail():
     st = launchagent.status()
     if not st["installed"]:
-        state = STATE_NOT_INSTALLED
+        state = STATE_OPTIONAL
     elif st["running"]:
         state = STATE_RUNNING
     else:
@@ -264,7 +270,7 @@ def _registry_detail():
     try:
         projects = registry_store.list_all()
         return {
-            "state": STATE_INSTALLED if projects else STATE_NOT_INSTALLED,
+            "state": STATE_REGISTERED if projects else STATE_EMPTY,
             "path": sanitize(registry_store.registry_path()),
             "count": len(projects),
             "error": None,
