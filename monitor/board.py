@@ -45,6 +45,38 @@ def read_card(path):
     return fm, body
 
 
+def _parse_bool_lenient(v):
+    v = (v or "").strip().lower()
+    if v in ("true", "1", "yes", "on"):
+        return True
+    if v in ("false", "0", "no", "off"):
+        return False
+    return None
+
+
+def project_review_default(kanban_dir):
+    """Effective review_enabled for a card still at review_enabled=auto.
+
+    Mirrors kanban.sh's priority chain (env > KANBAN.md project setting >
+    built-in true) so the board doesn't show a stale "Review: ON" for cards
+    that haven't been picked up by the dispatcher (and thus resolved/frozen)
+    yet. Card-level overrides are handled by the caller before falling back
+    to this.
+    """
+    env = _parse_bool_lenient(os.environ.get("KANBAN_REVIEW_ENABLED"))
+    if env is not None:
+        return env
+    cfg = os.path.join(kanban_dir, "KANBAN.md")
+    try:
+        with open(cfg, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return True
+    fm, _ = parse_card(text)
+    project = _parse_bool_lenient(fm.get("review_enabled"))
+    return True if project is None else project
+
+
 def card_summary(kanban_dir, state, filename):
     path = os.path.join(kanban_dir, state, filename)
     fm, _ = read_card(path)
@@ -52,6 +84,9 @@ def card_summary(kanban_dir, state, filename):
         mtime = os.path.getmtime(path)
     except OSError:
         mtime = None
+    rv = fm.get("review_enabled", "auto")
+    if rv == "auto":
+        rv = "true" if project_review_default(kanban_dir) else "false"
     return {
         "filename": filename,
         "state": state,
@@ -72,7 +107,7 @@ def card_summary(kanban_dir, state, filename):
         "blocked_kind": fm.get("blocked_kind", ""),
         "review_infra_retries": fm.get("review_infra_retries", ""),
         "worker_infra_retries": fm.get("worker_infra_retries", ""),
-        "review_enabled": fm.get("review_enabled", "true"),
+        "review_enabled": rv,
         "mtime": mtime,
     }
 
