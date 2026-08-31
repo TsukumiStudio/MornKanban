@@ -8,4 +8,12 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-exec python3 "$REPO/gui/setup_gui.py"
+if python3 -c "import tkinter" 2>/dev/null; then
+  exec python3 "$REPO/gui/setup_gui.py"
+fi
+
+if [ "$(uname)" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then
+  exec python3 "$REPO/gui/setup_osa.py"
+fi
+
+exec python3 "$REPO/gui/setup_cli.py"
