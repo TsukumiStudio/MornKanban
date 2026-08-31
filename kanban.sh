@@ -23,6 +23,8 @@ BACKENDS="claude codex"
 # count is tracked separately from `attempts` (see review_with_infra_retry).
 DEFAULT_REVIEW_INFRA_MAX_RETRIES=2
 DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=2
+# review_enabled priority: card override > environment > project policy > true.
+PROJECT_REVIEW_ENABLED=""
 
 die() { echo "kanban: $*" >&2; exit 1; }
 
@@ -101,6 +103,62 @@ load_project_config() { # .kanban/KANBAN.md frontmatter -> defaults (env still w
   cfg_env "$cfg" codex_sandbox KANBAN_CODEX_SANDBOX
   cfg_env "$cfg" codex_full_bypass KANBAN_CODEX_FULL_BYPASS
   cfg_env "$cfg" codex_approval KANBAN_CODEX_APPROVAL
+  if [[ -n ${KANBAN_REVIEW_ENABLED:-} ]]; then
+    KANBAN_REVIEW_ENABLED=$(parse_bool "$KANBAN_REVIEW_ENABLED" "KANBAN_REVIEW_ENABLED env var")
+  fi
+  local review_value
+  review_value=$(fm_get "$cfg" review_enabled "")
+  if [[ -n $review_value ]]; then
+    PROJECT_REVIEW_ENABLED=$(parse_bool "$review_value" "KANBAN.md review_enabled")
+  fi
+}
+
+parse_bool() { # parse_bool <value> <context> -> true|false
+  local raw=$1 context=$2 value
+  value=$(echo "$raw" | tr '[:upper:]' '[:lower:]')
+  case $value in
+    true|1|yes|on) echo true ;;
+    false|0|no|off) echo false ;;
+    *) die "invalid boolean for $context: '$raw' (expected true or false)" ;;
+  esac
+}
+
+resolve_card_review() { # resolve_card_review <card> -> CARD_REVIEW_ENABLED/SOURCE, persisted
+  local file=$1 value
+  value=$(fm_get "$file" review_enabled "auto")
+  if [[ $value != auto ]]; then
+    CARD_REVIEW_ENABLED=$(parse_bool "$value" "card review_enabled")
+    CARD_REVIEW_SOURCE=$(fm_get "$file" review_source "card")
+    return
+  fi
+  if [[ -n ${KANBAN_REVIEW_ENABLED:-} ]]; then
+    CARD_REVIEW_ENABLED=$KANBAN_REVIEW_ENABLED
+    CARD_REVIEW_SOURCE=env
+  elif [[ -n $PROJECT_REVIEW_ENABLED ]]; then
+    CARD_REVIEW_ENABLED=$PROJECT_REVIEW_ENABLED
+    CARD_REVIEW_SOURCE=project
+  else
+    CARD_REVIEW_ENABLED=true
+    CARD_REVIEW_SOURCE=default
+  fi
+  fm_set "$file" review_enabled "$CARD_REVIEW_ENABLED"
+  fm_set "$file" review_source "$CARD_REVIEW_SOURCE"
+  echo "review decision: review_enabled=$CARD_REVIEW_ENABLED (source: $CARD_REVIEW_SOURCE)" |
+    append_history "$file" "review policy"
+}
+
+effective_review_enabled() { # effective_review_enabled <card> -> true|false without writing
+  local file=$1 value
+  value=$(fm_get "$file" review_enabled "auto")
+  if [[ $value != auto ]]; then
+    parse_bool "$value" "card review_enabled"
+  elif [[ -n ${KANBAN_REVIEW_ENABLED:-} ]]; then
+    echo "$KANBAN_REVIEW_ENABLED"
+  elif [[ -n $PROJECT_REVIEW_ENABLED ]]; then
+    echo "$PROJECT_REVIEW_ENABLED"
+  else
+    echo true
+  fi
 }
 
 fm_get() { # fm_get <file> <key> <default>
@@ -171,6 +229,7 @@ max_attempts: 3
 resolve_max_attempts: 2
 review_infra_max_retries: 2
 review_infra_backoff_seconds: 2
+review_enabled: true
 jobs: 2
 # 既定は無制限権限 (worker/reviewer 共通、resolver 実装時も同キーを流用する)。
 # claude_perms: bypassPermissions -> `--dangerously-skip-permissions` (permission prompt 全skip)
@@ -187,6 +246,13 @@ codex_approval: never
 
 秘書 (対話) エージェントはカードを切る前にこのファイルを読み、以下に従うこと。
 frontmatter は kanban CLI が既定値として読む (環境変数が優先)。
+
+## review_enabled (reviewer審査の on/off)
+
+- `review_enabled: true|false`。既定は `true`
+- 優先順位: cardの `--review` / `--no-review` > `KANBAN_REVIEW_ENABLED` > この設定 > 既定
+- `false` はworker成功後のreviewer審査だけを省略する。worker自身のtestは省略しない
+- 決定値と出所はカードへ保存され、dispatcher再起動後も変わらない
 
 ## 秘書契約 (最重要)
 
@@ -279,15 +345,18 @@ EOF
 cmd_add() {
   require_root
   local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL threshold=$DEFAULT_THRESHOLD
+  local review_enabled=auto review_source=auto
   while [[ $# -gt 0 ]]; do
     case $1 in
       -b|--backend) backend=$2; shift 2 ;;
       -m|--model) model=$2; shift 2 ;;
       -t|--threshold) threshold=$2; shift 2 ;;
+      --review) review_enabled=true; review_source=card; shift ;;
+      --no-review) review_enabled=false; review_source=card; shift ;;
       *) title=$1; shift ;;
     esac
   done
-  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-t threshold] < description"
+  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-t threshold] [--review|--no-review] < description"
   case $backend in
     auto|claude|codex) ;;
     *) die "unknown backend: $backend (auto|claude|codex)" ;;
@@ -307,6 +376,8 @@ model: $model
 threshold: $threshold
 max_attempts: $DEFAULT_MAX_ATTEMPTS
 resolve_max_attempts: $DEFAULT_RESOLVE_MAX_ATTEMPTS
+review_enabled: $review_enabled
+review_source: $review_source
 attempts: 0
 resolve_attempts: 0
 created: $(date '+%Y-%m-%dT%H:%M:%S')
@@ -328,7 +399,10 @@ cmd_list() {
     [[ -e ${files[0]} ]] || continue
     echo "[$s]"
     for f in "${files[@]}"; do
-      printf '  %s  %s (attempts: %s)\n' "$(fm_get "$f" id ?)" "$(fm_get "$f" title ?)" "$(fm_get "$f" attempts 0)"
+      local review_value review_label
+      review_value=$(effective_review_enabled "$f")
+      if [[ $review_value == false ]]; then review_label="Review: OFF (fast iteration)"; else review_label="Review: ON"; fi
+      printf '  %s  %s (attempts: %s) [%s]\n' "$(fm_get "$f" id ?)" "$(fm_get "$f" title ?)" "$(fm_get "$f" attempts 0)" "$review_label"
     done
   done
 }
@@ -337,6 +411,9 @@ cmd_show() {
   require_root
   local hits=("$KB"/*/*"$1"*.md)
   [[ -e ${hits[0]} ]] || die "no card matching '$1'"
+  local review_value
+  review_value=$(effective_review_enabled "${hits[0]}")
+  if [[ $review_value == false ]]; then echo "Review: OFF (fast iteration)"; else echo "Review: ON"; fi
   cat "${hits[0]}"
 }
 
@@ -576,6 +653,7 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   local file=$1 workdir=$2 infra_max=${3:-$DEFAULT_REVIEW_INFRA_MAX_RETRIES}
   local backend model wcmd out title infra_cat retries t0
   ATT_BLOCKED_REASON=""
+  ATT_WORKER_STATUS=0
   ATT_WORKER_SECS=0
   ATT_REVIEW_SECS=0
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
@@ -587,8 +665,9 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
     # Custom worker commands (KANBAN_WORKER_CMD) receive the card's routing
     # via env, since the override bypasses worker_cmd's model handling.
     t0=$SECONDS
+    ATT_WORKER_STATUS=0
     out=$( (cd "$workdir" && card_body "$file" |
-      KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || true
+      KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || ATT_WORKER_STATUS=$?
     ATT_WORKER_SECS=$((ATT_WORKER_SECS + SECONDS - t0))
     echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
     infra_cat=$(echo "$out" | classify_worker_infra_error)
@@ -711,7 +790,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   # the resolve branch into base (never the original card branch again --
   # no double-merge).
   local file=$1 base_branch=$2 card_branch=$3 card_wt=$4 conflict_files=$5
-  local id title threshold resolve_max_attempts resolve_attempts review_infra_max
+  local id title threshold resolve_max_attempts resolve_attempts review_infra_max review_enabled review_source
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "?")
   threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
@@ -720,6 +799,9 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   review_infra_max=$(fm_get "$file" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
   local resolve_branch=kanban-resolve/$id resolve_wt=$KB/wt/$id-resolve
   local tag="[$title]"
+  resolve_card_review "$file"
+  review_enabled=$CARD_REVIEW_ENABLED
+  review_source=$CARD_REVIEW_SOURCE
 
   [[ $file == "$KB/resolving/"* ]] || move_card "$file" resolving >/dev/null
   file=$KB/resolving/$(basename "$file")
@@ -753,6 +835,13 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
       echo "$tag RESOLVE RETRY conflict markers remain"
       continue
     fi
+    if [[ $review_enabled != true ]]; then
+      resolve_attempts=$((resolve_attempts + 1))
+      fm_set "$file" resolve_attempts "$resolve_attempts"
+      echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "resolve review"
+      resolved=true
+      break
+    fi
     review_with_infra_retry "$file" "$resolve_wt" "$review_infra_max" \
       "$(review_prompt_for_resolve "$file" "$card_branch" "$base_branch")"
     if $ATT_REVIEW_INFRA_BLOCKED; then
@@ -782,7 +871,11 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
       "$conflict_files" "$resolve_branch" "$card_branch" | append_history "$file" "gave up (conflict unresolved)"
     git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
     move_card "$file" failed >/dev/null
-    echo "$tag FAIL resolve score=$ATT_SCORE attempts exhausted -> failed (branches $resolve_branch, $card_branch kept)"
+    if [[ $review_enabled == true ]]; then
+      echo "$tag FAIL resolve score=$ATT_SCORE attempts exhausted -> failed (branches $resolve_branch, $card_branch kept)"
+    else
+      echo "$tag FAIL unresolved conflict (review disabled) -> failed (branches $resolve_branch, $card_branch kept)"
+    fi
     notify_result failed "$title"
     return
   fi
@@ -797,14 +890,20 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
     move_card "$file" done >/dev/null
-    echo "$tag PASS resolve score=$ATT_SCORE -> done (merged into $base_branch)"
+    if [[ $review_enabled == true ]]; then
+      echo "$tag PASS resolve score=$ATT_SCORE -> done (merged into $base_branch)"
+    else
+      echo "$tag PASS resolve (review disabled) -> done (merged into $base_branch)"
+    fi
     notify_result done "$title"
   else
     git -C "$ROOT" merge --abort 2>/dev/null || true
     merge_lock release
     git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
-    printf 'resolve passed review (score %s) but merging %s into %s failed; branches %s and %s kept for manual merge.\n' \
-      "$ATT_SCORE" "$resolve_branch" "$base_branch" "$resolve_branch" "$card_branch" |
+    local resolve_note
+    if [[ $review_enabled == true ]]; then resolve_note="resolve passed review (score $ATT_SCORE)"; else resolve_note="resolve completed (review disabled)"; fi
+    printf '%s but merging %s into %s failed; branches %s and %s kept for manual merge.\n' \
+      "$resolve_note" "$resolve_branch" "$base_branch" "$resolve_branch" "$card_branch" |
       append_history "$file" "merge conflict (post-resolve)"
     move_card "$file" failed >/dev/null
     echo "$tag CONFLICT (post-resolve) -> failed (branches kept; merge manually)"
@@ -814,12 +913,15 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
 
 process_card_seq() { # non-git fallback: run in place, retry via todo
   local file=$1
-  local title threshold max_attempts attempts review_infra_max
+  local title threshold max_attempts attempts review_infra_max review_enabled review_source
   title=$(fm_get "$file" title "?")
   threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
   max_attempts=$(fm_get "$file" max_attempts "$DEFAULT_MAX_ATTEMPTS")
   attempts=$(fm_get "$file" attempts 0)
   review_infra_max=$(fm_get "$file" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
+  resolve_card_review "$file"
+  review_enabled=$CARD_REVIEW_ENABLED
+  review_source=$CARD_REVIEW_SOURCE
 
   echo "==> [$title] attempt $((attempts + 1))/$max_attempts"
   run_attempt "$file" "$ROOT" "$review_infra_max"
@@ -838,6 +940,23 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
       append_history "$file" "blocked"
     move_card "$file" blocked >/dev/null
     echo "    BLOCKED ->$ATT_BLOCKED_REASON -> blocked (reclaimed on next dispatcher pass)"
+    return
+  fi
+
+  if [[ $review_enabled != true ]]; then
+    attempts=$((attempts + 1))
+    fm_set "$file" attempts "$attempts"
+    if [[ $ATT_WORKER_STATUS -eq 0 ]]; then
+      echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "review"
+      move_card "$file" done >/dev/null
+      echo "    PASS (review disabled) -> done"
+      notify_result done "$title"
+    else
+      echo "worker exited with status $ATT_WORKER_STATUS" | append_history "$file" "worker failure"
+      move_card "$file" failed >/dev/null
+      echo "    FAIL worker exit=$ATT_WORKER_STATUS (review disabled) -> failed (needs human)"
+      notify_result failed "$title"
+    fi
     return
   fi
 
@@ -873,7 +992,7 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
 
 process_card_wt() { # git mode: own worktree/branch, retries in place, merge on pass
   local file=$1 base_branch=$2
-  local id title threshold max_attempts attempts review_infra_max
+  local id title threshold max_attempts attempts review_infra_max review_enabled review_source
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "?")
   threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
@@ -882,6 +1001,9 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   review_infra_max=$(fm_get "$file" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
   local branch=kanban/$id wt=$KB/wt/$id
   local tag="[$title]"
+  resolve_card_review "$file"
+  review_enabled=$CARD_REVIEW_ENABLED
+  review_source=$CARD_REVIEW_SOURCE
 
   # A dispatcher restart reclaims a stranded `doing` card by moving it back
   # to todo without touching its worktree/branch (see cmd_run). If both
@@ -923,6 +1045,17 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
       fi
       git -C "$wt" add -A
       git -C "$wt" commit -q --allow-empty -m "kanban: $title (attempt $((attempts + 1)))"
+      if [[ $review_enabled != true ]]; then
+        attempts=$((attempts + 1))
+        fm_set "$file" attempts "$attempts"
+        if [[ $ATT_WORKER_STATUS -eq 0 ]]; then
+          passed=true
+          echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "review"
+        else
+          echo "worker exited with status $ATT_WORKER_STATUS" | append_history "$file" "worker failure"
+        fi
+        break
+      fi
       fm_set "$file" review_pending 1
     fi
 
@@ -955,7 +1088,11 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     printf 'branch %s is kept for manual inspection.\n' "$branch" | append_history "$file" "gave up"
     git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
     move_card "$file" failed >/dev/null
-    echo "$tag FAIL score=$ATT_SCORE attempts exhausted -> failed (branch $branch kept)"
+    if [[ $review_enabled == true ]]; then
+      echo "$tag FAIL score=$ATT_SCORE attempts exhausted -> failed (branch $branch kept)"
+    else
+      echo "$tag FAIL worker exit=$ATT_WORKER_STATUS (review disabled) -> failed (branch $branch kept)"
+    fi
     notify_result failed "$title"
     return
   fi
@@ -970,15 +1107,21 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
     move_card "$file" done >/dev/null
-    echo "$tag PASS score=$ATT_SCORE -> done (merged into $base_branch)"
+    if [[ $review_enabled == true ]]; then
+      echo "$tag PASS score=$ATT_SCORE -> done (merged into $base_branch)"
+    else
+      echo "$tag PASS (review disabled) -> done (merged into $base_branch)"
+    fi
     notify_result done "$title"
   else
     local conflict_files
     conflict_files=$(git -C "$ROOT" diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')
     git -C "$ROOT" merge --abort 2>/dev/null || true
     merge_lock release
-    printf 'work passed review (score %s) but merging %s into %s conflicted on: %s\nhanding off to the resolver role instead of failing immediately.\n' \
-      "$ATT_SCORE" "$branch" "$base_branch" "$conflict_files" | append_history "$file" "merge conflict"
+    local pass_note
+    if [[ $review_enabled == true ]]; then pass_note="work passed review (score $ATT_SCORE)"; else pass_note="work completed (review disabled)"; fi
+    printf '%s but merging %s into %s conflicted on: %s\nhanding off to the resolver role instead of failing immediately.\n' \
+      "$pass_note" "$branch" "$base_branch" "$conflict_files" | append_history "$file" "merge conflict"
     process_resolve_wt "$file" "$base_branch" "$branch" "$wt" "$conflict_files"
   fi
 }
@@ -1002,7 +1145,18 @@ cmd_run() {
   # Fail fast if no backend CLI is available (dies with a message here instead
   # of silently inside a background job).
   worker_cmd "$DEFAULT_BACKEND" "" >/dev/null
-  review_cmd >/dev/null
+  local project_default_review=true
+  if [[ -n ${KANBAN_REVIEW_ENABLED:-} ]]; then
+    project_default_review=$KANBAN_REVIEW_ENABLED
+  elif [[ -n $PROJECT_REVIEW_ENABLED ]]; then
+    project_default_review=$PROJECT_REVIEW_ENABLED
+  fi
+  if [[ $project_default_review == true ]]; then review_cmd >/dev/null; fi
+  if [[ $project_default_review == true ]]; then
+    echo "kanban: Review: ON (project default; cards may opt out with --no-review)"
+  else
+    echo "kanban: Review: OFF (fast iteration; project default; cards may opt in with --review)"
+  fi
   echo "[UNRESTRICTED] worker/reviewer permission policy: claude=$(claude_perm_flag) codex=$(codex_sandbox_flag)" >&2
   # Reclaim cards stranded by a crashed dispatcher (lock guarantees exclusivity).
   # resolving/blocked cards also fold back their leftover worktree/branch so

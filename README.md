@@ -373,7 +373,7 @@ kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-t threshold] [--
 
 ## Testing MornKanban Itself
 
-This repo's own suite has two tiers — see `gui/VERIFY.md` "テストの段階 (fast / full)" for the exact commands and what each excludes. **fast** (`KANBAN_TEST_TIER=fast`) skips the 6 tests that drive a real `kanban.sh run --once` through actual git worktrees/merges (~2s each) and is for a worker's normal iteration/rework loop. **full** (the default, no env var) runs everything and is the required gate immediately before any commit that merges into `main` — fast passing is not evidence against a git-worktree/merge/resolver regression. (MornKanban's own dispatcher currently always runs a reviewer; there is no `review_enabled: false` mode to skip it.)
+This repo's own suite has two tiers — see `gui/VERIFY.md` "テストの段階 (fast / full)" for the exact commands and what each excludes. **fast** (`KANBAN_TEST_TIER=fast`) skips the 6 tests that drive a real `kanban.sh run --once` through actual git worktrees/merges (~2s each) and is for a worker's normal iteration/rework loop. **full** (the default, no env var) runs everything and is the required gate immediately before a release or explicit full verification; fast passing is not evidence against a git-worktree/merge/resolver regression. For a deliberately fast card, use `--no-review` or a project-level `review_enabled: false`; this skips only the reviewer, not the card's own requested checks.
 
 ## Constraints
 
