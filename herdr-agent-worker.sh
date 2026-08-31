@@ -7,14 +7,16 @@
 # pane. Backend-aware: the launched agent's `--kind` (claude|codex) follows
 # the card's own routing, same as kanban.sh's headless worker_cmd/review_cmd.
 #
-#   stdin  : card body (worker) or review prompt (reviewer)
+#   stdin  : card body (worker), review prompt (reviewer), or a conflict
+#            resolution prompt (resolver)
 #   cwd    : the card's worktree (kanban.sh cd's before invoking us)
 #   stdout : agent transcript tail, recorded into the card History
 #
-#   KANBAN_HERDR_ROLE : "worker" (default) or "reviewer" (pane/agent name)
-#   KANBAN_CARD_BACKEND / KANBAN_REVIEWER : card's backend routing, from
-#     kanban.sh (auto|claude|codex); "auto" resolves via KANBAN_BACKEND_ORDER
-#     the same way kanban.sh's resolve_backend() does.
+#   KANBAN_HERDR_ROLE : "worker" (default), "reviewer", or "resolver"
+#     (pane/agent name)
+#   KANBAN_CARD_BACKEND / KANBAN_REVIEWER / KANBAN_RESOLVER : card's backend
+#     routing, from kanban.sh (auto|claude|codex); "auto" resolves via
+#     KANBAN_BACKEND_ORDER the same way kanban.sh's resolve_backend() does.
 set -euo pipefail
 
 if [[ ${HERDR_ENV:-} != 1 ]]; then
@@ -33,11 +35,11 @@ resolve_auto_backend() { # echo first installed backend from KANBAN_BACKEND_ORDE
   return 1
 }
 
-if [[ $role == reviewer ]]; then
-  backend_req=${KANBAN_REVIEWER:-auto}
-else
-  backend_req=${KANBAN_CARD_BACKEND:-auto}
-fi
+case $role in
+  reviewer) backend_req=${KANBAN_REVIEWER:-auto} ;;
+  resolver) backend_req=${KANBAN_RESOLVER:-auto} ;;
+  *) backend_req=${KANBAN_CARD_BACKEND:-auto} ;;
+esac
 
 if [[ $backend_req == auto ]]; then
   backend=$(resolve_auto_backend) ||
@@ -58,11 +60,11 @@ command -v "$backend" >/dev/null 2>&1 ||
 # KANBAN_REVIEW_MODEL says otherwise. Codex has its own default model and
 # must never be handed a Claude model name (or vice versa), so an empty
 # codex model is left empty rather than defaulted.
-if [[ $role == reviewer ]]; then
-  model=${KANBAN_REVIEW_MODEL:-}
-else
-  model=${KANBAN_CARD_MODEL:-}
-fi
+case $role in
+  reviewer) model=${KANBAN_REVIEW_MODEL:-} ;;
+  resolver) model=${KANBAN_RESOLVE_MODEL:-} ;;
+  *) model=${KANBAN_CARD_MODEL:-} ;;
+esac
 if [[ $backend == claude && -z $model ]]; then model=sonnet; fi
 
 tmp=$(mktemp -d)

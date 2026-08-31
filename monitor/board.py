@@ -6,7 +6,7 @@ never writes anything back.
 """
 import os
 
-STATES = ["todo", "doing", "review", "done", "failed"]
+STATES = ["todo", "doing", "review", "resolving", "blocked", "done", "failed"]
 
 
 def list_cards(kanban_dir, state):

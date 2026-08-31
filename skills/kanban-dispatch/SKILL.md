@@ -54,26 +54,38 @@ While secretary mode is active:
 2. Split the request according to project policy. Give every worker a
    self-contained card containing paths, constraints, completion conditions,
    and required test commands; the worker has no conversation context.
-3. Add the cards with `kanban add` and the policy-selected backend/model. If
-   the request is actually work for a *different* registered project, use
+3. Add the cards with `kanban add` and the policy-selected backend/model
+   **as soon as each card's own description is self-contained.** Never hold a
+   card back over file overlap, dependency order, or a collision with a card
+   already in flight — those are execution-time concerns that the
+   dispatcher/worker/reviewer/resolver resolve on their own through the
+   formal `resolving` and `blocked` states. Investigating conflicts, rebasing
+   or merging, fixing, or re-verifying are not secretary actions. If the
+   request is actually work for a *different* registered project, use
    `kanban send <alias> "title"` instead (see README's **Cross-Project
    Send**) — it files the card into that project's own `.kanban/todo/`, not
    this one, and applies that project's own KANBAN.md defaults.
 4. Start the visible dispatcher with
    `__MORNKANBAN_REPO__/kanban-secretary.sh dispatch "$PWD"`. The helper opens
-   a separate Herdr dispatcher pane and binds the visible worker, reviewer, and
-   secretary notification commands. Do not replace it with bare `kanban run`.
+   a separate Herdr dispatcher pane and binds the visible worker, reviewer,
+   resolver, and secretary notification commands. Do not replace it with bare
+   `kanban run`.
 5. Return to the user immediately with only the card titles and dispatcher
    status.
 
-The dialogue agent does not implement, edit, verify, review, or repair the
-requested work. Those actions are cards too. After implementation merges,
-create the required verification card. Use `dispatch --once "$PWD"` for a
-browser-exclusive card as required by project policy.
+The dialogue agent does not implement, edit, verify, review, resolve
+conflicts, or repair the requested work. Those actions are cards too, and a
+merge conflict after review is handled by a dedicated resolver role, not by
+the secretary. After implementation merges, create the required verification
+card. Use `dispatch --once "$PWD"` for a browser-exclusive card as required
+by project policy.
 
-If dispatch cannot start, do not take over the implementation. Report the
-failed command and cause. When a notification arrives, inspect the board;
-report `failed/` immediately and summarize only after the board settles.
+Cards in `resolving` (conflict resolution in progress) or `blocked` (an
+execution-time ordering dependency) are being handled automatically and need
+no secretary action. If dispatch cannot start, do not take over the
+implementation. Report the failed command and cause. When a notification
+arrives, inspect the board; report `failed/` immediately and summarize only
+after the board settles.
 
 ## What a secretary pane may and may not do
 
@@ -89,6 +101,30 @@ in-process Agent/Task/subagent/collaboration tools, any git mutation
 (add/commit/push/merge/rebase/reset/checkout/branch/tag/worktree/...), and
 any external change (`gh`/GitHub/GitLab publish, package publish, deploy).
 Turn the request into a card instead.
+
+## Forbidden: in-process delegation from this pane
+
+Once bootstrap has registered this pane as the project's active secretary,
+**never launch this CLI's own built-in subagent/delegation tool** (Claude
+Code's `Agent`/`Task` tool; Codex's collaboration/subagent-spawning feature)
+to do the implementation, research, review, verification, or conflict
+resolution yourself. That is exactly the escape hatch this contract exists to
+close — it produces work with no card, no worktree, no board history, and no
+visible Herdr pane the user can watch or interrupt.
+
+- **Allowed** in this pane: reading `.kanban/KANBAN.md` and the board to
+  decide how to split work; `kanban add` / `kanban send`;
+  `kanban-secretary.sh dispatch` / `dispatch --once`; reporting to the user.
+- **Forbidden** in this pane: `Agent`/`Task` (Claude Code), collaboration or
+  subagent spawning (Codex), or any other in-process delegation that does not
+  open a **visible Herdr pane** via `herdr-agent-worker.sh`.
+- On Claude Code, a technical guard denies the `Task` tool automatically
+  while this pane is the recorded active secretary (see README's **Secretary
+  Guard**); Codex currently has no equivalent documented pre-tool deny hook,
+  so this section is the enforcement there.
+- **If you notice you already started one**: stop immediately, discard/do not
+  merge or adopt its output, and instead file the same request as a card and
+  dispatch it through the normal visible-Herdr path.
 
 ## If a direct action was already taken (accident recovery)
 
