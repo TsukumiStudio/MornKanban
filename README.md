@@ -68,7 +68,7 @@ $kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/a
 
 `KANBAN.md` is the project's kanban contract, in two layers:
 
-- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `resolver`, `resolve_model`, `threshold`, `max_attempts`, `resolve_max_attempts`, `jobs`, `claude_perms`, `codex_sandbox`, `secretary_agent`. Precedence: environment variable > `KANBAN.md` > built-in default.
+- **Frontmatter** (machine-readable): the CLI loads it as defaults — `backend_order`, `default_backend`, `default_model`, `reviewer`, `review_model`, `resolver`, `resolve_model`, `threshold`, `max_attempts`, `resolve_max_attempts`, `review_infra_max_retries`, `review_infra_backoff_seconds`, `jobs`, `claude_perms`, `codex_sandbox`, `secretary_agent`. Precedence: environment variable > `KANBAN.md` > built-in default.
 - **Body** (secretary policy): how to split cards, which backend/model to route each kind of task to, whether to auto-start the dispatcher, escalation rules. The dialogue agent must read and follow it before cutting cards.
 
 `secretary_agent` overrides the per-project Herdr secretary name (see **Secretary Bootstrap** below); it is read only by `kanban-secretary.sh`, not by `kanban run` itself.
@@ -212,6 +212,16 @@ A card that passed review can still conflict with `main` at merge time if anothe
 
 If a worker or resolver discovers mid-run that it genuinely needs another card's result first (its stdout's first line starts with `BLOCKED: <reason>`), the dispatcher — never the dialogue secretary — handles it: the attempt doesn't count against `attempts`, its worktree/branch are discarded, the reason is recorded in History, and the card moves to `blocked`. A restarted dispatcher (and a normal `kanban run` startup) reclaims every `blocked` card back to `todo` for a fresh attempt from a clean worktree.
 
+### Review infrastructure errors (`blocked`, kind `review_infra`)
+
+A reviewer (or resolver review) that never returns a parseable `{"score": ...}` object — a visible Herdr pane/agent that disappeared (`agent_not_found`), a timeout, a wrapper/tool error, empty output, or leftover terminal chrome (a status line, another card's output) — is **infrastructure flaking, not a quality verdict**. It is never converted to `score: 0`:
+
+1. `classify_review_infra_error` (kanban.sh) inspects the raw reviewer output only once JSON-score parsing has already failed, and tags it with a category (`agent_not_found`, `pane_lost`, `timeout`, `wrapper_error`, `empty_output`, `tool_error`, `unparseable_output`). `herdr-agent-worker.sh` also emits an explicit `KANBAN_INFRA_ERROR: <category>: <detail>` sentinel for the lifecycle failures it can detect directly (pane never started, agent never settled, `herdr agent get` itself failed, or a settled reviewer wrote no answer file); the same sentinel is honored on the worker/resolver side too (`classify_worker_infra_error`), applying the identical principle symmetrically.
+2. The reviewer is retried **on the same worktree and commit** — no worker/resolver re-run — with a short bounded backoff (`review_infra_backoff_seconds`, default 2s × retry number, capped at 10s), up to `review_infra_max_retries` (`KANBAN.md`/card frontmatter/`KANBAN_REVIEW_INFRA_MAX_RETRIES`, default 2). This retry count is tracked independently of `attempts`/`resolve_attempts` and is reset to 0 once a real score is obtained.
+3. Only a genuinely parsed JSON score is ever threshold-judged; every infra retry in between is invisible to the quality-review logic. History records each retry as `review infrastructure retry N/M: <category>` (worker-side: `worker infrastructure retry N/M: <category>`), distinct from a quality `review`/`rework instruction` entry.
+4. If retries are exhausted, the card moves to `blocked` with frontmatter `blocked_kind: review_infra` — **not** `failed` — and its branch, worktree, and every commit so far are kept. History explains this is a review infrastructure stop, not a code failure, and names the recovery command. The Monitor UI shows these cards with a distinct "review infrastructure stopped (not a code failure)" badge instead of the ordinary attempts counter treatment.
+5. Unlike the ordering-dependency `blocked` kind above, a `review_infra` blocked card is **not** auto-reclaimed to `todo` on dispatcher restart (that would either re-run the worker for nothing or collide with the surviving worktree/branch) — it stays parked until `kanban resume <id>`, which resets the infra retry counters and resumes **only the review step** on the kept worktree/branch (or the kept resolve worktree/branch, for a card blocked mid conflict-resolution). A dispatcher restart mid-retry (before exhaustion) reclaims the still-`doing`/`resolving` card back to `todo`/`resolving` as usual, but the worker step is **not** re-run: `process_card_wt`/`process_resolve_wt` reuse an already-existing worktree/branch instead of failing on `git worktree add`, and a `review_pending` frontmatter checkpoint (set right after the worker's commit, cleared only once a real score lands) tells the resumed run to go straight to the review step.
+
 Outside a git repository the dispatcher falls back to sequential in-place execution (`-j` > 1 is refused; `resolving` never applies since there is nothing to merge). Worker/resolver output tail, every review score, and rework instructions are appended to the card's History section. A restarted dispatcher reclaims cards stranded in `doing/`, `review/`, `resolving/`, or `blocked/` — folding back any leftover worktree/branch first so the card can restart cleanly, and the dispatcher's single-instance lock (`.kanban/.lock`) guarantees no card is ever picked up twice.
 
 ## Configuration (environment variables)
@@ -232,6 +242,8 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |
 | `KANBAN_DEBUG` | Write per-job xtrace logs to `.kanban/wt/job.*.trace` |
 | `KANBAN_HERDR_SECRETARY` | Overrides the resolved per-project Herdr secretary agent name (see **Secretary agent naming**); no `KANBAN.md` counterpart of the same name — use the `secretary_agent:` frontmatter key for a persistent override instead |
+| `KANBAN_REVIEW_INFRA_MAX_RETRIES` | Bounded reviewer-infrastructure-error retries before a card moves to `blocked` (kind `review_infra`); default 2 — see **Review infrastructure errors** |
+| `KANBAN_REVIEW_INFRA_BACKOFF_SECONDS` | Base seconds for the review-infra retry backoff (`base × retry number`, capped at 10s); default 2 |
 
 ## Monitor (read-only, multi-project)
 
