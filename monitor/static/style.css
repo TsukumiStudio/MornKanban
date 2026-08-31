@@ -207,3 +207,31 @@ h2 { font-size: 1rem; color: var(--muted); margin: 24px 0 10px; }
 }
 
 #back-btn { margin-bottom: 8px; }
+
+.board-skeleton-item {
+  height: 44px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: linear-gradient(90deg, var(--bg) 25%, var(--border) 50%, var(--bg) 75%);
+  background-size: 200% 100%;
+  animation: board-skeleton-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes board-skeleton-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.board-error-panel {
+  grid-column: 1 / -1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.board-error-message { color: var(--failed); font-size: 0.85rem; }
