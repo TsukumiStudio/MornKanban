@@ -8,6 +8,15 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 - Per project: `kanban init` creates `.kanban/{todo,doing,review,done,failed}/` plus a `KANBAN.md` policy template (commit them; cards are git history).
 - When asked to set up kanban for a project, run `kanban init`, then fill `.kanban/KANBAN.md` with the project's agent/model composition and card policy through dialogue with the user. A second `kanban init` never overwrites an existing `KANBAN.md`.
 
+## Secretary Bootstrap (one-liner)
+
+A secretary agent is started with a single short phrase — e.g. 「**kanban の秘書として待機して**」 (or `/kanban-dispatch 秘書`). Everything else lives in this README and the project's `.kanban/KANBAN.md`, not in the prompt. On that phrase the agent must:
+
+1. Read `.kanban/KANBAN.md` and the Dialogue-Agent Contract below.
+2. Reply with **one short line** (e.g. 「秘書セットアップ完了。課題を待機中 (worker=claude/sonnet, -j 2)」) — no plan dumps.
+3. For each subsequent user request: split it into cards per policy, start the dispatcher per policy, reply briefly, and return to waiting. Never implement in the dialogue session.
+4. React to card-settlement pushes (`KANBAN_NOTIFY_CMD`) per policy: investigate `failed/` and report immediately; summarize when the board settles.
+
 ## Per-Project Policy: .kanban/KANBAN.md
 
 `KANBAN.md` is the project's kanban contract, in two layers:
