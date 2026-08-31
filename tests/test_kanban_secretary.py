@@ -1386,6 +1386,287 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertNotIn(f"kanban/{card_id}\n", branches.replace(" ", "\n"))
         self.assertNotIn(f"kanban-resolve/{card_id}", branches)
 
+    # -- review infrastructure error vs. quality score -----------------
+    #
+    # A reviewer that never returns a valid {"score": ...} JSON object
+    # (agent_not_found, a bare terminal status line, empty output, ...) is
+    # infrastructure flaking, not a "0" verdict, and must not burn a worker
+    # attempt. See classify_review_infra_error / review_with_infra_retry in
+    # kanban.sh.
+
+    def _counting_worker(self, count_file):
+        return self._write_script(
+            "worker.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                n=0
+                [[ -f "{count_file}" ]] && n=$(cat "{count_file}")
+                n=$((n + 1))
+                echo "$n" > "{count_file}"
+                printf 'from worker\\n' > out.txt
+                """
+            ),
+        )
+
+    def test_review_infra_error_retries_reviewer_without_consuming_worker_attempt(self):
+        worker_count = Path(self.temp.name) / "worker_count"
+        worker = self._counting_worker(worker_count)
+        review_count = Path(self.temp.name) / "review_count"
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                n=0
+                [[ -f "{review_count}" ]] && n=$(cat "{review_count}")
+                n=$((n + 1))
+                echo "$n" > "{review_count}"
+                if [[ $n -eq 1 ]]; then
+                  printf 'agent target reviewer-56360-23575 not found\\n'
+                else
+                  printf '{{"score": 90, "feedback": "ok"}}\\n'
+                fi
+                """
+            ),
+        )
+        self._add_card("infra flaky reviewer card")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_JOBS": "1",
+                "KANBAN_REVIEW_INFRA_MAX_RETRIES": "2",
+                "KANBAN_REVIEW_INFRA_BACKOFF_SECONDS": "0",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
+        self.assertEqual(review_count.read_text(encoding="utf-8").strip(), "2")
+        card_text = done[0].read_text(encoding="utf-8")
+        self.assertIn("attempts: 1", card_text)
+        self.assertIn("review infrastructure retry 1/2: agent_not_found", card_text)
+        self.assertNotIn("rework instruction", card_text)
+
+    def test_status_line_reviewer_output_is_classified_as_infra_not_score_zero(self):
+        # Regression for the exact real-world shape: a visible Herdr pane's
+        # leftover terminal chrome (no JSON braces at all) must not be
+        # scored 0 -- it is not an attempted review.
+        worker_count = Path(self.temp.name) / "worker_count"
+        worker = self._counting_worker(worker_count)
+        review_count = Path(self.temp.name) / "review_count"
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                n=0
+                [[ -f "{review_count}" ]] && n=$(cat "{review_count}")
+                n=$((n + 1))
+                echo "$n" > "{review_count}"
+                if [[ $n -eq 1 ]]; then
+                  printf '20260901-001431-12177  kanban/20260901-0014\\n⏵⏵ auto mode on (shift+tab to cycle)\\n'
+                else
+                  printf '{{"score": 90, "feedback": "ok"}}\\n'
+                fi
+                """
+            ),
+        )
+        self._add_card("status line reviewer card")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_JOBS": "1",
+                "KANBAN_REVIEW_INFRA_MAX_RETRIES": "2",
+                "KANBAN_REVIEW_INFRA_BACKOFF_SECONDS": "0",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
+        card_text = done[0].read_text(encoding="utf-8")
+        self.assertIn("attempts: 1", card_text)
+        self.assertIn("review infrastructure retry 1/2", card_text)
+
+    def test_review_infra_exhausted_goes_to_blocked_with_branch_and_worktree_kept(self):
+        worker_count = Path(self.temp.name) / "worker_count"
+        worker = self._counting_worker(worker_count)
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'agent target reviewer-x not found\\n'
+                """
+            ),
+        )
+        card = self._add_card("always broken reviewer card")
+        card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_JOBS": "1",
+                "KANBAN_REVIEW_INFRA_MAX_RETRIES": "1",
+                "KANBAN_REVIEW_INFRA_BACKOFF_SECONDS": "0",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertEqual(len(blocked), 1, result.stdout + result.stderr)
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
+        card_text = blocked[0].read_text(encoding="utf-8")
+        self.assertIn("blocked_kind: review_infra", card_text)
+        self.assertIn("kanban resume", card_text)
+        self.assertIn("not a code failure", card_text)
+        branches = self._git("branch", "--list").stdout
+        self.assertIn(f"kanban/{card_id}", branches)
+        self.assertTrue((self.project / ".kanban" / "wt" / card_id).is_dir())
+
+    def test_blocked_review_infra_card_is_not_reclaimed_by_dispatcher_restart(self):
+        worker_count = Path(self.temp.name) / "worker_count"
+        worker = self._counting_worker(worker_count)
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'agent target reviewer-x not found\\n'
+                """
+            ),
+        )
+        card = self._add_card("restart reclaim card")
+        card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
+        env_overrides = {
+            "KANBAN_WORKER_CMD": str(worker),
+            "KANBAN_REVIEW_CMD": str(review),
+            "KANBAN_JOBS": "1",
+            "KANBAN_REVIEW_INFRA_MAX_RETRIES": "1",
+            "KANBAN_REVIEW_INFRA_BACKOFF_SECONDS": "0",
+        }
+        result = self._run("run", "--once", env_overrides=env_overrides)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(list((self.project / ".kanban" / "blocked").glob("*.md"))), 1)
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
+
+        # Simulate a dispatcher restart (`kanban run --once` again): the
+        # worker must not be re-run, and the card must stay parked in
+        # blocked/ rather than being silently requeued to todo.
+        result2 = self._run("run", "--once", env_overrides=env_overrides)
+        self.assertEqual(result2.returncode, 0, result2.stderr)
+        self.assertIn("todo is empty", result2.stdout)
+        self.assertEqual(len(list((self.project / ".kanban" / "blocked").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".kanban" / "todo").glob("*.md"))), 0)
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
+        branches = self._git("branch", "--list").stdout
+        self.assertIn(f"kanban/{card_id}", branches)
+
+    def test_kanban_resume_retries_only_review_and_reaches_done(self):
+        worker_count = Path(self.temp.name) / "worker_count"
+        worker = self._counting_worker(worker_count)
+        review_state = Path(self.temp.name) / "review_state"
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                if [[ -f "{review_state}" ]]; then
+                  printf '{{"score": 90, "feedback": "ok"}}\\n'
+                else
+                  touch "{review_state}"
+                  printf 'agent target reviewer-x not found\\n'
+                fi
+                """
+            ),
+        )
+        card = self._add_card("resume card")
+        card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
+        env_overrides = {
+            "KANBAN_WORKER_CMD": str(worker),
+            "KANBAN_REVIEW_CMD": str(review),
+            "KANBAN_JOBS": "1",
+            "KANBAN_REVIEW_INFRA_MAX_RETRIES": "0",
+            "KANBAN_REVIEW_INFRA_BACKOFF_SECONDS": "0",
+        }
+        result = self._run("run", "--once", env_overrides=env_overrides)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(list((self.project / ".kanban" / "blocked").glob("*.md"))), 1)
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
+
+        result2 = self._run("resume", card_id, env_overrides=env_overrides)
+        self.assertEqual(result2.returncode, 0, result2.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result2.stdout + result2.stderr)
+        # the worker must not be re-invoked on resume -- only the reviewer
+        # is re-run against the work already committed on the kept branch.
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
+
+    def test_low_review_score_still_retries_worker_and_consumes_attempts(self):
+        # Regression: a genuine low-quality review (real parseable JSON,
+        # just under threshold) must still behave exactly as before --
+        # infra classification must never swallow a real verdict.
+        cfg = self.project / ".kanban" / "KANBAN.md"
+        text = cfg.read_text(encoding="utf-8")
+        cfg.write_text(text.replace("max_attempts: 3", "max_attempts: 2"), encoding="utf-8")
+
+        worker_count = Path(self.temp.name) / "worker_count"
+        worker = self._counting_worker(worker_count)
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf '{"score": 40, "feedback": "not good enough"}\\n'
+                """
+            ),
+        )
+        self._add_card("genuinely low score card")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        self.assertEqual(len(failed), 1, result.stdout + result.stderr)
+        self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "2")
+        card_text = failed[0].read_text(encoding="utf-8")
+        self.assertIn("attempts: 2", card_text)
+        self.assertIn("not good enough", card_text)
+        self.assertNotIn("review infrastructure", card_text)
+
 
 class SecretaryDoesNotHoldCardsBackContractTests(unittest.TestCase):
     """Locks the "秘書は競合判断で起票を止めない" contract into the docs so a
