@@ -156,6 +156,36 @@ All of these are idempotent and only ever touch one file: `~/Library/LaunchAgent
 - All dynamic content is served as JSON and rendered client-side via `textContent` (never `innerHTML`), so card titles/bodies containing HTML-like text cannot inject markup into the page.
 - A project that fails to read (permission error, corrupt file, etc.) shows an inline error on its own card instead of breaking the rest of the page.
 
+## Cross-Project Send (file a card into any registered project, from anywhere)
+
+`kanban projects` and `kanban send` let you file a card into any project's `.kanban/todo/` regardless of the current directory or session — from inside project A into project B, from B into A, or from an unrelated directory into either, using a PC-wide alias registry.
+
+### Registering projects
+
+```sh
+kanban projects add <alias> <path>      # register: realpath-normalized, must already have .kanban (run `kanban init` first)
+kanban projects list [--json]           # alias -> root, one per line (or JSON)
+kanban projects show <alias>            # root, .kanban dir, timestamps, dispatcher running/stopped
+kanban projects update <alias> <path>   # repoint an existing alias at a new path
+kanban projects remove <alias>          # unregister (send/monitor stop recognizing it immediately)
+```
+
+- Aliases are lowercase letters/digits/`-`/`_`, starting with a letter or digit, max 64 chars; anything else is rejected with a clear error.
+- A path with no `.kanban` directory, a path that doesn't exist, a duplicate alias, or a path already registered under a different alias (checked by `realpath`, so a symlink or `..` traversal can't register a second alias for the same project) are all rejected — `--force` on `add` overrides the alias/path-duplicate checks explicitly.
+- The registry file (`${XDG_CONFIG_HOME:-~/.config}/mornkanban/projects.json`) lives in the **same config directory monitor's `monitor.json` uses** (`KANBAN_MONITOR_CONFIG_DIR`/`KANBAN_CONFIG_DIR` both point at it) — one shared config root, not two. `kanban monitor`'s project listing gives a registered project its `kanban projects` alias as its slug (even if that project sits outside every configured search root), so the name you see in the monitor UI is always the same alias you'd `kanban send` to.
+
+### Sending a card
+
+```sh
+kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-t threshold] [--from PATH] < description
+```
+
+- The card is always created in the **destination** project's `.kanban/todo/` — never in the directory `kanban send` was run from. Body comes from stdin (same as `kanban add`); with no stdin it falls back to the title.
+- Unset `-b`/`-m`/`-t` default from the destination's own `.kanban/KANBAN.md` (`default_backend`/`default_model`/`threshold`), exactly like a card added locally with `kanban add` there — the sending project's policy is never consulted.
+- The card's frontmatter records `source_alias` (set only when the current directory — or `--from PATH` — is itself inside a registered project), `source_path` (always, the realpath of where the send was issued from), and `dispatched_via: send`, so a worker or reviewer can see where a card came from without leaking any secret/env-var values.
+- Card IDs are allocated with a random suffix and written via a temp-file-then-hardlink swap inside the destination's `todo/`, so concurrent `kanban send` calls from multiple sessions into the same project never collide on an id or leave a partially-written card visible to the dispatcher.
+- `kanban send` never starts or touches a dispatcher. If the destination's `.kanban/.lock` shows no live process, it prints (to stderr, after the created card's path on stdout) that the card is filed but nothing will run it until `kanban run` or the visible Herdr dispatcher is started there — it does not silently fall back to a headless worker.
+
 ## Constraints
 
 - One dispatcher per project (`.kanban/.lock`); parallelism comes from `-j`, not from extra dispatchers.
