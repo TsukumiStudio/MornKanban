@@ -165,7 +165,7 @@ class SecretaryScriptTests(unittest.TestCase):
         kanban_md = self.project / ".kanban" / "KANBAN.md"
         content = kanban_md.read_text(encoding="utf-8")
         kanban_md.write_text(
-            content.replace("codex_sandbox: workspace-write", "codex_sandbox: workspace-write\nsecretary_agent: secretary-override"),
+            content.replace("codex_sandbox: danger-full-access", "codex_sandbox: danger-full-access\nsecretary_agent: secretary-override"),
             encoding="utf-8",
         )
         self.log.write_text("", encoding="utf-8")
@@ -182,7 +182,7 @@ class SecretaryScriptTests(unittest.TestCase):
         kanban_md = self.project / ".kanban" / "KANBAN.md"
         content = kanban_md.read_text(encoding="utf-8")
         kanban_md.write_text(
-            content.replace("codex_sandbox: workspace-write", "codex_sandbox: workspace-write\nsecretary_agent: secretary-from-md"),
+            content.replace("codex_sandbox: danger-full-access", "codex_sandbox: danger-full-access\nsecretary_agent: secretary-from-md"),
             encoding="utf-8",
         )
         env = self.env.copy()
@@ -901,12 +901,15 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         return starts[0]
 
     def test_claude_worker_gets_claude_only_args(self):
+        # Default policy is unrestricted (see tests/test_permission_policy.py
+        # for the full worker/reviewer permission-policy matrix); this test
+        # only checks that claude-specific args (not codex's) are used.
         self._write_fake_cli("claude")
         result = self._run_worker({"KANBAN_CARD_BACKEND": "claude", "KANBAN_CARD_MODEL": "sonnet"})
         self.assertEqual(result.returncode, 0, result.stderr)
         start = self._start_call()
         self.assertIn("--kind claude", start)
-        self.assertIn("--permission-mode acceptEdits", start)
+        self.assertIn("--dangerously-skip-permissions", start)
         self.assertIn("--model sonnet", start)
         self.assertNotIn("-s ", start)
         self.assertNotIn("-a never", start)
@@ -917,14 +920,16 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         start = self._start_call()
         self.assertIn("--kind codex", start)
-        self.assertIn("-s workspace-write", start)
-        self.assertIn("-a never", start)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", start)
         self.assertIn("-m gpt-5.6-terra", start)
         self.assertNotIn("--permission-mode", start)
         self.assertNotIn("--model", start)
         self.assertNotIn("sonnet", start)
 
-    def test_codex_reviewer_is_read_only_with_review_model(self):
+    def test_codex_reviewer_gets_same_unrestricted_policy_as_worker(self):
+        # Regression guard: the reviewer used to be hardcoded to `-s
+        # read-only`, independent of KANBAN_CODEX_SANDBOX/full-bypass. It
+        # must now share the exact same policy resolution as the worker.
         self._write_fake_cli("codex")
         result = self._run_worker(
             {
@@ -936,9 +941,9 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         start = self._start_call()
         self.assertIn("--kind codex", start)
-        self.assertIn("-s read-only", start)
-        self.assertIn("-a never", start)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", start)
         self.assertIn("-m gpt-5.6-terra", start)
+        self.assertNotIn("read-only", start)
         self.assertNotIn("workspace-write", start)
 
     def test_codex_worker_without_model_omits_dash_m_and_sonnet(self):
