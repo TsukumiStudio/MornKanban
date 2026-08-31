@@ -66,6 +66,10 @@ else:
 pane=$(herdr pane split --current --direction "$dir" --cwd "$PWD" --no-focus |
   jget 'd["result"]["pane"]["pane_id"]')
 
+# Label the pane so the user can tell WHO is doing WHAT at a glance.
+label="${role}: ${KANBAN_CARD_TITLE:-?}"
+herdr pane rename "$pane" "$(echo "$label" | cut -c1-48)" >/dev/null 2>&1 || true
+
 # Start the interactive agent. A brand-new worktree triggers Claude's
 # folder-trust dialog, which surfaces as agent_not_ready; the worktree is
 # our own checkout, so accept it and wait for idle.

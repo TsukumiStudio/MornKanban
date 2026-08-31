@@ -261,19 +261,20 @@ for m in reversed(re.findall(r"\{[^{}]*\}", text, re.S)):
 
 run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK
   local file=$1 workdir=$2
-  local backend model wcmd out
+  local backend model wcmd out title
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
+  title=$(fm_get "$file" title "")
   wcmd=$(worker_cmd "$backend" "$model")
   # Custom worker commands (KANBAN_WORKER_CMD) receive the card's routing
   # via env, since the override bypasses worker_cmd's model handling.
   out=$( (cd "$workdir" && card_body "$file" |
-    KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend $wcmd 2>&1) ) || true
+    KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || true
   echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
 
   local rcmd review_out parsed
   rcmd=$(review_cmd)
-  review_out=$( (cd "$workdir" && $rcmd 2>&1 <<EOF
+  review_out=$( (cd "$workdir" && KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<EOF
 You are a strict reviewer. Inspect this repository's current state and judge
 whether the task below is genuinely complete and of good quality. Check the
 actual files and diffs; do not trust the worker's claims.
