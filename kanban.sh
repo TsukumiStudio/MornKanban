@@ -67,7 +67,7 @@ fm_set() { # fm_set <file> <key> <value>
   python3 - "$1" "$2" "$3" <<'EOF'
 import sys
 path, key, value = sys.argv[1:4]
-lines = open(path).read().split("\n")
+lines = open(path, encoding="utf-8", errors="replace").read().split("\n")
 out, in_fm, done, seen = [], False, False, 0
 for line in lines:
     if line == "---" and seen < 2:
@@ -89,11 +89,13 @@ card_body() { # everything after frontmatter
 }
 
 append_history() { # append_history <file> <heading> ; body from stdin
+  # iconv -c: worker output can carry invalid UTF-8 (terminal control bytes);
+  # once they land in the card, every later python read of it explodes.
   {
     echo ""
     echo "### $(date '+%Y-%m-%d %H:%M:%S') $2"
     echo ""
-    cat
+    iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || cat
   } >>"$1"
 }
 
