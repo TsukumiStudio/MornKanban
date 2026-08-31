@@ -9,12 +9,14 @@ Invoked by kanban.sh as:
   python3 registry/cli.py projects update <alias> <path>
   python3 registry/cli.py projects remove <alias>
   python3 registry/cli.py send <alias> <title> [-b ...] [-m ...] [-t ...] [--from PATH]
+  python3 registry/cli.py secretary resolve <project-root>
 
 python3 standard library only (no pip dependencies), matching the rest of
 MornKanban's distribution constraints.
 """
 import argparse
 import datetime
+import json
 import os
 import re
 import secrets
@@ -27,7 +29,7 @@ PARENT = os.path.dirname(HERE)
 if PARENT not in sys.path:
     sys.path.insert(0, PARENT)
 
-from registry import store  # noqa: E402
+from registry import secretary, store  # noqa: E402
 
 BACKENDS = ("auto", "claude", "codex")
 DEFAULTS = {
@@ -77,7 +79,6 @@ def cmd_projects_list(args):
         print("kanban projects: %s" % e, file=sys.stderr)
         return 1
     if args.json:
-        import json
         print(json.dumps(projects, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if not projects:
@@ -256,6 +257,23 @@ def cmd_send(args):
     return 0
 
 
+# --- secretary --------------------------------------------------------------
+
+def cmd_secretary_resolve(args):
+    root = args.root
+    if not os.path.isdir(root):
+        print("kanban secretary: not a directory: %s" % root, file=sys.stderr)
+        return 1
+    env_override = os.environ.get("KANBAN_HERDR_SECRETARY") or None
+    try:
+        name, source = secretary.resolve(root, env_override=env_override)
+    except secretary.SecretaryNameError as e:
+        print("kanban secretary: %s" % e, file=sys.stderr)
+        return 1
+    print(json.dumps({"name": name, "source": source, "root": os.path.realpath(root)}))
+    return 0
+
+
 # --- argparse wiring --------------------------------------------------------
 
 def build_parser():
@@ -297,6 +315,16 @@ def build_parser():
     send_p.add_argument("--from", dest="from_path", default=None,
                          help="record this path as the send origin instead of cwd")
     send_p.set_defaults(func=cmd_send)
+
+    secretary_p = sub.add_parser(
+        "secretary", help="resolve the per-project Herdr secretary agent name"
+    )
+    secretary_sub = secretary_p.add_subparsers(dest="secretary_command")
+    sr = secretary_sub.add_parser(
+        "resolve", help="print {name, source, root} JSON for a project root"
+    )
+    sr.add_argument("root", help="project root (must already contain .kanban/)")
+    sr.set_defaults(func=cmd_secretary_resolve)
 
     return p
 

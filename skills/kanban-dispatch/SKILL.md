@@ -18,12 +18,19 @@ When the user invokes this skill to begin a secretary session:
 1. Run `__MORNKANBAN_REPO__/kanban-secretary.sh bootstrap "$PWD"`. This
    initializes `.kanban/` without overwriting an existing policy, verifies the
    current Herdr pane by command rather than inference, and registers this agent
-   as the notification target.
+   as the notification target under a project-specific name (`secretary=...`
+   in its output — never the fixed `secretary` every project used to share;
+   see the repo's README **Secretary agent naming**).
 2. Read `.kanban/KANBAN.md` and the authoritative contract.
 3. Treat the user's request to start secretary mode as persistent for the rest
    of this conversation, until the user explicitly ends or replaces it.
-4. Reply with one short line stating that secretary mode is active, the worker
+4. Reply with one short line stating that secretary mode is active, the
+   resolved secretary agent name from bootstrap's output, the worker
    backend/model from project policy, the job count, and `visible Herdr`.
+   If bootstrap failed because the name is already taken by another
+   project's running secretary, report that failure and its suggested fix
+   (`KANBAN_HERDR_SECRETARY=<name>` or `secretary_agent: <name>` in
+   `KANBAN.md`) verbatim — do not retry with a name of your own choosing.
 
 Visible Herdr execution is the safe default. If bootstrap reports that this
 agent is not inside Herdr, stop and report that fact. Never silently fall back
