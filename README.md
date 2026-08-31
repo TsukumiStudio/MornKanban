@@ -36,6 +36,20 @@ Leave `model` empty to use the backend's own default. Model names are backend-sp
 
 `auto` (default for both worker and reviewer) resolves to the first installed CLI in `backend_order` (built-in default `claude codex`), so machines with only one CLI keep working unchanged. Codex does not run tests by default; state the test command in the card.
 
+Custom worker commands (`KANBAN_WORKER_CMD`) receive the card's routing as `KANBAN_CARD_MODEL` / `KANBAN_CARD_BACKEND` environment variables, since the override bypasses the built-in model handling.
+
+## Herdr Integration (no headless workers)
+
+When the dispatcher runs inside a [Herdr](https://herdr.dev) pane, `herdr-agent-worker.sh` replaces the headless `claude -p` worker/reviewer with a **visible interactive agent in its own pane**, so every parallel card appears in the Herdr sidebar and can be watched or interrupted:
+
+```sh
+KANBAN_WORKER_CMD=~/git/MornKanban/herdr-agent-worker.sh \
+KANBAN_REVIEW_CMD='env KANBAN_HERDR_ROLE=reviewer /Users/<you>/git/MornKanban/herdr-agent-worker.sh' \
+kanban run -j 2
+```
+
+The wrapper splits a pane below the dispatcher, starts an interactive claude (`--permission-mode acceptEdits`, model from the card via `KANBAN_CARD_MODEL`, default `sonnet`), accepts the folder-trust dialog for the card's own worktree, prompts it with the card body, and waits. Because Claude Code renders on the terminal's alternate screen, the final answer cannot be read back from scrollback — the wrapper instructs the agent to also write its answer (the review JSON included) to `.kanban-answer.md` in the worktree, reads that, and deletes it before the card is committed. Panes are closed when the attempt ends.
+
 ## Dispatcher Behavior
 
 `kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel (default 1). In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:

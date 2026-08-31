@@ -261,7 +261,10 @@ run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
   wcmd=$(worker_cmd "$backend" "$model")
-  out=$( (cd "$workdir" && card_body "$file" | $wcmd 2>&1) ) || true
+  # Custom worker commands (KANBAN_WORKER_CMD) receive the card's routing
+  # via env, since the override bypasses worker_cmd's model handling.
+  out=$( (cd "$workdir" && card_body "$file" |
+    KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend $wcmd 2>&1) ) || true
   echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
 
   local rcmd review_out parsed
