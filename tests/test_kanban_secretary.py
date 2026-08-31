@@ -376,16 +376,16 @@ class GitUpdateTests(unittest.TestCase):
         self.assertIn("detached", result.stdout + result.stderr)
 
     def test_update_fast_forwards_and_reinstalls_versioned_skills(self):
-        self._push_upstream_version_bump("0.2.0")
+        self._push_upstream_version_bump("9.9.1")
 
         result = self._run("update")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "0.2.0")
+        self.assertEqual((self.clone / "VERSION").read_text(encoding="utf-8").strip(), "9.9.1")
 
         skill = self.home / ".claude" / "skills" / "kanban-dispatch" / "SKILL.md"
         content = skill.read_text(encoding="utf-8")
-        self.assertIn("0.2.0", content)
+        self.assertIn("9.9.1", content)
         self.assertIn(str(self.clone), content)
 
         link = self.home / ".local" / "bin" / "kanban"
