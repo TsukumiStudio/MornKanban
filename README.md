@@ -10,18 +10,21 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 
 ## Setup Wizard
 
-- `./kanban-setup.sh` runs an interactive CLI wizard: it shows the environment status and asks once — `y` installs (CLI symlink + Claude Code skill, idempotent), `u` uninstalls (removes only what this installer created), `N` does nothing.
-- Project onboarding is **not** part of the wizard: open a Herdr pane in the project and tell Claude 「**kanban の秘書として待機して**」 — the secretary runs `kanban init` and everything else (see Secretary Bootstrap below).
+- `./kanban-setup.sh` runs an interactive CLI wizard: it shows the environment status and asks once — `y` installs (CLI symlink + Claude Code/Codex skill, idempotent), `u` uninstalls (removes only what this installer created), `N` does nothing.
+- Project onboarding is **not** part of the wizard: open a Herdr pane in the project and invoke **`$kanban-dispatch 秘書として開始`**. The skill initializes the board, verifies visible Herdr execution, and makes the current conversation the secretary (see Secretary Bootstrap below).
 - Requirements: bash + python3 (the same as `kanban.sh` itself).
 
 ## Secretary Bootstrap (one-liner)
 
-A secretary agent is started with a single short phrase — e.g. 「**kanban の秘書として待機して**」 (or `/kanban-dispatch 秘書`). Everything else lives in this README and the project's `.kanban/KANBAN.md`, not in the prompt. On that phrase the agent must:
+A secretary agent is started with **`$kanban-dispatch 秘書として開始`** (the phrase 「**kanban の秘書として待機して**」 also triggers the skill). Everything else lives in the installed skill, this README, and the project's `.kanban/KANBAN.md`, not in the prompt. On that request the agent must:
 
-1. Read `.kanban/KANBAN.md` and the Dialogue-Agent Contract below.
-2. Reply with **one short line** (e.g. 「秘書セットアップ完了。課題を待機中 (worker=claude/sonnet, -j 2)」) — no plan dumps.
-3. For each subsequent user request: split it into cards per policy, start the dispatcher per policy, reply briefly, and return to waiting. Never implement in the dialogue session.
-4. React to card-settlement pushes (`KANBAN_NOTIFY_CMD`) per policy: investigate `failed/` and report immediately; summarize when the board settles.
+1. Run `kanban-secretary.sh bootstrap` from the MornKanban checkout. It runs `kanban init` when needed, verifies the current Herdr pane, and registers this agent as the notification target. It never overwrites an existing `KANBAN.md`.
+2. Read `.kanban/KANBAN.md` and the Dialogue-Agent Contract below.
+3. Reply with **one short line** (e.g. 「秘書モード開始。課題を待機中 (worker=claude/sonnet, -j 2, visible Herdr)」) — no plan dumps.
+4. Treat the bootstrap request as active for the rest of the conversation. For each subsequent user request: split it into cards per policy, start the visible dispatcher, reply briefly, and return to waiting. Never implement in the dialogue session.
+5. React to card-settlement pushes (`KANBAN_NOTIFY_CMD`) per policy: investigate `failed/` and report immediately; summarize when the board settles.
+
+Visible Herdr workers are the secretary default. The bootstrap must test `HERDR_ENV`, `HERDR_PANE_ID`, and the current pane through the Herdr CLI. It must not infer availability from the prompt, and it must not silently fall back to headless workers. Headless secretary mode requires an explicit user request.
 
 ## Per-Project Policy: .kanban/KANBAN.md
 
@@ -36,11 +39,11 @@ When the user assigns implementation work in a project that has `.kanban/`:
 
 1. Read `.kanban/KANBAN.md` and follow its policy; it overrides the generic steps below where they differ.
 2. Write a self-contained card: `echo "<full task description>" | kanban add "<title>" [-b claude|codex] [-m model] [-t threshold]`. The worker has no conversation context; include target paths, constraints, and completion conditions.
-3. Start `kanban run` (with the policy's `-j`) in the background unless the lock shows it is already running.
+3. In visible secretary mode, start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, and notification commands. Never substitute bare `kanban run`, which starts invisible headless workers. A nonstandard checkout uses its own absolute helper path.
 4. Return to the user immediately. Do not implement the task in the dialogue session.
 5. Report `failed/` cards to the user; they need human judgment.
 6. **Verification is delegated too.** After implementation cards merge, cut a follow-up verification card (run the app, click through it, check the acceptance criteria) instead of verifying by hand. The dialogue agent never implements, verifies, or fixes directly — it cards, dispatches, and reports.
-7. **Browser role is exclusive.** Ordinary workers must not touch browser-automation tools; verification is curl/CLI level. When a check genuinely needs a browser, cut a dedicated browser-verification card and run it **alone** (`kanban run --once`) — at most one browser-role agent exists at a time, and no other agent (the dialogue agent included) touches browser tools while it runs.
+7. **Browser role is exclusive.** Ordinary workers must not touch browser-automation tools; verification is curl/CLI level. When a check genuinely needs a browser, cut a dedicated browser-verification card and run it **alone** (`kanban-secretary.sh dispatch --once`) — at most one browser-role agent exists at a time, and no other agent (the dialogue agent included) touches browser tools while it runs.
 
 Leave `model` empty to use the backend's own default. Model names are backend-specific — never pass a Claude model name to a codex card.
 
@@ -61,15 +64,13 @@ Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and d
 
 ## Herdr Integration (no headless workers)
 
-When the dispatcher runs inside a [Herdr](https://herdr.dev) pane, `herdr-agent-worker.sh` replaces the headless `claude -p` worker/reviewer with a **visible interactive agent in its own pane**, so every parallel card appears in the Herdr sidebar and can be watched or interrupted:
+`kanban-secretary.sh dispatch` opens the dispatcher in a sibling [Herdr](https://herdr.dev) pane and binds `herdr-agent-worker.sh` for both workers and reviewers. Every parallel card appears as a **visible interactive agent in its own pane**, so it can be watched or interrupted:
 
 ```sh
-KANBAN_WORKER_CMD=~/git/MornKanban/herdr-agent-worker.sh \
-KANBAN_REVIEW_CMD='env KANBAN_HERDR_ROLE=reviewer /Users/<you>/git/MornKanban/herdr-agent-worker.sh' \
-kanban run -j 2; exit
+~/git/MornKanban/kanban-secretary.sh dispatch
 ```
 
-The trailing `; exit` closes the dispatcher's pane when the run finishes; without it an empty shell pane is left behind.
+The helper verifies that it is called from the current Herdr pane, keeps focus on the secretary, uses the project's `jobs` setting, and closes the dispatcher's pane when the run finishes. `dispatch --once` preserves the browser-role exclusivity contract.
 
 The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed> <title>` whenever a card settles (never fatal to the run). `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, default `secretary`) to inspect and report, so `failed/` cards reach the user through the secretary instead of dying silently.
 
@@ -80,7 +81,7 @@ The wrapper splits a pane below the dispatcher, starts an interactive claude (`-
 `kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel (default 1). In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:
 
 1. Create branch `kanban/<id>` and worktree `.kanban/wt/<id>` from the branch checked out at dispatch start.
-2. Pipe the card body (task + accumulated rework instructions) into the worker backend, headless, inside the worktree; commit the result on the card's branch.
+2. Pipe the card body (task + accumulated rework instructions) into the worker backend (a headless CLI or the visible Herdr wrapper) inside the worktree; commit the result on the card's branch.
 3. A separate review agent inspects the worktree itself (it must not trust the worker's claims) and outputs `{"score": 0-100, "feedback": "..."}`.
 4. `score >= threshold` (default 80) → merge into the base branch (merges are serialized by a lock), delete the branch and worktree, card → `done`. Below threshold, the feedback is appended and the worker retries **in the same worktree**; after `max_attempts` (default 3) the card moves to `failed` and the branch is kept for inspection.
 5. A merge conflict also moves the card to `failed` with its branch kept; merge it manually.

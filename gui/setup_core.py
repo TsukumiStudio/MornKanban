@@ -10,19 +10,12 @@ REPO = os.path.dirname(HERE)
 KANBAN_SH = os.path.join(REPO, "kanban.sh")
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
 KANBAN_LINK = os.path.join(LOCAL_BIN, "kanban")
-SKILL_DIR = os.path.expanduser("~/.claude/skills/kanban-dispatch")
-SKILL_PATH = os.path.join(SKILL_DIR, "SKILL.md")
+SKILL_SOURCE_DIR = os.path.join(REPO, "skills", "kanban-dispatch")
+SKILL_TARGETS = {
+    "Claude Code": os.path.expanduser("~/.claude/skills/kanban-dispatch"),
+    "Codex": os.path.expanduser("~/.codex/skills/kanban-dispatch"),
+}
 TIMEOUT = 30
-
-SKILL_TEMPLATE = """---
-name: kanban-dispatch
-description: "File-based kanban dispatch: card every implementation request and run the background dispatcher. Use when assigned implementation work in a project with .kanban/, or when asked to set up or operate kanban dispatch."
-user_invocable: true
----
-# kanban-dispatch
-The kanban CLI and the full workflow contract live in {repo}.
-**Read {repo}/README.md and follow it** (Secretary Bootstrap, Dialogue-Agent Contract, Model Policy, Herdr Integration).
-"""
 
 
 # --- logic functions (UI-independent) --------------------------------------
@@ -40,8 +33,15 @@ def cli_installed():
     return bool(shutil.which("kanban")) or os.path.exists(KANBAN_LINK)
 
 
+def skill_status():
+    return {
+        name: os.path.isfile(os.path.join(directory, "SKILL.md"))
+        for name, directory in SKILL_TARGETS.items()
+    }
+
+
 def skill_installed():
-    return os.path.isfile(SKILL_PATH)
+    return all(skill_status().values())
 
 
 def in_worktree():
@@ -70,24 +70,36 @@ def install_cli():
     return True, msg
 
 
-def install_skill(force=False):
+def _render_skill(source_path):
+    with open(source_path, "r", encoding="utf-8") as fh:
+        return fh.read().replace("__MORNKANBAN_REPO__", REPO)
+
+
+def install_skills(force=False):
     if in_worktree():
-        return False, "refusing to install from a kanban worktree; run from the real checkout"
-    if os.path.isfile(SKILL_PATH) and not force:
-        return False, "already installed"
-    os.makedirs(SKILL_DIR, exist_ok=True)
-    content = SKILL_TEMPLATE.format(repo=REPO)
-    with open(SKILL_PATH, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    return True, "installed: %s" % SKILL_PATH
+        return ["refusing to install from a kanban worktree; run from the real checkout"]
+
+    messages = []
+    source_skill = os.path.join(SKILL_SOURCE_DIR, "SKILL.md")
+    source_openai = os.path.join(SKILL_SOURCE_DIR, "agents", "openai.yaml")
+    for name, directory in SKILL_TARGETS.items():
+        skill_path = os.path.join(directory, "SKILL.md")
+        if os.path.isfile(skill_path) and not force:
+            messages.append("%s skill: already installed" % name)
+            continue
+        os.makedirs(os.path.join(directory, "agents"), exist_ok=True)
+        with open(skill_path, "w", encoding="utf-8") as fh:
+            fh.write(_render_skill(source_skill))
+        shutil.copy2(source_openai, os.path.join(directory, "agents", "openai.yaml"))
+        messages.append("installed %s skill: %s" % (name, skill_path))
+    return messages
 
 
 def run_setup():
     if in_worktree():
         return ["refused: kanban worktree 内"]
     _, cli_msg = install_cli()
-    _, skill_msg = install_skill(force=True)
-    return [cli_msg, skill_msg]
+    return [cli_msg] + install_skills(force=True)
 
 
 def _uninstall_cli():
@@ -105,21 +117,25 @@ def _uninstall_cli():
         return "CLI: 確認/削除に失敗しました (%s)" % e
 
 
-def _uninstall_skill():
+def _uninstall_skill(name, directory):
     try:
-        if not os.path.isfile(SKILL_PATH):
-            return "スキル: 未導入"
-        with open(SKILL_PATH, "r", encoding="utf-8") as fh:
+        skill_path = os.path.join(directory, "SKILL.md")
+        if not os.path.isfile(skill_path):
+            return "%s スキル: 未導入" % name
+        with open(skill_path, "r", encoding="utf-8") as fh:
             content = fh.read()
-        if "MornKanban" in content:
-            shutil.rmtree(SKILL_DIR)
-            return "スキル: 削除しました"
-        return "スキル: 別管理のスキルのため残しました"
+        if "MornKanban secretary" in content:
+            shutil.rmtree(directory)
+            return "%s スキル: 削除しました" % name
+        return "%s スキル: 別管理のため残しました" % name
     except Exception as e:
-        return "スキル: 確認/削除に失敗しました (%s)" % e
+        return "%s スキル: 確認/削除に失敗しました (%s)" % (name, e)
 
 
 def run_uninstall():
     if in_worktree():
         return ["refused: kanban worktree 内"]
-    return [_uninstall_cli(), _uninstall_skill()]
+    return [_uninstall_cli()] + [
+        _uninstall_skill(name, directory)
+        for name, directory in SKILL_TARGETS.items()
+    ]

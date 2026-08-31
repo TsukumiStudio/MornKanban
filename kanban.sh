@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # kanban.sh - file-based kanban dispatcher for agent workers.
 # Cards live in <project>/.kanban/{todo,doing,review,done,failed}/ as Markdown
-# with YAML frontmatter. `kanban run` executes cards headlessly via a worker
-# backend (claude / codex), then scores the result with a review agent and
-# loops until the score passes the threshold or attempts run out.
+# with YAML frontmatter. `kanban run` executes cards via a worker backend
+# (claude / codex, or a visible Herdr wrapper), then scores the result with a
+# review agent and loops until the score passes the threshold or attempts run out.
 # In a git repository each card runs in its own worktree on branch
 # kanban/<id>, so `kanban run -j N` processes N cards in parallel; passing
 # work is merged back into the base branch (merges are serialized).
@@ -143,10 +143,9 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 
 ## ディスパッチャ運用
 
-- (例) カード追加後、秘書が kanban run -j 2 をバックグラウンド起動する
-- (例) Herdr 環境では KANBAN_NOTIFY_CMD=~/git/MornKanban/herdr-notify-secretary.sh を付けて起動し、
-  カード決着が秘書へ push されるようにする
-- (例) Herdr のディスパッチャペインは起動コマンド末尾に「; exit」を付け、終了時に自動で閉じる
+- 秘書開始時は `$kanban-dispatch 秘書として開始` を使う。スキルが環境を実測し、以後の会話では対話エージェント自身が実装しない
+- Herdr 環境ではカード追加後に `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
+- visible Herdr が利用不能なら、ユーザーが headless を明示しない限り勝手にフォールバックしない
 - (例) failed カードは秘書がユーザーへ即報告する
 EOF
   fi

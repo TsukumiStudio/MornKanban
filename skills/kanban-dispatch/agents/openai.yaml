@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kanban Secretary"
+  short_description: "Start a visible MornKanban secretary session"
+  default_prompt: "Use $kanban-dispatch to initialize this project and act as its Kanban secretary for the rest of this conversation."

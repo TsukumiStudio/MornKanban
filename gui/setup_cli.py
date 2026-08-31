@@ -15,7 +15,7 @@ from setup_core import (  # noqa: E402
     cli_installed,
     run_setup,
     run_uninstall,
-    skill_installed,
+    skill_status,
 )
 
 
@@ -26,8 +26,9 @@ def status_summary():
         "deps: " + ", ".join("%s=%s" % (k, "OK" if v else "NG") for k, v in deps.items())
     )
     lines.append("kanban CLI: %s" % ("導入済み" if cli_installed() else "未導入"))
-    lines.append("Claude Code スキル: %s" % ("導入済み" if skill_installed() else "未導入"))
-    lines.append("導入後はプロジェクトのペインで claude に『kanban の秘書として待機して』")
+    for name, installed in skill_status().items():
+        lines.append("%s スキル: %s" % (name, "導入済み" if installed else "未導入"))
+    lines.append("導入後はプロジェクトのペインで『$kanban-dispatch 秘書として開始』")
     return "\n".join(lines)
 
 

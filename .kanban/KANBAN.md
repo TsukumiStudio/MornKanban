@@ -33,11 +33,15 @@ GUI は python3 標準ライブラリのみ (pip 不可)、フロントは素の
 
 ## ディスパッチャ運用
 
-- 全カード投入後、対話エージェントが新しい Herdr ペインで以下を起動する:
+- 秘書開始時に `/Users/matsufriends/git/MornKanban/kanban-secretary.sh bootstrap "$PWD"` を実行し、
+  current Herdr pane を実測して自分を通知先に登録する。プロンプトだけから Herdr の有無を推測しない
+- 全カード投入後、対話エージェントは以下を実行する:
 
-  KANBAN_WORKER_CMD=/Users/matsufriends/git/MornKanban/herdr-agent-worker.sh KANBAN_REVIEW_CMD='env KANBAN_HERDR_ROLE=reviewer /Users/matsufriends/git/MornKanban/herdr-agent-worker.sh' kanban run -j 2; exit
+  /Users/matsufriends/git/MornKanban/kanban-secretary.sh dispatch "$PWD"
 
-- ヘッドレスワーカー (claude -p 直叩き) は禁止。ラッパー経由の可視エージェントのみ
+- ヘルパーは別の Herdr dispatcher pane を作り、worker / reviewer / notify の3変数を必ず束ねる
+- ヘッドレスワーカー (claude -p / codex exec 直叩き) は禁止。bare `kanban run` へ置き換えない
+- current Herdr pane を確認できない場合は停止・報告する。ヘッドレスへ勝手にフォールバックしない
 - failed カードはユーザーへ即報告する
 - 検証も委譲する: 実装カードのマージ後に検証カードを切る。対話エージェントは実装も検証も手を動かさない
 
@@ -45,7 +49,7 @@ GUI は python3 標準ライブラリのみ (pip 不可)、フロントは素の
 
 - 通常のワーカーはブラウザ操作ツール (claude-in-chrome 等) を**使わない**。検証は curl / CLI レベルで行う
 - **ブラウザ役は同時に1エージェントのみ**: ウェブ経由の確認が必要なときは専用の「ブラウザ検証カード」を切り、
-  `kanban run --once` で**単独実行**する。実行中は対話エージェントを含む他の全エージェントがブラウザツールに
+  `kanban-secretary.sh dispatch --once` で**単独実行**する。実行中は対話エージェントを含む他の全エージェントがブラウザツールに
   触れない (Chrome 拡張は同時に1クライアントしか安定して扱えないため)
 - レポートは段階書き込み。起動したプロセスは必ず kill してから完了とする
 - ブラウザ検証カードの前提: Claude in Chrome 拡張で localhost / 127.0.0.1 への
