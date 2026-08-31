@@ -38,7 +38,11 @@ While secretary mode is active:
 2. Split the request according to project policy. Give every worker a
    self-contained card containing paths, constraints, completion conditions,
    and required test commands; the worker has no conversation context.
-3. Add the cards with `kanban add` and the policy-selected backend/model.
+3. Add the cards with `kanban add` and the policy-selected backend/model. If
+   the request is actually work for a *different* registered project, use
+   `kanban send <alias> "title"` instead (see README's **Cross-Project
+   Send**) — it files the card into that project's own `.kanban/todo/`, not
+   this one, and applies that project's own KANBAN.md defaults.
 4. Start the visible dispatcher with
    `__MORNKANBAN_REPO__/kanban-secretary.sh dispatch "$PWD"`. The helper opens
    a separate Herdr dispatcher pane and binds the visible worker, reviewer, and

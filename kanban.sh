@@ -35,6 +35,7 @@ resolve_self_dir() { # follow symlinks (e.g. ~/.local/bin/kanban) to the real re
 SELF_DIR=$(resolve_self_dir "$0")
 VERSION_FILE=$SELF_DIR/VERSION
 SETUP_CLI=$SELF_DIR/gui/setup_cli.py
+REGISTRY_CLI=$SELF_DIR/registry/cli.py
 
 cmd_version() { python3 "$SETUP_CLI" version; }
 cmd_install() { python3 "$SETUP_CLI" install; }
@@ -525,10 +526,12 @@ case ${1:-} in
   show) shift; cmd_show "${1:?usage: kanban show <id>}" ;;
   run) shift || true; cmd_run "$@" ;;
   monitor) shift || true; cmd_monitor "$@" ;;
+  projects) shift; python3 "$REGISTRY_CLI" projects "$@" ;;
+  send) shift; python3 "$REGISTRY_CLI" send "$@" ;;
   --version) cat "$VERSION_FILE" ;;
   version) cmd_version ;;
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|monitor [run|daemon|config]|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|monitor [run|daemon|config]|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
 esac
