@@ -16,12 +16,15 @@ from setup_core import (  # noqa: E402
     guard_status,
     install_cli,
     install_skills,
+    local_version,
+    REPO,
     run_setup,
     run_uninstall,
     run_update,
     skill_status,
     version_report,
 )
+import dashboard  # noqa: E402
 
 
 def cmd_install():
@@ -39,9 +42,15 @@ def cmd_uninstall():
 
 
 def cmd_update():
+    status = {"repo": REPO, "local_version": local_version()}
+    for line in dashboard.build_update_preview(status):
+        print(line)
     ok, messages = run_update()
-    for msg in messages:
-        print(msg)
+    for line in dashboard.build_summary(
+        "update", messages,
+        ["kanban version"] if ok else [],
+    ):
+        print(line)
     return ok
 
 
@@ -72,6 +81,7 @@ COMMANDS = {
 
 
 def status_summary():
+    """Plain compatibility summary for callers that import it directly."""
     lines = []
     deps = check_deps()
     lines.append(
@@ -96,6 +106,53 @@ def prompt(text):
         return None
 
 
+def _confirm(action_label):
+    ans = prompt("%s を実行しますか? [y/N]: " % action_label)
+    return bool(ans) and ans.strip().lower() == "y"
+
+
+def _interactive_install(status):
+    for line in dashboard.build_install_preview(status):
+        print(line)
+    if not _confirm("install"):
+        print("中止しました。変更は行っていません。")
+        return
+    messages = run_setup()
+    for line in dashboard.build_summary(
+        "install", messages,
+        ["kanban version", "Herdr pane で $kanban-dispatch 秘書として開始"],
+    ):
+        print(line)
+
+
+def _interactive_update(status):
+    for line in dashboard.build_update_preview(status):
+        print(line)
+    if not _confirm("update"):
+        print("中止しました。変更は行っていません。")
+        return
+    ok, messages = run_update()
+    for line in dashboard.build_summary(
+        "update", messages,
+        ["kanban version"] if ok else [],
+    ):
+        print(line)
+
+
+def _interactive_uninstall(status):
+    for line in dashboard.build_uninstall_preview(status):
+        print(line)
+    if not _confirm("uninstall"):
+        print("中止しました。変更は行っていません。")
+        return
+    messages = run_uninstall()
+    for line in dashboard.build_summary(
+        "uninstall", messages,
+        ["再導入する場合: kanban-setup.sh install"],
+    ):
+        print(line)
+
+
 def main():
     args = sys.argv[1:]
     if args:
@@ -107,21 +164,26 @@ def main():
         ok = handler()
         sys.exit(0 if ok else 1)
 
-    print(status_summary())
+    caps = dashboard.terminal_caps()
+    status = dashboard.collect_status()
+    print(dashboard.render_status(status, caps))
+    print()
+    print(dashboard.render_guide(caps))
+    print()
 
     if not sys.stdin.isatty():
         sys.exit(0)
 
-    ans = prompt("[y=セットアップ / u=アンインストール / N=何もしない]: ")
+    ans = prompt("[y=セットアップ / s=更新 / u=アンインストール / N=何もしない]: ")
     if ans is None:
         sys.exit(0)
     choice = ans.strip().lower()
     if choice == "y":
-        for msg in run_setup():
-            print(msg)
+        _interactive_install(status)
+    elif choice == "s":
+        _interactive_update(status)
     elif choice == "u":
-        for msg in run_uninstall():
-            print(msg)
+        _interactive_uninstall(status)
     sys.exit(0)
 
 

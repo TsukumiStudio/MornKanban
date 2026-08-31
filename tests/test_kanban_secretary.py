@@ -21,7 +21,7 @@ KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
 # Distribution files copied to build a standalone repo outside this worktree
 # (setup_core.install_cli/install_skills/run_update all refuse to run from a
 # .kanban/wt/<id> worktree by design).
-DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
+DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "monitor", "guard", ".gitignore"]
 
 # `KANBAN_TEST_TIER=fast` skips the handful of tests that drive a real
 # `kanban.sh run --once` end to end (real git worktree/branch/merge

@@ -6,6 +6,11 @@
 `VERSION` の内容を埋め込む。バージョン管理は `setup_core.py` の `local_version()` /
 `fetch_latest_version()` / `compare_versions()` / `run_update()` が担う。
 
+`dashboard.py` はそのロジックを読み取り専用で使い、引数なしの
+`kanban-setup.sh` に枠付きの状態カードと操作ガイドを描画する。TTYでは色とUnicode、
+非TTY・`NO_COLOR`・`TERM=dumb`ではASCII・色なしへ切り替え、現在の`VERSION`を
+常に明記する。`y`/`s`/`u` は変更プレビューと再確認後にだけ実行される。
+
 ## バージョンポリシー
 
 - 配布バージョンの正本はリポジトリ直下の `VERSION` (`X.Y.Z`、セマンティック)。
@@ -23,7 +28,7 @@
 
 ```sh
 # 反復中: 変更機能だけ (名前は複数指定可、上限60秒)
-python3 tests/run.py targeted tests.test_diagnosis_timebox
+python3 tests/run.py targeted tests.test_setup_dashboard
 
 # 一区切り: 軽い契約・pure logic・monitor/registry/guard (各stepに上限あり)
 python3 tests/run.py fast
@@ -68,12 +73,18 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
   dirty checkout の拒否
 - `kanban-setup.sh` が引数を `gui/setup_cli.py` へ確実に転送する
   (転送漏れは対話ウィザードへ黙って落ちる既知の失敗モード)
+- セットアップダッシュボードが枠と現在VERSIONを表示し、TTY/非TTY・色・狭幅の
+  fallback、導入状態、変更プレビュー、確認拒否時の無変更を維持する
 
-セットアップ画面の非TTY経路は次で確認する。状態表示後、変更せず終了する。
+セットアップ画面の非TTY経路は次で確認する。ASCII枠付きダッシュボードと
+`VERSION:`を表示後、変更せず終了する。
 
 ```sh
 python3 gui/setup_cli.py </dev/null
 ```
+
+TTYでは引数なしで起動し、`y`=install / `s`=update / `u`=uninstall /
+`N`=何もしない、を選ぶ。各変更操作はプレビュー後にもう一度`[y/N]`で確認する。
 
 `install` / `update` / `uninstall` / `version` は非対話でも直接呼べる:
 
