@@ -78,7 +78,7 @@ $kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/a
 When the user assigns implementation work in a project that has `.kanban/`:
 
 1. Read `.kanban/KANBAN.md` and follow its policy; it overrides the generic steps below where they differ.
-2. Write a self-contained card: `echo "<full task description>" | kanban add "<title>" [-b claude|codex] [-m model] [-t threshold]`. The worker has no conversation context; include target paths, constraints, and completion conditions.
+2. Write a self-contained card: `echo "<full task description>" | kanban add "<title>" [-b claude|codex] [-m model] [-t threshold] [--review|--no-review]`. The worker has no conversation context; include target paths, constraints, and completion conditions. Leave `--review`/`--no-review` off to inherit the project's `review_enabled` policy (see **Review on/off**); pass it only to deliberately override that policy for one card.
 3. In visible secretary mode, start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, resolver, and notification commands. Never substitute bare `kanban run`, which starts invisible headless workers. A nonstandard checkout uses its own absolute helper path.
 4. Return to the user immediately. Do not implement the task in the dialogue session.
 5. Report `failed/` cards to the user; they need human judgment.
@@ -234,6 +234,24 @@ A card that passed review can still conflict with `main` at merge time if anothe
 6. Below threshold → feedback is appended and the resolver retries in the same resolve worktree; after `resolve_max_attempts` (default 2, `KANBAN.md`/card frontmatter `resolve_max_attempts`) the card moves to `failed`. Its History records the conflicted files, every resolve attempt's score/feedback, and the two branches (`kanban-resolve/<id>`, `kanban/<id>`) kept for manual inspection.
 7. A merge of the passing resolve branch into `main` that itself fails (a rare race) also moves the card to `failed` with both branches kept, instead of silently retrying forever.
 
+### Review on/off (`review_enabled`)
+
+Every card carries `review_enabled: true|false` in its frontmatter. It gates step 3 above:
+
+- `true` (default): unchanged from the description above — a reviewer runs, scores, and gates the merge; below-threshold work reworks in place; a merge conflict's resolve worktree is re-reviewed the same way.
+- `false`: **no reviewer process/pane is ever started** (`KANBAN_REVIEW_CMD` is not invoked even if set). The worker's own exit status is the only success signal — a zero exit and no `BLOCKED:` line means the card merges immediately; a non-zero exit still moves the card to `failed`. There is no score, no threshold gate, and no rework retry loop — `max_attempts`/`threshold`/`reviewer`/`review_model` are kept in frontmatter but ignored. A merge conflict still hands off to the resolver role, but the resolver's result is *not* re-reviewed either — conflict markers being gone is enough. Every place a review would normally have run instead gets a History entry: `review skipped: review_enabled=false (source: ...)`. Turning review off is a speed/quality trade — it does **not** imply skipping whatever tests the task itself asks the worker to run.
+
+Resolution order — the first one set wins, and is a one-time decision permanently recorded on the card (`review_enabled`/`review_source` in its frontmatter) so a dispatcher restart or a different machine picking up the card never re-derives a different answer:
+
+1. Card frontmatter, set explicitly at creation time with `kanban add "title" --review` / `--no-review`.
+2. The `KANBAN_REVIEW_ENABLED` environment variable (`true`/`false`; also accepts `1`/`0`, `yes`/`no`, `on`/`off`).
+3. `KANBAN.md` frontmatter `review_enabled: true|false`.
+4. Built-in default: `true`.
+
+Any other value at any of these layers (env, `KANBAN.md`, or an explicit `--review`/`--no-review`-set card) is a hard error (`kanban: invalid boolean for ...`) — it is never silently coerced to `true` or `false`.
+
+`kanban list`, `kanban show`, and the dispatcher's startup log all surface the effective policy as `Review: ON` or `Review: OFF (fast iteration)`.
+
 ### Real-time ordering dependencies (`blocked`)
 
 If a worker or resolver discovers mid-run that it genuinely needs another card's result first (its stdout's first line starts with `BLOCKED: <reason>`), the dispatcher — never the dialogue secretary — handles it: the attempt doesn't count against `attempts`, its worktree/branch are discarded, the reason is recorded in History, and the card moves to `blocked`. A restarted dispatcher (and a normal `kanban run` startup) reclaims every `blocked` card back to `todo` for a fresh attempt from a clean worktree.
@@ -268,6 +286,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_CODEX_FULL_BYPASS` | `true` (default) → `--dangerously-bypass-approvals-and-sandbox`; `false` → `-s <sandbox> -a <approval>` |
 | `KANBAN_CODEX_APPROVAL` | Codex worker/reviewer/resolver `-a` approval policy, used only when `KANBAN_CODEX_FULL_BYPASS=false` (default `never`) |
 | `KANBAN_JOBS` | Default parallelism for `kanban run` (overridden by `-j`) |
+| `KANBAN_REVIEW_ENABLED` | `true`/`false` (aliases: `1`/`0`, `yes`/`no`, `on`/`off`); overrides `KANBAN.md`'s `review_enabled`, but a card's own explicit `--review`/`--no-review` still wins — see **Review on/off** above |
 | `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` / `KANBAN_RESOLVE_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed> <title>` when a card settles (see Herdr Integration) |
 | `KANBAN_DEBUG` | Write per-job xtrace logs to `.kanban/wt/job.*.trace` |
