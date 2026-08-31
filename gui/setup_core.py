@@ -2,15 +2,12 @@
 
 setup_gui.py から抽出した UI 非依存のロジック関数群。python3 標準ライブラリのみ使用。
 """
-import json
 import os
 import shutil
-import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 KANBAN_SH = os.path.join(REPO, "kanban.sh")
-CONFIG = os.path.expanduser("~/.config/mornkanban/gui.json")
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
 KANBAN_LINK = os.path.join(LOCAL_BIN, "kanban")
 SKILL_DIR = os.path.expanduser("~/.claude/skills/kanban-dispatch")
@@ -85,66 +82,9 @@ def install_skill(force=False):
     return True, "installed: %s" % SKILL_PATH
 
 
-def load_config():
-    try:
-        with open(CONFIG, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {"projects": []}
-    projects = data.get("projects")
-    if not isinstance(projects, list):
-        projects = []
-    return {"projects": [p for p in projects if isinstance(p, str)]}
-
-
-def save_config(cfg):
-    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-    with open(CONFIG, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
-
-
-def project_entry(path):
-    return {
-        "path": path,
-        "name": os.path.basename(path.rstrip(os.sep)) or path,
-        "has_kanban": os.path.isdir(os.path.join(path, ".kanban")),
-    }
-
-
-def load_projects():
-    cfg = load_config()
-    return [project_entry(p) for p in cfg["projects"] if os.path.isdir(p)]
-
-
-def add_project(path):
-    if not isinstance(path, str) or not path.strip():
-        return False, "path is required"
-    norm = os.path.abspath(os.path.expanduser(path.strip()))
-    if not os.path.isdir(norm):
-        return False, "not a directory: %s" % norm
-    cfg = load_config()
-    if norm not in cfg["projects"]:
-        cfg["projects"].append(norm)
-        save_config(cfg)
-    return True, "added: %s" % norm
-
-
-def init_project(path):
-    if not os.path.isdir(path):
-        return False, "not a directory: %s" % path
-    try:
-        proc = subprocess.run(
-            ["bash", KANBAN_SH, "init", path],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "command timed out"
-    except OSError as exc:
-        return False, "failed to run kanban.sh: %s" % exc
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        return False, "command failed (%d): %s" % (proc.returncode, detail)
-    return True, "initialized: %s" % path
+def run_setup():
+    if in_worktree():
+        return ["refused: kanban worktree 内"]
+    _, cli_msg = install_cli()
+    _, skill_msg = install_skill(force=True)
+    return [cli_msg, skill_msg]
