@@ -366,18 +366,22 @@ for m in reversed(re.findall(r"\{[^{}]*\}", text, re.S)):
 '
 }
 
-run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK / ATT_BLOCKED_REASON
+run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK / ATT_BLOCKED_REASON / ATT_WORKER_SECS / ATT_REVIEW_SECS
   local file=$1 workdir=$2
-  local backend model wcmd out title
+  local backend model wcmd out title t0
   ATT_BLOCKED_REASON=""
+  ATT_WORKER_SECS=0
+  ATT_REVIEW_SECS=0
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
   title=$(fm_get "$file" title "")
   wcmd=$(worker_cmd "$backend" "$model")
   # Custom worker commands (KANBAN_WORKER_CMD) receive the card's routing
   # via env, since the override bypasses worker_cmd's model handling.
+  t0=$SECONDS
   out=$( (cd "$workdir" && card_body "$file" |
     KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || true
+  ATT_WORKER_SECS=$((SECONDS - t0))
   echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
 
   # A worker that discovers a real-time ordering dependency (e.g. it needs
@@ -394,6 +398,7 @@ run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK 
 
   local rcmd review_out parsed
   rcmd=$(review_cmd)
+  t0=$SECONDS
   review_out=$( (cd "$workdir" && KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<EOF
 You are a strict reviewer. Inspect this repository's current state and judge
 whether the task below is genuinely complete and of good quality. Check the
@@ -404,6 +409,7 @@ $(card_body "$file")
 Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
 EOF
   ) ) || true
+  ATT_REVIEW_SECS=$((SECONDS - t0))
   parsed=$(echo "$review_out" | parse_score)
   if [[ -z $parsed ]]; then
     ATT_SCORE=0
@@ -415,10 +421,12 @@ EOF
 }
 
 record_attempt() { # record_attempt <card> <threshold> -> increments attempts
-  local file=$1 threshold=$2 attempts
+  local file=$1 threshold=$2 attempts timings
   attempts=$(($(fm_get "$file" attempts 0) + 1))
   fm_set "$file" attempts "$attempts"
-  printf 'score: %s / threshold: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$ATT_FEEDBACK" |
+  timings="worker=${ATT_WORKER_SECS}s review=${ATT_REVIEW_SECS}s"
+  fm_set "$file" last_timings "$timings"
+  printf 'score: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
     append_history "$file" "review"
 }
 
@@ -443,19 +451,23 @@ merge_lock() { # merge_lock <acquire|release>
   fi
 }
 
-run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict-files> <base-branch> <card-branch> -> sets ATT_SCORE/ATT_FEEDBACK
+run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict-files> <base-branch> <card-branch> -> sets ATT_SCORE/ATT_FEEDBACK/ATT_RESOLVE_SECS/ATT_REVIEW_SECS
   local file=$1 workdir=$2 conflict_files=$3 base_branch=$4 card_branch=$5
-  local backend model wcmd out title prompt
+  local backend model wcmd out title prompt t0
+  ATT_RESOLVE_SECS=0
+  ATT_REVIEW_SECS=0
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
   title=$(fm_get "$file" title "")
   wcmd=$(resolve_cmd "$backend" "$model")
   prompt=$(printf 'You are the conflict-resolution role for MornKanban. Card branch %s passed review but conflicts with the current base branch %s. Resolve the conflict in this worktree, preserving the intent of BOTH sides -- never simply discard one side. Run any tests the task requires, then leave the tree conflict-free.\n\nConflicted files:\n%s\n\nOriginal task:\n%s\n' \
     "$card_branch" "$base_branch" "$conflict_files" "$(card_body "$file")")
+  t0=$SECONDS
   out=$( (cd "$workdir" && printf '%s' "$prompt" |
     KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title \
     KANBAN_CONFLICT_FILES=$conflict_files KANBAN_BASE_BRANCH=$base_branch KANBAN_CARD_BRANCH=$card_branch \
     $wcmd 2>&1) ) || true
+  ATT_RESOLVE_SECS=$((SECONDS - t0))
   echo "$out" | tail -n 40 | append_history "$file" "resolver output (tail)"
   git -C "$workdir" add -A
   git -C "$workdir" commit -q --allow-empty -m "kanban: resolve conflict for $title"
@@ -468,6 +480,7 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
 
   local rcmd review_out parsed
   rcmd=$(review_cmd)
+  t0=$SECONDS
   review_out=$( (cd "$workdir" && KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<EOF
 You are a strict reviewer. This worktree is the result of resolving a merge
 conflict between card branch $card_branch and base branch $base_branch.
@@ -480,6 +493,7 @@ $(card_body "$file")
 Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
 EOF
   ) ) || true
+  ATT_REVIEW_SECS=$((SECONDS - t0))
   parsed=$(echo "$review_out" | parse_score)
   if [[ -z $parsed ]]; then
     ATT_SCORE=0
@@ -491,10 +505,12 @@ EOF
 }
 
 record_resolve_attempt() { # record_resolve_attempt <card> <threshold> -> increments resolve_attempts
-  local file=$1 threshold=$2 attempts
+  local file=$1 threshold=$2 attempts timings
   attempts=$(($(fm_get "$file" resolve_attempts 0) + 1))
   fm_set "$file" resolve_attempts "$attempts"
-  printf 'score: %s / threshold: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$ATT_FEEDBACK" |
+  timings="resolver=${ATT_RESOLVE_SECS}s review=${ATT_REVIEW_SECS}s"
+  fm_set "$file" last_timings "$timings"
+  printf 'score: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
     append_history "$file" "resolve review"
 }
 
@@ -550,9 +566,12 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     return
   fi
 
+  local merge_t0=$SECONDS merge_secs
   merge_lock acquire
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title (conflict resolved)" "$resolve_branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
+    merge_secs=$((SECONDS - merge_t0))
+    echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
     git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
     git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
@@ -657,9 +676,12 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     return
   fi
 
+  local merge_t0=$SECONDS merge_secs
   merge_lock acquire
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title" "$branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
+    merge_secs=$((SECONDS - merge_t0))
+    echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
     git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
     git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
