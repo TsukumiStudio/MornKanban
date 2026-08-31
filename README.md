@@ -14,6 +14,8 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 - One "run setup" action installs the `kanban` CLI symlink (`~/.local/bin`) and the Claude Code skill (`~/.claude/skills/kanban-dispatch`); it's idempotent.
 - Project onboarding is **not** in the GUI: open a Herdr pane in the project and tell Claude 「**kanban の秘書として待機して**」 — the secretary runs `kanban init` and everything else (see Secretary Bootstrap below).
 - Requirements: bash + python3 (the same as `kanban.sh` itself).
+- The same screen also uninstalls: it removes only what this installer created
+  (the CLI symlink pointing into this repo, and the installer-generated skill) and leaves anything else alone.
 
 ## Secretary Bootstrap (one-liner)
 
