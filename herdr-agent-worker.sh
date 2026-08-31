@@ -45,7 +45,7 @@ cat >"$tmp/prompt.md"
 # write its final answer to a file inside the worktree and read that.
 ans="$PWD/.kanban-answer.md"
 rm -f "$ans"
-printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にもそのまま書き込むこと。\n' "$ans" >>"$tmp/prompt.md"
+printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にもそのまま書き込むこと。作業・編集はカレントディレクトリ (worktree) 内だけで行い、リポジトリ本体のチェックアウトを絶対パスで触らないこと。\n' "$ans" >>"$tmp/prompt.md"
 
 jget() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"; }
 
