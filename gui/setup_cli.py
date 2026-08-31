@@ -13,6 +13,7 @@ if HERE not in sys.path:
 from setup_core import (  # noqa: E402
     check_deps,
     cli_installed,
+    guard_status,
     install_cli,
     install_skills,
     run_setup,
@@ -55,11 +56,18 @@ def cmd_version():
     return True
 
 
+def cmd_guard_status():
+    status = guard_status()
+    print("claude=%s,codex=%s" % (status["claude"], status["codex"]))
+    return True
+
+
 COMMANDS = {
     "install": cmd_install,
     "uninstall": cmd_uninstall,
     "update": cmd_update,
     "version": cmd_version,
+    "guard-status": cmd_guard_status,
 }
 
 
@@ -72,6 +80,11 @@ def status_summary():
     lines.append("kanban CLI: %s" % ("導入済み" if cli_installed() else "未導入"))
     for name, installed in skill_status().items():
         lines.append("%s スキル: %s" % (name, "導入済み" if installed else "未導入"))
+    guard = guard_status()
+    lines.append(
+        "秘書ガード (直接実装/検証/Git変更/外部公開の拒否): claude=%s, codex=%s"
+        % (guard["claude"], guard["codex"])
+    )
     lines.append("導入後はプロジェクトのペインで『$kanban-dispatch 秘書として開始』")
     return "\n".join(lines)
 
