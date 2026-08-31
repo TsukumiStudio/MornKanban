@@ -88,3 +88,38 @@ def run_setup():
     _, cli_msg = install_cli()
     _, skill_msg = install_skill(force=True)
     return [cli_msg, skill_msg]
+
+
+def _uninstall_cli():
+    try:
+        if not os.path.lexists(KANBAN_LINK):
+            return "CLI: 未導入"
+        if os.path.islink(KANBAN_LINK):
+            target = os.path.realpath(KANBAN_LINK)
+            repo_real = os.path.realpath(REPO)
+            if target == repo_real or (target + os.sep).startswith(repo_real + os.sep):
+                os.remove(KANBAN_LINK)
+                return "CLI: 削除しました"
+        return "CLI: このインストーラの管理物ではないため残しました"
+    except Exception as e:
+        return "CLI: 確認/削除に失敗しました (%s)" % e
+
+
+def _uninstall_skill():
+    try:
+        if not os.path.isfile(SKILL_PATH):
+            return "スキル: 未導入"
+        with open(SKILL_PATH, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        if "MornKanban" in content:
+            shutil.rmtree(SKILL_DIR)
+            return "スキル: 削除しました"
+        return "スキル: 別管理のスキルのため残しました"
+    except Exception as e:
+        return "スキル: 確認/削除に失敗しました (%s)" % e
+
+
+def run_uninstall():
+    if in_worktree():
+        return ["refused: kanban worktree 内"]
+    return [_uninstall_cli(), _uninstall_skill()]
