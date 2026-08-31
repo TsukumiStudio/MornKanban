@@ -35,16 +35,15 @@ When the user invokes this skill to begin a secretary session:
    of this conversation, until the user explicitly ends or replaces it.
 4. Reply with one short line stating that secretary mode is active, the
    resolved secretary agent name from bootstrap's output, the worker
-   backend/model from project policy, the job count, and `visible Herdr`.
+   backend/model from project policy, and the job count.
    If bootstrap failed because the name is already taken by another
    project's running secretary, report that failure and its suggested fix
    (`KANBAN_HERDR_SECRETARY=<name>` or `secretary_agent: <name>` in
    `KANBAN.md`) verbatim — do not retry with a name of your own choosing.
 
-Visible Herdr execution is the safe default. If bootstrap reports that this
-agent is not inside Herdr, stop and report that fact. Never silently fall back
-to headless workers. Headless secretary mode is allowed only when the user
-explicitly requests it.
+Herdr is required. If bootstrap reports that this agent is not inside Herdr,
+stop and report that fact. There is no headless secretary mode: do not ask the
+user to choose an execution mode and never fall back to headless workers.
 
 ## Handle later implementation requests
 

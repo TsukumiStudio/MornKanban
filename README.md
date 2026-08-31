@@ -34,11 +34,11 @@ A secretary agent is started with **`$kanban-dispatch 秘書として開始`** (
 
 1. Run `kanban-secretary.sh bootstrap` from the MornKanban checkout. It runs `kanban init` when needed, verifies the current Herdr pane, and registers this agent as the notification target. It never overwrites an existing `KANBAN.md`.
 2. Read `.kanban/KANBAN.md` and the Dialogue-Agent Contract below.
-3. Reply with **one short line** (e.g. 「秘書モード開始。課題を待機中 (worker=claude/sonnet, -j 2, visible Herdr)」) — no plan dumps.
+3. Reply with **one short line** (e.g. 「秘書モード開始。課題を待機中 (worker=claude/sonnet, -j 2)」) — no plan dumps.
 4. Treat the bootstrap request as active for the rest of the conversation. For each subsequent user request: split it into cards per policy, start the visible dispatcher, reply briefly, and return to waiting. Never implement in the dialogue session.
 5. React to card-settlement pushes (`KANBAN_NOTIFY_CMD`) per policy: investigate `failed/` and report immediately; summarize when the board settles.
 
-Visible Herdr workers are the secretary default. The bootstrap must test `HERDR_ENV`, `HERDR_PANE_ID`, and the current pane through the Herdr CLI. It must not infer availability from the prompt, and it must not silently fall back to headless workers. Headless secretary mode requires an explicit user request.
+Herdr is required for secretary sessions. The bootstrap must test `HERDR_ENV`, `HERDR_PANE_ID`, and the current pane through the Herdr CLI. It must not infer availability from the prompt. There is no execution-mode choice or headless secretary mode; if Herdr is unavailable, stop and report it.
 
 ### Secretary agent naming (per project, not a fixed shared name)
 
@@ -82,7 +82,7 @@ When the user assigns implementation work in a project that has `.kanban/`:
 
 1. Read `.kanban/KANBAN.md` and follow its policy; it overrides the generic steps below where they differ.
 2. Write a self-contained card: `echo "<full task description>" | kanban add "<title>" [-b claude|codex] [-m model] [-t threshold] [--review|--no-review] [--diagnose]`. The worker has no conversation context; include target paths, constraints, and completion conditions. Leave `--review`/`--no-review` off to inherit the project's `review_enabled` policy (see **Review on/off**); pass it only to deliberately override that policy for one card. Use `--diagnose` for a read-only investigation: it targets 5 minutes, stops at 10 minutes, skips reviewer by default, and must produce evidence/cause/uncertainty rather than a fix. File implementation separately unless the user explicitly requested diagnosis and repair together.
-3. In visible secretary mode, start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, resolver, and notification commands. Never substitute bare `kanban run`, which starts invisible headless workers. A nonstandard checkout uses its own absolute helper path.
+3. Start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, resolver, and notification commands. Never substitute bare `kanban run`, which starts invisible headless workers. A nonstandard checkout uses its own absolute helper path.
 4. Return to the user immediately. Do not implement the task in the dialogue session.
 5. Report `failed/` cards to the user; they need human judgment.
 6. **Verification is delegated too.** After implementation cards merge, cut a follow-up verification card (run the app, click through it, check the acceptance criteria) instead of verifying by hand. The dialogue agent never implements, verifies, or fixes directly — it cards, dispatches, and reports.

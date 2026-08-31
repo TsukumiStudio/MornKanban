@@ -315,8 +315,8 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 ## ディスパッチャ運用
 
 - 秘書開始時は `$kanban-dispatch 秘書として開始` を使う。スキルが環境を実測し、以後の会話では対話エージェント自身が実装しない
-- Herdr 環境ではカード追加後に `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
-- visible Herdr が利用不能なら、ユーザーが headless を明示しない限り勝手にフォールバックしない
+- カード追加後は `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
+- Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
 - (例) failed カードは秘書がユーザーへ即報告する。resolving/blocked は実行側が
   自律的に処理するので、秘書は failed に落ちた時だけ介入する
 

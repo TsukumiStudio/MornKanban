@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# kanban-secretary.sh - bootstrap a MornKanban secretary and dispatch visible
-# Herdr workers without silently falling back to headless agent processes.
+# kanban-secretary.sh - bootstrap a MornKanban secretary and dispatch workers
+# in visible Herdr panes.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
@@ -12,8 +12,8 @@ source "$REPO/kanban-root.sh"
 die() { echo "kanban-secretary: $*" >&2; exit 1; }
 
 require_herdr() {
-  [[ ${HERDR_ENV:-} == 1 ]] || die "not running inside Herdr (HERDR_ENV != 1); refusing a hidden headless fallback"
-  [[ -n ${HERDR_PANE_ID:-} ]] || die "HERDR_PANE_ID is missing; refusing a hidden headless fallback"
+  [[ ${HERDR_ENV:-} == 1 ]] || die "Herdr is required (HERDR_ENV != 1)"
+  [[ -n ${HERDR_PANE_ID:-} ]] || die "Herdr is required (HERDR_PANE_ID is missing)"
   command -v herdr >/dev/null 2>&1 || die "herdr command was not found"
   herdr pane layout --current >/dev/null || die "the current Herdr pane could not be verified"
 }
@@ -129,7 +129,7 @@ This agent was NOT renamed; no other project's running agent was touched."
   # exact pane only.
   write_secretary_marker "$root"
 
-  echo "secretary ready: project=$root secretary=$SECRETARY_NAME (name source: $SECRETARY_SOURCE) execution=visible-herdr guard=$(guard_status_line)"
+  echo "secretary ready: project=$root secretary=$SECRETARY_NAME (name source: $SECRETARY_SOURCE) guard=$(guard_status_line)"
 }
 
 guard_status_line() {
@@ -183,7 +183,7 @@ dispatch() {
     herdr pane close "$pane" >/dev/null 2>&1 || true
     die "failed to start the dispatcher pane"
   fi
-  echo "dispatcher started: pane=$pane secretary=$SECRETARY_NAME execution=visible-herdr"
+  echo "dispatcher started: pane=$pane secretary=$SECRETARY_NAME"
 }
 
 case ${1:-} in

@@ -130,7 +130,7 @@ class SecretaryScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.project / ".kanban" / "KANBAN.md").is_file())
-        self.assertIn("execution=visible-herdr", result.stdout)
+        self.assertNotIn("execution=", result.stdout)
         # No project-wide fixed "secretary" default any more: the basename
         # of self.project is "project", so the generated default is
         # "secretary-project", not the bare "secretary" every project used
@@ -271,6 +271,7 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("pane=w1:p2", result.stdout)
         self.assertIn("secretary=secretary-project", result.stdout)
+        self.assertNotIn("execution=", result.stdout)
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("pane split --current --direction right", log)
         self.assertIn("KANBAN_WORKER_CMD=", log)
@@ -328,14 +329,14 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("secretary=secretary-project", bootstrap.stdout)
         self.assertIn("secretary=secretary-project", dispatch.stdout)
 
-    def test_bootstrap_refuses_hidden_headless_fallback(self):
+    def test_bootstrap_requires_herdr(self):
         env = self.env.copy()
         env.pop("HERDR_ENV")
 
         result = self.run_secretary("bootstrap", self.project, env=env)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("refusing a hidden headless fallback", result.stderr)
+        self.assertIn("Herdr is required", result.stderr)
         self.assertFalse((self.project / ".kanban").exists())
 
 
@@ -1837,6 +1838,19 @@ class SecretaryForbidsInProcessDelegationContractTests(unittest.TestCase):
         self.assertIn("collaboration/subagent 起動 (Codex)", text)
         self.assertIn("kanban add", text)
         self.assertIn("kanban-secretary.sh dispatch", text)
+
+
+class SecretaryRequiresHerdrContractTests(unittest.TestCase):
+    def test_contract_has_no_execution_mode_choice(self):
+        skill = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        template = (REPO / "kanban.sh").read_text(encoding="utf-8")
+        skill = " ".join(skill.split())
+
+        self.assertIn("There is no headless secretary mode", skill)
+        self.assertIn("do not ask the user to choose an execution mode", skill)
+        self.assertIn("There is no execution-mode choice", readme)
+        self.assertIn("実行モードを質問せず", template)
 
 
 class TestTierContractTests(unittest.TestCase):

@@ -65,7 +65,7 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
 
 - 秘書 bootstrap が `.kanban/KANBAN.md` を初期化し、current Herdr agent を `secretary` として登録する
 - visible dispatcher が worker / reviewer / notify を一組で別 Herdr pane に渡す
-- Herdr 外では headless worker へフォールバックせず失敗する
+- Herdr 外では秘書を開始せず、Herdr必須として失敗する
 - 同じスキルが Claude Code と Codex の両方へ導入され、checkout の実パスとバージョンが埋め込まれる
 - セマンティックバージョン比較 (`1.9.0` < `1.10.0` など、辞書順にならない)
 - `kanban.sh` がシンボリックリンク経由でも実体の `VERSION` / `gui/` を解決する
