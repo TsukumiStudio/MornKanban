@@ -17,6 +17,12 @@ DEFAULT_RESOLVE_MAX_ATTEMPTS=2
 DEFAULT_BACKEND=auto
 DEFAULT_MODEL=""
 BACKENDS="claude codex"
+# A reviewer/resolver-reviewer that never returns a valid score (pane lost,
+# agent_not_found, timeout, wrapper/tool error) is an infrastructure failure,
+# not a quality verdict -- it must not burn a worker attempt. This retry
+# count is tracked separately from `attempts` (see review_with_infra_retry).
+DEFAULT_REVIEW_INFRA_MAX_RETRIES=2
+DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=2
 
 die() { echo "kanban: $*" >&2; exit 1; }
 
@@ -69,12 +75,22 @@ cfg_env() { # cfg_env <file> <key> <env-name>: env wins; else adopt non-empty cf
 
 load_project_config() { # .kanban/KANBAN.md frontmatter -> defaults (env still wins)
   local cfg=$KB/KANBAN.md
-  [[ -f $cfg ]] || return 0
+  if [[ ! -f $cfg ]]; then
+    [[ -n ${KANBAN_REVIEW_INFRA_MAX_RETRIES:-} ]] && DEFAULT_REVIEW_INFRA_MAX_RETRIES=$KANBAN_REVIEW_INFRA_MAX_RETRIES
+    [[ -n ${KANBAN_REVIEW_INFRA_BACKOFF_SECONDS:-} ]] && DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=$KANBAN_REVIEW_INFRA_BACKOFF_SECONDS
+    return 0
+  fi
   DEFAULT_BACKEND=$(fm_get "$cfg" default_backend "$DEFAULT_BACKEND")
   DEFAULT_MODEL=$(fm_get "$cfg" default_model "$DEFAULT_MODEL")
   DEFAULT_THRESHOLD=$(fm_get "$cfg" threshold "$DEFAULT_THRESHOLD")
   DEFAULT_MAX_ATTEMPTS=$(fm_get "$cfg" max_attempts "$DEFAULT_MAX_ATTEMPTS")
   DEFAULT_RESOLVE_MAX_ATTEMPTS=$(fm_get "$cfg" resolve_max_attempts "$DEFAULT_RESOLVE_MAX_ATTEMPTS")
+  DEFAULT_REVIEW_INFRA_MAX_RETRIES=$(fm_get "$cfg" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
+  DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=$(fm_get "$cfg" review_infra_backoff_seconds "$DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS")
+  # env wins over project config for both (bounded-retry knobs are also
+  # useful to override ad hoc, e.g. from a test or a CI job).
+  [[ -n ${KANBAN_REVIEW_INFRA_MAX_RETRIES:-} ]] && DEFAULT_REVIEW_INFRA_MAX_RETRIES=$KANBAN_REVIEW_INFRA_MAX_RETRIES
+  [[ -n ${KANBAN_REVIEW_INFRA_BACKOFF_SECONDS:-} ]] && DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=$KANBAN_REVIEW_INFRA_BACKOFF_SECONDS
   cfg_env "$cfg" backend_order KANBAN_BACKEND_ORDER
   cfg_env "$cfg" reviewer KANBAN_REVIEWER
   cfg_env "$cfg" review_model KANBAN_REVIEW_MODEL
@@ -151,6 +167,8 @@ resolve_model: sonnet
 threshold: 80
 max_attempts: 3
 resolve_max_attempts: 2
+review_infra_max_retries: 2
+review_infra_backoff_seconds: 2
 jobs: 2
 claude_perms: acceptEdits
 codex_sandbox: workspace-write
@@ -366,9 +384,156 @@ for m in reversed(re.findall(r"\{[^{}]*\}", text, re.S)):
 '
 }
 
-run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK / ATT_BLOCKED_REASON / ATT_WORKER_SECS / ATT_REVIEW_SECS
-  local file=$1 workdir=$2
-  local backend model wcmd out title t0
+# review infrastructure failure classification -----------------------------
+#
+# A reviewer/resolver-reviewer invocation can fail for reasons that have
+# nothing to do with the quality of the work under review: the visible Herdr
+# pane it ran in can vanish (agent_not_found), the wrapper can time out, a
+# tool call inside the reviewer agent can error out, or the reviewer can
+# simply produce no output. None of that is a "score: 0" -- it is
+# infrastructure flaking, and must not consume a worker attempt. See
+# review_with_infra_retry().
+#
+# classify_review_infra_error is only ever consulted once parse_score has
+# already failed to find a {"score": ...} object, so "real content" here
+# just means: text that at least plausibly *is* an attempted review (which
+# we treat conservatively as an infra/protocol problem too, since a
+# reviewer that cannot produce parseable JSON is a broken reviewer, not a
+# quality verdict) vs. one of the known lifecycle/wrapper failure shapes.
+classify_review_infra_error() { # stdin: reviewer output (already failed parse_score) -> infra category
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+
+# Explicit sentinel emitted by the Herdr wrapper (herdr-agent-worker.sh) when
+# it detects its own lifecycle failure -- the precise, non-heuristic case.
+m = re.search(r"^KANBAN_INFRA_ERROR:\s*(.+)$", text, re.M)
+if m:
+    print(("wrapper_error: " + m.group(1).strip())[:200])
+    sys.exit(0)
+
+if not text.strip():
+    print("empty_output")
+    sys.exit(0)
+
+# Known lifecycle/tooling failure shapes: pane or agent handle disappeared,
+# the wrapper itself errored, a timeout was hit, or a tool call inside the
+# reviewer errored out. Also guards against a terminal status line or a
+# different cards leftover output being mistaken for review content.
+sigs = [
+    (r"agent target [^\n]* not found", "agent_not_found"),
+    (r"no such (pane|agent)", "pane_lost"),
+    (r"herdr-agent-worker:", "wrapper_error"),
+    (r"HERDR_ENV", "wrapper_error"),
+    (r"\btimed?[- ]?out\b", "timeout"),
+    (r"Traceback \(most recent call last\)", "tool_error"),
+    (r"\"error\"\s*:\s*\"", "tool_error"),
+    (r"auto mode on", "wrapper_status_line"),
+]
+for pat, cat in sigs:
+    if re.search(pat, text, re.I):
+        print(cat)
+        sys.exit(0)
+
+print("unparseable_output")
+'
+}
+
+# classify_worker_infra_error is deliberately narrow (sentinel-only, unlike
+# the reviewer's broad heuristic): worker/resolver output is free-form agent
+# chatter, so pattern-matching it for "looks like an error" would misfire on
+# real work. Only the wrapper's own explicit signal is trusted here.
+classify_worker_infra_error() { # stdin: worker/resolver agent output -> infra category (empty = not infra)
+  python3 -c '
+import re, sys
+m = re.search(r"^KANBAN_INFRA_ERROR:\s*(.+)$", sys.stdin.read(), re.M)
+if m:
+    print(("wrapper_error: " + m.group(1).strip())[:200])
+'
+}
+
+review_infra_backoff_seconds() { # review_infra_backoff_seconds <retry-n> -> short bounded backoff
+  local n=$1 base=${DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS:-2}
+  local s=$((base * n))
+  [[ $s -gt 10 ]] && s=10
+  echo "$s"
+}
+
+record_review_infra_retry() { # record_review_infra_retry <card> <field> <heading> <category> <max> -> echoes new count
+  local file=$1 field=$2 heading=$3 category=$4 max=$5 n
+  n=$(($(fm_get "$file" "$field" 0) + 1))
+  fm_set "$file" "$field" "$n"
+  printf '%s retry %s/%s: %s\n' "$heading" "$n" "$max" "$category" | append_history "$file" "$heading retry"
+  echo "$n"
+}
+
+review_prompt_for_card() { # review_prompt_for_card <card>
+  local file=$1
+  cat <<EOF
+You are a strict reviewer. Inspect this repository's current state and judge
+whether the task below is genuinely complete and of good quality. Check the
+actual files and diffs; do not trust the worker's claims.
+
+$(card_body "$file")
+
+Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
+EOF
+}
+
+invoke_reviewer() { # invoke_reviewer <card> <workdir> <prompt> -> sets ATT_SCORE/ATT_FEEDBACK/ATT_REVIEW_INFRA_ERROR
+  local file=$1 workdir=$2 prompt=$3
+  local title rcmd review_out parsed t0
+  ATT_REVIEW_SECS=${ATT_REVIEW_SECS:-0}
+  title=$(fm_get "$file" title "")
+  rcmd=$(review_cmd)
+  t0=$SECONDS
+  review_out=$( (cd "$workdir" && KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<<"$prompt") ) || true
+  ATT_REVIEW_SECS=$((ATT_REVIEW_SECS + SECONDS - t0))
+  echo "$review_out" | tail -n 40 | append_history "$file" "reviewer output (tail)"
+  parsed=$(echo "$review_out" | parse_score)
+  if [[ -z $parsed ]]; then
+    ATT_SCORE=""
+    ATT_FEEDBACK=""
+    ATT_REVIEW_INFRA_ERROR=$(echo "$review_out" | classify_review_infra_error)
+  else
+    ATT_SCORE=${parsed%%$'\t'*}
+    ATT_FEEDBACK=${parsed#*$'\t'}
+    ATT_REVIEW_INFRA_ERROR=""
+  fi
+}
+
+review_with_infra_retry() { # review_with_infra_retry <card> <workdir> <infra-max> <prompt>
+  # sets ATT_SCORE/ATT_FEEDBACK (only meaningful when ATT_REVIEW_INFRA_BLOCKED
+  # is false) and ATT_REVIEW_INFRA_BLOCKED. Only a genuinely parsed JSON
+  # score object -- from this call or an earlier retry within it -- is ever
+  # threshold-judged; every infra failure in between is retried in place on
+  # the same worktree/commit without touching `attempts`.
+  local file=$1 workdir=$2 infra_max=$3 prompt=$4
+  ATT_REVIEW_INFRA_BLOCKED=false
+  local retries
+  retries=$(fm_get "$file" review_infra_retries 0)
+  while true; do
+    invoke_reviewer "$file" "$workdir" "$prompt"
+    if [[ -z $ATT_REVIEW_INFRA_ERROR ]]; then
+      fm_set "$file" review_infra_retries 0
+      return
+    fi
+    if [[ $retries -ge $infra_max ]]; then
+      ATT_REVIEW_INFRA_BLOCKED=true
+      return
+    fi
+    retries=$(record_review_infra_retry "$file" review_infra_retries "review infrastructure" "$ATT_REVIEW_INFRA_ERROR" "$infra_max")
+    sleep "$(review_infra_backoff_seconds "$retries")"
+  done
+}
+
+run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SCORE / ATT_FEEDBACK / ATT_BLOCKED_REASON / ATT_WORKER_SECS / ATT_REVIEW_SECS
+  # Runs ONLY the worker step. An agent-lifecycle failure in the worker
+  # itself (visible Herdr pane lost before it ever touched the tree) is
+  # retried here too, bounded and without consuming a worker attempt --
+  # same principle as the reviewer side, applied symmetrically.
+  local file=$1 workdir=$2 infra_max=${3:-$DEFAULT_REVIEW_INFRA_MAX_RETRIES}
+  local backend model wcmd out title infra_cat retries t0
   ATT_BLOCKED_REASON=""
   ATT_WORKER_SECS=0
   ATT_REVIEW_SECS=0
@@ -376,13 +541,28 @@ run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK 
   model=$(fm_get "$file" model "")
   title=$(fm_get "$file" title "")
   wcmd=$(worker_cmd "$backend" "$model")
-  # Custom worker commands (KANBAN_WORKER_CMD) receive the card's routing
-  # via env, since the override bypasses worker_cmd's model handling.
-  t0=$SECONDS
-  out=$( (cd "$workdir" && card_body "$file" |
-    KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || true
-  ATT_WORKER_SECS=$((SECONDS - t0))
-  echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
+  retries=$(fm_get "$file" worker_infra_retries 0)
+  while true; do
+    # Custom worker commands (KANBAN_WORKER_CMD) receive the card's routing
+    # via env, since the override bypasses worker_cmd's model handling.
+    t0=$SECONDS
+    out=$( (cd "$workdir" && card_body "$file" |
+      KANBAN_CARD_MODEL=$model KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || true
+    ATT_WORKER_SECS=$((ATT_WORKER_SECS + SECONDS - t0))
+    echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
+    infra_cat=$(echo "$out" | classify_worker_infra_error)
+    if [[ -z $infra_cat ]]; then
+      fm_set "$file" worker_infra_retries 0
+      break
+    fi
+    if [[ $retries -ge $infra_max ]]; then
+      ATT_WORKER_INFRA_BLOCKED=true
+      return
+    fi
+    retries=$(record_review_infra_retry "$file" worker_infra_retries "worker infrastructure" "$infra_cat" "$infra_max")
+    sleep "$(review_infra_backoff_seconds "$retries")"
+  done
+  ATT_WORKER_INFRA_BLOCKED=false
 
   # A worker that discovers a real-time ordering dependency (e.g. it needs
   # another card's result that is not merged yet) signals it instead of
@@ -393,30 +573,6 @@ run_attempt() { # run_attempt <card> <workdir> -> sets ATT_SCORE / ATT_FEEDBACK 
   if [[ -n $ATT_BLOCKED_REASON ]]; then
     ATT_SCORE=0
     ATT_FEEDBACK=""
-    return
-  fi
-
-  local rcmd review_out parsed
-  rcmd=$(review_cmd)
-  t0=$SECONDS
-  review_out=$( (cd "$workdir" && KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<EOF
-You are a strict reviewer. Inspect this repository's current state and judge
-whether the task below is genuinely complete and of good quality. Check the
-actual files and diffs; do not trust the worker's claims.
-
-$(card_body "$file")
-
-Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
-EOF
-  ) ) || true
-  ATT_REVIEW_SECS=$((SECONDS - t0))
-  parsed=$(echo "$review_out" | parse_score)
-  if [[ -z $parsed ]]; then
-    ATT_SCORE=0
-    ATT_FEEDBACK="reviewer output was not parseable JSON: $(echo "$review_out" | tail -c 200)"
-  else
-    ATT_SCORE=${parsed%%$'\t'*}
-    ATT_FEEDBACK=${parsed#*$'\t'}
   fi
 }
 
@@ -451,7 +607,26 @@ merge_lock() { # merge_lock <acquire|release>
   fi
 }
 
-run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict-files> <base-branch> <card-branch> -> sets ATT_SCORE/ATT_FEEDBACK/ATT_RESOLVE_SECS/ATT_REVIEW_SECS
+review_prompt_for_resolve() { # review_prompt_for_resolve <card> <card_branch> <base_branch>
+  local file=$1 card_branch=$2 base_branch=$3
+  cat <<EOF
+You are a strict reviewer. This worktree is the result of resolving a merge
+conflict between card branch $card_branch and base branch $base_branch.
+Inspect the actual files and diffs; do not trust the resolver's claims. Judge
+whether BOTH sides' intent was preserved and the task below is genuinely
+complete.
+
+$(card_body "$file")
+
+Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
+EOF
+}
+
+run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict-files> <base-branch> <card-branch> -> sets ATT_UNRESOLVED/ATT_RESOLVE_SECS
+  # Runs ONLY the resolver step (agent + commit); sets ATT_UNRESOLVED=true
+  # when conflict markers remain. Review is a separate step -- see
+  # review_with_infra_retry -- so an infra failure there never re-runs the
+  # resolver.
   local file=$1 workdir=$2 conflict_files=$3 base_branch=$4 card_branch=$5
   local backend model wcmd out title prompt t0
   ATT_RESOLVE_SECS=0
@@ -472,35 +647,9 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   git -C "$workdir" add -A
   git -C "$workdir" commit -q --allow-empty -m "kanban: resolve conflict for $title"
 
+  ATT_UNRESOLVED=false
   if git -C "$workdir" diff --name-only --diff-filter=U | grep -q .; then
-    ATT_SCORE=0
-    ATT_FEEDBACK="conflict markers remain unresolved after the resolver's attempt"
-    return
-  fi
-
-  local rcmd review_out parsed
-  rcmd=$(review_cmd)
-  t0=$SECONDS
-  review_out=$( (cd "$workdir" && KANBAN_CARD_TITLE=$title $rcmd 2>&1 <<EOF
-You are a strict reviewer. This worktree is the result of resolving a merge
-conflict between card branch $card_branch and base branch $base_branch.
-Inspect the actual files and diffs; do not trust the resolver's claims. Judge
-whether BOTH sides' intent was preserved and the task below is genuinely
-complete.
-
-$(card_body "$file")
-
-Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
-EOF
-  ) ) || true
-  ATT_REVIEW_SECS=$((SECONDS - t0))
-  parsed=$(echo "$review_out" | parse_score)
-  if [[ -z $parsed ]]; then
-    ATT_SCORE=0
-    ATT_FEEDBACK="reviewer output was not parseable JSON: $(echo "$review_out" | tail -c 200)"
-  else
-    ATT_SCORE=${parsed%%$'\t'*}
-    ATT_FEEDBACK=${parsed#*$'\t'}
+    ATT_UNRESOLVED=true
   fi
 }
 
@@ -521,40 +670,71 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   # the resolve branch into base (never the original card branch again --
   # no double-merge).
   local file=$1 base_branch=$2 card_branch=$3 card_wt=$4 conflict_files=$5
-  local id title threshold resolve_max_attempts resolve_attempts
+  local id title threshold resolve_max_attempts resolve_attempts review_infra_max
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "?")
   threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
   resolve_max_attempts=$(fm_get "$file" resolve_max_attempts "$DEFAULT_RESOLVE_MAX_ATTEMPTS")
   resolve_attempts=$(fm_get "$file" resolve_attempts 0)
+  review_infra_max=$(fm_get "$file" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
   local resolve_branch=kanban-resolve/$id resolve_wt=$KB/wt/$id-resolve
   local tag="[$title]"
 
-  move_card "$file" resolving >/dev/null
+  [[ $file == "$KB/resolving/"* ]] || move_card "$file" resolving >/dev/null
   file=$KB/resolving/$(basename "$file")
-  git -C "$ROOT" worktree remove --force "$card_wt" 2>/dev/null || true
+  [[ -n $card_wt ]] && git -C "$ROOT" worktree remove --force "$card_wt" 2>/dev/null || true
 
-  if ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
+  # Resuming a review-infra-blocked resolve card (see cmd_resume): the
+  # resolve worktree/branch already survived the block, reuse them instead
+  # of failing on `worktree add`'s "branch already exists".
+  if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$resolve_branch" && [[ -d $resolve_wt ]]; then
+    echo "$tag resuming existing resolve worktree/branch"
+  elif ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
     echo "resolve worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
     git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
     move_card "$file" failed >/dev/null
     echo "$tag FAIL resolve worktree add failed -> failed"
     notify_result failed "$title"
     return
+  else
+    git -C "$resolve_wt" merge --no-ff -q -m "kanban: merge $card_branch for conflict resolution" "$card_branch" \
+      2>>"$KB/wt/$id.log" || true
   fi
-  git -C "$resolve_wt" merge --no-ff -q -m "kanban: merge $card_branch for conflict resolution" "$card_branch" \
-    2>>"$KB/wt/$id.log" || true
 
-  local resolved=false
+  local resolved=false blocked_infra=false
   while [[ $resolve_attempts -lt $resolve_max_attempts ]]; do
     echo "$tag resolve attempt $((resolve_attempts + 1))/$resolve_max_attempts (branch: $resolve_branch)"
     run_resolve_attempt "$file" "$resolve_wt" "$conflict_files" "$base_branch" "$card_branch"
+    if $ATT_UNRESOLVED; then
+      resolve_attempts=$((resolve_attempts + 1))
+      fm_set "$file" resolve_attempts "$resolve_attempts"
+      printf 'conflict markers remain unresolved after the resolver attempt.\n' | append_history "$file" "resolve review"
+      echo "$tag RESOLVE RETRY conflict markers remain"
+      continue
+    fi
+    review_with_infra_retry "$file" "$resolve_wt" "$review_infra_max" \
+      "$(review_prompt_for_resolve "$file" "$card_branch" "$base_branch")"
+    if $ATT_REVIEW_INFRA_BLOCKED; then
+      blocked_infra=true
+      break
+    fi
     record_resolve_attempt "$file" "$threshold"
     resolve_attempts=$((resolve_attempts + 1))
     if [[ $ATT_SCORE -ge $threshold ]]; then resolved=true; break; fi
     echo "$tag RESOLVE RETRY score=$ATT_SCORE"
     printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
   done
+
+  if $blocked_infra; then
+    fm_set "$file" blocked_kind review_infra
+    printf 'review infrastructure retries exhausted (%s/%s) for resolve branch %s.\nbranches %s and %s, and the resolve worktree, are kept -- this is a review infrastructure stop, not a code failure.\nrecovery: kanban resume %s\n' \
+      "$(fm_get "$file" review_infra_retries 0)" "$review_infra_max" "$resolve_branch" "$resolve_branch" "$card_branch" "$id" |
+      append_history "$file" "blocked (review infrastructure)"
+    move_card "$file" blocked >/dev/null
+    echo "$tag BLOCKED review-infra retries exhausted -> blocked (branches $resolve_branch, $card_branch kept; not a code failure)"
+    notify_result blocked "$title"
+    return
+  fi
 
   if ! $resolved; then
     printf 'conflict files: %s\nresolve branch %s and original card branch %s are kept for manual inspection.\n' \
@@ -593,14 +773,25 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
 
 process_card_seq() { # non-git fallback: run in place, retry via todo
   local file=$1
-  local title threshold max_attempts attempts
+  local title threshold max_attempts attempts review_infra_max
   title=$(fm_get "$file" title "?")
   threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
   max_attempts=$(fm_get "$file" max_attempts "$DEFAULT_MAX_ATTEMPTS")
   attempts=$(fm_get "$file" attempts 0)
+  review_infra_max=$(fm_get "$file" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
 
   echo "==> [$title] attempt $((attempts + 1))/$max_attempts"
-  run_attempt "$file" "$ROOT"
+  run_attempt "$file" "$ROOT" "$review_infra_max"
+  if $ATT_WORKER_INFRA_BLOCKED; then
+    fm_set "$file" blocked_kind review_infra
+    printf 'worker infrastructure retries exhausted (%s/%s); this is not a code failure.\nrecovery: kanban resume %s\n' \
+      "$(fm_get "$file" worker_infra_retries 0)" "$review_infra_max" "$(fm_get "$file" id "?")" |
+      append_history "$file" "blocked (worker infrastructure)"
+    move_card "$file" blocked >/dev/null
+    echo "    BLOCKED worker-infra retries exhausted -> blocked (not a code failure)"
+    notify_result blocked "$title"
+    return
+  fi
   if [[ -n $ATT_BLOCKED_REASON ]]; then
     printf 'worker reported a real-time ordering dependency:%s\n' "$ATT_BLOCKED_REASON" |
       append_history "$file" "blocked"
@@ -608,6 +799,19 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
     echo "    BLOCKED ->$ATT_BLOCKED_REASON -> blocked (reclaimed on next dispatcher pass)"
     return
   fi
+
+  review_with_infra_retry "$file" "$ROOT" "$review_infra_max" "$(review_prompt_for_card "$file")"
+  if $ATT_REVIEW_INFRA_BLOCKED; then
+    fm_set "$file" blocked_kind review_infra
+    printf 'review infrastructure retries exhausted (%s/%s); this is not a code failure.\nrecovery: kanban resume %s\n' \
+      "$(fm_get "$file" review_infra_retries 0)" "$review_infra_max" "$(fm_get "$file" id "?")" |
+      append_history "$file" "blocked (review infrastructure)"
+    move_card "$file" blocked >/dev/null
+    echo "    BLOCKED review-infra retries exhausted -> blocked (not a code failure)"
+    notify_result blocked "$title"
+    return
+  fi
+
   record_attempt "$file" "$threshold"
   attempts=$((attempts + 1))
 
@@ -628,16 +832,25 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
 
 process_card_wt() { # git mode: own worktree/branch, retries in place, merge on pass
   local file=$1 base_branch=$2
-  local id title threshold max_attempts attempts
+  local id title threshold max_attempts attempts review_infra_max
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "?")
   threshold=$(fm_get "$file" threshold "$DEFAULT_THRESHOLD")
   max_attempts=$(fm_get "$file" max_attempts "$DEFAULT_MAX_ATTEMPTS")
   attempts=$(fm_get "$file" attempts 0)
+  review_infra_max=$(fm_get "$file" review_infra_max_retries "$DEFAULT_REVIEW_INFRA_MAX_RETRIES")
   local branch=kanban/$id wt=$KB/wt/$id
   local tag="[$title]"
 
-  if ! git -C "$ROOT" worktree add -q -b "$branch" "$wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
+  # A dispatcher restart reclaims a stranded `doing` card by moving it back
+  # to todo without touching its worktree/branch (see cmd_run). If both
+  # already exist here, this is that resume -- reuse them instead of
+  # failing on `git worktree add`'s "branch already exists" error, and skip
+  # re-running the worker below when review_pending shows only the review
+  # step was interrupted.
+  if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$branch" && [[ -d $wt ]]; then
+    echo "$tag resuming existing worktree/branch after restart"
+  elif ! git -C "$ROOT" worktree add -q -b "$branch" "$wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
     echo "worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
     move_card "$file" failed >/dev/null
     echo "$tag FAIL worktree add failed -> failed"
@@ -645,27 +858,57 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     return
   fi
 
-  local passed=false
+  local passed=false blocked_infra=false
   while [[ $attempts -lt $max_attempts ]]; do
-    echo "$tag attempt $((attempts + 1))/$max_attempts (branch: $branch)"
-    run_attempt "$file" "$wt"
-    if [[ -n $ATT_BLOCKED_REASON ]]; then
-      printf 'worker reported a real-time ordering dependency:%s\nworktree is discarded; the card restarts on a fresh worktree from the next pickup.\n' \
-        "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
-      git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
-      git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
-      move_card "$file" blocked >/dev/null
-      echo "$tag BLOCKED ->$ATT_BLOCKED_REASON -> blocked"
-      return
+    if [[ $(fm_get "$file" review_pending "") == 1 ]]; then
+      echo "$tag resuming pending review (branch: $branch)"
+      ATT_WORKER_SECS=0
+      ATT_REVIEW_SECS=0
+    else
+      echo "$tag attempt $((attempts + 1))/$max_attempts (branch: $branch)"
+      run_attempt "$file" "$wt" "$review_infra_max"
+      if $ATT_WORKER_INFRA_BLOCKED; then
+        blocked_infra=true
+        break
+      fi
+      if [[ -n $ATT_BLOCKED_REASON ]]; then
+        printf 'worker reported a real-time ordering dependency:%s\nworktree is discarded; the card restarts on a fresh worktree from the next pickup.\n' \
+          "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
+        git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+        git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
+        move_card "$file" blocked >/dev/null
+        echo "$tag BLOCKED ->$ATT_BLOCKED_REASON -> blocked"
+        return
+      fi
+      git -C "$wt" add -A
+      git -C "$wt" commit -q --allow-empty -m "kanban: $title (attempt $((attempts + 1)))"
+      fm_set "$file" review_pending 1
     fi
-    git -C "$wt" add -A
-    git -C "$wt" commit -q --allow-empty -m "kanban: $title (attempt $((attempts + 1)))"
+
+    review_with_infra_retry "$file" "$wt" "$review_infra_max" "$(review_prompt_for_card "$file")"
+    if $ATT_REVIEW_INFRA_BLOCKED; then
+      blocked_infra=true
+      break
+    fi
+    fm_set "$file" review_pending ""
     record_attempt "$file" "$threshold"
     attempts=$((attempts + 1))
     if [[ $ATT_SCORE -ge $threshold ]]; then passed=true; break; fi
     echo "$tag RETRY score=$ATT_SCORE"
     printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
   done
+
+  if $blocked_infra; then
+    fm_set "$file" blocked_kind review_infra
+    printf 'agent infrastructure retries exhausted (worker: %s/%s, review: %s/%s) for branch %s.\nbranch, worktree, and every commit so far are kept -- this is a review infrastructure stop, not a code failure.\nrecovery: kanban resume %s\n' \
+      "$(fm_get "$file" worker_infra_retries 0)" "$review_infra_max" \
+      "$(fm_get "$file" review_infra_retries 0)" "$review_infra_max" "$branch" "$id" |
+      append_history "$file" "blocked (review infrastructure)"
+    move_card "$file" blocked >/dev/null
+    echo "$tag BLOCKED agent-infra retries exhausted -> blocked (branch $branch kept; not a code failure)"
+    notify_result blocked "$title"
+    return
+  fi
 
   if ! $passed; then
     printf 'branch %s is kept for manual inspection.\n' "$branch" | append_history "$file" "gave up"
@@ -743,6 +986,16 @@ cmd_run() {
   done
   for orphan in "$KB"/blocked/*.md; do
     if [[ -e $orphan ]]; then
+      # review-infra blocked cards are a deliberate, terminal stop: their
+      # worktree/branch/commits are the whole point of keeping them, and
+      # they wait for an explicit `kanban resume <id>` rather than being
+      # silently requeued (which would either re-run the worker for no
+      # reason, or collide with the surviving worktree/branch). Only the
+      # older "worker-reported ordering dependency" blocked kind is
+      # auto-reclaimed to todo on every restart, same as before.
+      if [[ $(fm_get "$orphan" blocked_kind "") == review_infra ]]; then
+        continue
+      fi
       local bid
       bid=$(fm_get "$orphan" id "?")
       if $is_git && [[ $bid != "?" ]]; then
@@ -812,12 +1065,47 @@ cmd_run() {
   echo "todo is empty"
 }
 
+cmd_resume() { # cmd_resume <id-substring> -> re-run only the review step of a review-infra-blocked card
+  require_root
+  local pat=${1:?usage: kanban resume <id>}
+  local hits=("$KB"/blocked/*"$pat"*.md)
+  [[ -e ${hits[0]} ]] || die "no blocked card matching '$pat'"
+  [[ ${#hits[@]} -eq 1 ]] || die "'$pat' matches multiple blocked cards; use the full id"
+  local file=${hits[0]} kind
+  kind=$(fm_get "$file" blocked_kind "")
+  [[ $kind == review_infra ]] || die "card is blocked (kind: ${kind:-unknown}); only review_infra blocks can be resumed"
+
+  fm_set "$file" review_infra_retries 0
+  fm_set "$file" worker_infra_retries 0
+  fm_set "$file" blocked_kind ""
+  local id
+  id=$(fm_get "$file" id "?")
+  local picked
+  picked=$(move_card "$file" doing)
+
+  if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    process_card_seq "$picked"
+    return
+  fi
+  local base_branch
+  base_branch=$(git -C "$ROOT" symbolic-ref --short HEAD) || die "detached HEAD; check out a branch first"
+  if git -C "$ROOT" show-ref --verify --quiet "refs/heads/kanban-resolve/$id"; then
+    # was blocked mid conflict-resolve review: resume via the resolve
+    # worktree/branch, which process_resolve_wt now reuses instead of
+    # re-adding (see the resume check right before its worktree add).
+    process_resolve_wt "$picked" "$base_branch" "kanban/$id" "" ""
+    return
+  fi
+  process_card_wt "$picked" "$base_branch"
+}
+
 case ${1:-} in
   init) shift; cmd_init "$@" ;;
   add) shift; cmd_add "$@" ;;
   list|ls) cmd_list ;;
   show) shift; cmd_show "${1:?usage: kanban show <id>}" ;;
   run) shift || true; cmd_run "$@" ;;
+  resume) shift; cmd_resume "$@" ;;
   monitor) shift || true; cmd_monitor "$@" ;;
   projects) shift; python3 "$REGISTRY_CLI" projects "$@" ;;
   send) shift; python3 "$REGISTRY_CLI" send "$@" ;;
@@ -826,5 +1114,5 @@ case ${1:-} in
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|monitor [run|daemon|config]|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|resume <id>|monitor [run|daemon|config]|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
 esac
