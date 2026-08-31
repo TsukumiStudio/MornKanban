@@ -2,24 +2,21 @@
 """MornKanban environment setup GUI (macOS native, osascript popups).
 
 tkinter が無い macOS 環境向け。ロジックは gui/setup_core.py を使う。
+環境構築のみ・最大2枚のダイアログで完結する(メニューループ無し)。
 """
-import os
 import shutil
 import subprocess
 import sys
+import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from setup_core import (  # noqa: E402
-    add_project,
     check_deps,
     cli_installed,
-    init_project,
-    install_cli,
-    install_skill,
-    load_projects,
+    run_setup,
     skill_installed,
 )
 
@@ -42,106 +39,43 @@ def run_osascript(script):
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
-def osa_choose(items, prompt):
-    list_literal = "{" + ", ".join('"%s"' % _esc(i) for i in items) + "}"
+def status_message():
+    deps = check_deps()
+    lines = [
+        "deps: " + ", ".join("%s %s" % (k, "✓" if v else "✗") for k, v in deps.items()),
+        "kanban CLI: %s" % ("導入済み" if cli_installed() else "未導入"),
+        "スキル: %s" % ("導入済み" if skill_installed() else "未導入"),
+        "",
+        "導入後はプロジェクトのペインで claude に",
+        "『kanban の秘書として待機して』",
+    ]
+    return "\n".join(lines)
+
+
+def show_status_dialog():
+    already_done = cli_installed() and skill_installed()
+    buttons = '{"閉じる"}' if already_done else '{"閉じる", "セットアップ実行"}'
+    default_button = "閉じる" if already_done else "セットアップ実行"
     script = (
-        "set theList to %s\n"
-        'set theChoice to choose from list theList with prompt "%s" '
-        "without multiple selections allowed\n"
-        "if theChoice is false then\n"
-        '    return "__CANCELLED__"\n'
-        "else\n"
-        "    return item 1 of theChoice\n"
-        "end if\n"
-    ) % (list_literal, _esc(prompt))
-    rc, out, _err = run_osascript(script)
-    if rc != 0 or out == "__CANCELLED__":
-        return None
-    return out
-
-
-def osa_display_ok(title, message):
-    script = 'display dialog %s buttons {"OK"} default button "OK" with title "%s"' % (
-        _as_string(message),
-        _esc(title),
-    )
-    run_osascript(script)
-
-
-def osa_confirm(title, message, yes_label, no_label):
-    script = (
-        "set theResult to display dialog %s buttons {\"%s\", \"%s\"} "
+        "set theResult to display dialog %s buttons %s "
         'default button "%s" with title "%s"\n'
         "return button returned of theResult\n"
-    ) % (_as_string(message), _esc(no_label), _esc(yes_label), _esc(no_label), _esc(title))
-    rc, out, _err = run_osascript(script)
-    if rc != 0:
-        return False
-    return out == yes_label
-
-
-def osa_input(title, prompt):
-    script = (
-        'set theResult to display dialog "%s" default answer "" with title "%s"\n'
-        "return text returned of theResult\n"
-    ) % (_esc(prompt), _esc(title))
+    ) % (_as_string(status_message()), buttons, _esc(default_button), _esc(TITLE))
     rc, out, _err = run_osascript(script)
     if rc != 0:
         return None
     return out
 
 
-def menu_items():
-    return [
-        "CLI をインストール (状態: %s)" % ("導入済み" if cli_installed() else "未導入"),
-        "Claude Code スキルを導入 (状態: %s)" % ("導入済み" if skill_installed() else "未導入"),
-        "プロジェクトを追加して init",
-        "プロジェクト一覧",
-        "終了",
-    ]
-
-
-def handle_install_cli():
-    ok, msg = install_cli()
-    osa_display_ok("kanban CLI", msg)
-
-
-def handle_install_skill():
-    ok, msg = install_skill()
-    if not ok and msg == "already installed":
-        if osa_confirm("Claude Code スキル", "既に導入済みです。上書きしますか?", "上書き", "いいえ"):
-            ok, msg = install_skill(force=True)
-        else:
-            return
-    osa_display_ok("Claude Code スキル", msg)
-
-
-def handle_add_project():
-    path = osa_input("プロジェクト追加", "プロジェクトのパスを入力してください")
-    if path is None or not path.strip():
-        return
-    norm = os.path.abspath(os.path.expanduser(path.strip()))
-    ok, msg = add_project(norm)
-    if not ok:
-        osa_display_ok("プロジェクト追加", msg)
-        return
-    if osa_confirm("kanban init", "%s\ninit しますか?" % msg, "init する", "しない"):
-        ok2, msg2 = init_project(norm)
-        osa_display_ok("kanban init", msg2)
-    else:
-        osa_display_ok("プロジェクト追加", msg)
-
-
-def handle_list_projects():
-    projects = load_projects()
-    if not projects:
-        osa_display_ok("プロジェクト一覧", "登録されているプロジェクトはありません")
-        return
-    lines = "\n".join(
-        "[%s] %s (%s)" % ("✓" if p["has_kanban"] else "✗", p["name"], p["path"])
-        for p in projects
+def show_result_dialog(messages):
+    lines = list(messages)
+    lines.append("")
+    lines.append(status_message())
+    script = 'display dialog %s buttons {"OK"} default button "OK" with title "%s"' % (
+        _as_string("\n".join(lines)),
+        _esc(TITLE),
     )
-    osa_display_ok("プロジェクト一覧", lines)
+    run_osascript(script)
 
 
 def main():
@@ -152,22 +86,15 @@ def main():
         sys.stderr.write("osascript が見つかりません\n")
         sys.exit(2)
 
-    deps = check_deps()
-    dep_lines = "\n".join("%s: %s" % (k, "✓" if v else "✗") for k, v in deps.items())
-    osa_display_ok(TITLE, dep_lines)
+    choice = show_status_dialog()
+    if choice is None or choice == "閉じる":
+        sys.exit(0)
 
-    while True:
-        choice = osa_choose(menu_items(), "操作を選択してください")
-        if choice is None or choice.startswith("終了"):
-            break
-        if choice.startswith("CLI をインストール"):
-            handle_install_cli()
-        elif choice.startswith("Claude Code スキルを導入"):
-            handle_install_skill()
-        elif choice.startswith("プロジェクトを追加"):
-            handle_add_project()
-        elif choice.startswith("プロジェクト一覧"):
-            handle_list_projects()
+    if choice == "セットアップ実行":
+        messages = run_setup()
+        show_result_dialog(messages)
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
