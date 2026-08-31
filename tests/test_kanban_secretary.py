@@ -581,14 +581,16 @@ class SkillInstallerTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.targets = {
             "Claude Code": str(root / "claude" / "kanban-dispatch"),
-            "Codex": str(root / "codex" / "kanban-dispatch"),
+            "Codex": str(root / "agents" / "kanban-dispatch"),
         }
+        self.legacy_targets = {"Codex": str(root / "codex" / "kanban-dispatch")}
 
     def tearDown(self):
         self.temp.cleanup()
 
     def test_installs_rendered_skill_for_claude_and_codex(self):
         with mock.patch.object(self.setup_core, "SKILL_TARGETS", self.targets), \
+             mock.patch.object(self.setup_core, "LEGACY_SKILL_TARGETS", self.legacy_targets), \
              mock.patch.object(self.setup_core, "in_worktree", return_value=False):
             messages = self.setup_core.install_skills(force=True)
             status = self.setup_core.skill_status()
@@ -602,6 +604,7 @@ class SkillInstallerTests(unittest.TestCase):
             self.assertNotIn("__MORNKANBAN_VERSION__", content)
             self.assertIn(str(REPO), content)
             self.assertIn(self.setup_core.local_version(), content)
+            self.assertIn("name: kanban-dispatch", content)
             self.assertTrue((Path(directory) / "agents" / "openai.yaml").is_file())
 
 
@@ -735,7 +738,7 @@ class InstallUninstallTests(unittest.TestCase):
 
         self.assertFalse((self.home / ".local" / "bin" / "kanban").exists())
         self.assertFalse((self.home / ".claude" / "skills" / "kanban-dispatch").exists())
-        self.assertFalse((self.home / ".codex" / "skills" / "kanban-dispatch").exists())
+        self.assertFalse((self.home / ".agents" / "skills" / "kanban-dispatch").exists())
         # the repository checkout itself is untouched by uninstall
         self.assertTrue((self.dist / "kanban.sh").exists())
 
@@ -762,6 +765,18 @@ class InstallUninstallTests(unittest.TestCase):
         link = self.home / ".local" / "bin" / "kanban"
         self.assertTrue(link.is_symlink())
         self.assertEqual(os.path.realpath(str(link)), os.path.realpath(str(self.dist / "kanban.sh")))
+
+    def test_update_migrates_codex_skill_to_official_user_directory(self):
+        legacy = self.home / ".codex" / "skills" / "kanban-dispatch"
+        legacy.mkdir(parents=True)
+        (legacy / "SKILL.md").write_text("# MornKanban secretary\n", encoding="utf-8")
+
+        result = self._run("update")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(legacy.exists())
+        skill = self.home / ".agents" / "skills" / "kanban-dispatch" / "SKILL.md"
+        self.assertIn("name: kanban-dispatch", skill.read_text(encoding="utf-8"))
 
 
 class ArgumentForwardingTests(unittest.TestCase):

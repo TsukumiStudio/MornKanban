@@ -24,7 +24,7 @@ File-based kanban dispatch for agent workers. Keep the dialogue agent free: turn
 - `kanban --version` prints only the locally installed version, read from `VERSION` next to the resolved script — no network access.
 - `kanban version` prints the current version, the latest published version, and the comparison state (`up-to-date` / `update-available` / `local-ahead` / `unknown`). Because this repository currently has no tags or GitHub Releases, "latest published" means the raw `VERSION` file on `main` on GitHub. Set `KANBAN_VERSION_URL` (a `file://` URL works) to override the source, e.g. for tests.
 - `kanban update` reinstalls the CLI symlink, skills, and Claude secretary guard from the current checkout. It never runs Git or changes the checkout; update the repository separately when you explicitly want to.
-- `kanban install` / `kanban uninstall` (re)create or remove `~/.local/bin/kanban` and the Claude Code/Codex `kanban-dispatch` skills; uninstall only removes installer-managed files and leaves the repository checkout and all project boards untouched.
+- `kanban install` / `kanban uninstall` (re)create or remove `~/.local/bin/kanban` and the Claude Code/Codex `kanban-dispatch` skills. Codex installs it at `~/.agents/skills/kanban-dispatch`; install/update removes the old installer-managed `~/.codex/skills/kanban-dispatch`. Uninstall leaves the repository checkout and all project boards untouched.
 - The installed skill's rendered `SKILL.md` embeds both the resolved repository path and the distribution version at install/update time.
 - `kanban.sh` resolves its own real location by following symlinks (e.g. the `~/.local/bin/kanban` entry point), so these commands work whether invoked directly or through the installed symlink.
 

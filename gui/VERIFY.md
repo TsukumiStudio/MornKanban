@@ -6,6 +6,8 @@
 `VERSION` の内容を埋め込む。バージョン表示・比較は `setup_core.py` の
 `local_version()` / `fetch_latest_version()` / `compare_versions()` が担う。
 `run_update()` は現在のcheckoutから導入物だけを更新する。
+Codex版は公式のユーザースキル置き場 `~/.agents/skills/kanban-dispatch` へ導入し、
+旧 `~/.codex/skills/kanban-dispatch` の管理対象コピーはinstall/update時に削除する。
 
 `dashboard.py` はそのロジックを読み取り専用で使い、引数なしの
 `kanban-setup.sh` に枠付きの状態カードを描画し、`h`入力時だけ操作ガイドを開く。TTYでは色とUnicode、

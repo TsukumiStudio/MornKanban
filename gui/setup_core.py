@@ -17,6 +17,9 @@ KANBAN_LINK = os.path.join(LOCAL_BIN, "kanban")
 SKILL_SOURCE_DIR = os.path.join(REPO, "skills", "kanban-dispatch")
 SKILL_TARGETS = {
     "Claude Code": os.path.expanduser("~/.claude/skills/kanban-dispatch"),
+    "Codex": os.path.expanduser("~/.agents/skills/kanban-dispatch"),
+}
+LEGACY_SKILL_TARGETS = {
     "Codex": os.path.expanduser("~/.codex/skills/kanban-dispatch"),
 }
 TIMEOUT = 30
@@ -167,7 +170,7 @@ def install_skills(force=False):
     if in_worktree():
         return ["refusing to install from a kanban worktree; run from the real checkout"]
 
-    messages = []
+    messages = _remove_legacy_skills()
     source_skill = os.path.join(SKILL_SOURCE_DIR, "SKILL.md")
     source_openai = os.path.join(SKILL_SOURCE_DIR, "agents", "openai.yaml")
     for name, directory in SKILL_TARGETS.items():
@@ -350,13 +353,21 @@ def _uninstall_skill(name, directory):
         return "%s スキル: 確認/削除に失敗しました (%s)" % (name, e)
 
 
+def _remove_legacy_skills():
+    return [
+        _uninstall_skill("%s 旧kanban-dispatch" % name, directory)
+        for name, directory in LEGACY_SKILL_TARGETS.items()
+        if os.path.isfile(os.path.join(directory, "SKILL.md"))
+    ]
+
+
 def run_uninstall():
     if in_worktree():
         return ["refused: kanban worktree 内"]
     return [_uninstall_cli()] + [
         _uninstall_skill(name, directory)
         for name, directory in SKILL_TARGETS.items()
-    ] + [uninstall_claude_guard()]
+    ] + _remove_legacy_skills() + [uninstall_claude_guard()]
 
 
 # --- update (reinstall from current checkout) --------------------------------

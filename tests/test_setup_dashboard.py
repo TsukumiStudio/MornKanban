@@ -233,7 +233,7 @@ class CollectStatusFixtureTests(unittest.TestCase):
             self.setup_core, "SKILL_TARGETS",
             {
                 "Claude Code": str(self.home / "claude" / "kanban-dispatch"),
-                "Codex": str(self.home / "codex" / "kanban-dispatch"),
+                "Codex": str(self.home / "agents" / "kanban-dispatch"),
             },
         )
         self.local_bin_patch.start()
