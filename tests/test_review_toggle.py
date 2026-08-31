@@ -310,5 +310,98 @@ class ReviewToggleTests(unittest.TestCase):
         self.assertIn("review_source: project", text)
 
 
+    # -- contract: CLI / template / monitor / README surfaces stay in sync ---
+
+    def test_show_displays_effective_review_policy(self):
+        env = dict(self.env)
+        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
+        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_FORBIDDEN)
+        self._run("add", "card on", input_text="task", env=env)
+        self._run("add", "card off", "--no-review", input_text="task", env=env)
+        cards = sorted(glob.glob(str(self.repo / ".kanban" / "todo" / "*.md")))
+        self.assertEqual(len(cards), 2)
+        on_id = None
+        off_id = None
+        for f in cards:
+            text = Path(f).read_text()
+            cid = [ln for ln in text.splitlines() if ln.startswith("id:")][0].split(":", 1)[1].strip()
+            if "review_enabled: false" in text:
+                off_id = cid
+            else:
+                on_id = cid
+        self.assertIsNotNone(on_id)
+        self.assertIsNotNone(off_id)
+        r_on = self._run("show", on_id, env=env)
+        self.assertIn("Review: ON", r_on.stdout)
+        self.assertNotIn("Review: OFF", r_on.stdout)
+        r_off = self._run("show", off_id, env=env)
+        self.assertIn("Review: OFF (fast iteration)", r_off.stdout)
+
+    def test_add_usage_documents_review_flags(self):
+        env = dict(self.env)
+        r = self._run("add", env=env, check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--review", r.stderr)
+        self.assertIn("--no-review", r.stderr)
+
+    def test_init_template_documents_review_enabled(self):
+        kanban_md = (self.repo / ".kanban" / "KANBAN.md").read_text()
+        self.assertIn("review_enabled: true", kanban_md)
+        self.assertIn("review_enabled", kanban_md)
+        # Japanese explanation of the on/off semantics is part of the template.
+        self.assertIn("reviewer", kanban_md)
+
+    def test_run_startup_log_shows_effective_policy(self):
+        env = dict(self.env)
+        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
+        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_PASS)
+        r_on = self._run("run", "--once", env=env)
+        self.assertIn("Review: ON", r_on.stdout + r_on.stderr)
+
+        (self.repo / ".kanban" / "KANBAN.md").write_text(
+            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+                "review_enabled: true", "review_enabled: false"
+            )
+        )
+        env2 = dict(env)
+        env2["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_FORBIDDEN)
+        self._run("add", "card2", "--no-review", input_text="task", env=env2)
+        r_off = self._run("run", "--once", env=env2)
+        self.assertIn("Review: OFF (fast iteration", r_off.stdout + r_off.stderr)
+
+    def test_monitor_board_json_exposes_review_enabled(self):
+        import sys
+
+        sys.path.insert(0, str(REPO / "monitor"))
+        import importlib
+
+        board = importlib.import_module("board")
+        importlib.reload(board)
+
+        env = dict(self.env)
+        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
+        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_FORBIDDEN)
+        self._run("add", "card", "--no-review", input_text="task", env=env)
+        detail = board.board_detail(str(self.repo / ".kanban"))
+        matches = [c for c in detail["columns"]["todo"] if c.get("title") == "card"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["review_enabled"], "false")
+
+    def test_monitor_static_js_labels_review_state(self):
+        app_js = (REPO / "monitor" / "static" / "app.js").read_text()
+        self.assertIn('"Review: OFF"', app_js)
+        self.assertIn('"Review: ON"', app_js)
+        self.assertIn("review_enabled", app_js)
+
+    def test_readme_documents_review_toggle_and_show_label(self):
+        readme = (REPO / "README.md").read_text()
+        self.assertIn("review_enabled", readme)
+        self.assertIn("`kanban show`", readme)
+        self.assertIn("Review: ON", readme)
+        self.assertIn("Review: OFF (fast iteration)", readme)
+        self.assertIn("--review", readme)
+        self.assertIn("--no-review", readme)
+
+
 if __name__ == "__main__":
     unittest.main()
