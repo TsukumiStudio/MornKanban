@@ -1347,6 +1347,49 @@ merge_lock() { # merge_lock <acquire|release>
   fi
 }
 
+preserve_submodule_objects() { # preserve_submodule_objects <worktree-path> -> fetch worktree-local submodule commits into the shared modules/ store before the worktree is destroyed; no-op without submodules
+  local wt=$1 wt_git_dir modules_root common objdir sub_gitdir rel target head
+  [[ -d $wt ]] || return 0
+  wt_git_dir=$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 0
+  modules_root=$wt_git_dir/modules
+  [[ -d $modules_root ]] || return 0
+  common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir) || return 0
+  while IFS= read -r objdir; do
+    sub_gitdir=$(dirname "$objdir")
+    rel=${sub_gitdir#"$modules_root"/}
+    target=$common/modules/$rel
+    head=$(git -C "$sub_gitdir" rev-parse HEAD 2>/dev/null) || continue
+    mkdir -p "$target"
+    git init -q "$target" >/dev/null 2>&1 || true
+    # a dedicated namespaced ref keeps this fetch from touching whatever
+    # branch is checked out in an already-initialized shared submodule store
+    git -C "$sub_gitdir" update-ref "refs/kanban-preserve/$head" HEAD 2>/dev/null || continue
+    git -C "$target" fetch -q "$sub_gitdir" "+refs/kanban-preserve/$head:refs/kanban-preserve/$head" 2>/dev/null || true
+  done < <(find "$modules_root" -type d -name objects 2>/dev/null)
+}
+
+verify_submodule_gitlinks() { # verify_submodule_gitlinks <topic-branch> <base-branch> -> 0 if every gitlink topic changed vs base is reachable in the shared modules/ store; else 1 with VERIFY_SUBMODULE_REASON set
+  local topic=$1 base=$2 mb common sha path
+  VERIFY_SUBMODULE_REASON=""
+  mb=$(git -C "$ROOT" merge-base "$topic" "$base" 2>/dev/null) || return 0
+  common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir) || return 0
+  while IFS=$'\t' read -r sha path; do
+    [[ -n $sha && -n $path ]] || continue
+    # module directory name mirrors the submodule path (git's default when
+    # `submodule add` is called without --name, the only form this project uses)
+    if ! git -C "$common/modules/$path" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+      VERIFY_SUBMODULE_REASON="submodule '$path' gitlink $sha is unreachable in the shared object store ($common/modules/$path)"
+      return 1
+    fi
+  done < <(git -C "$ROOT" diff --raw --no-abbrev "$mb" "$topic" -- 2>/dev/null | awk '$2=="160000"{print $4"\t"$NF}')
+  return 0
+}
+
+kanban_remove_worktree() { # kanban_remove_worktree <worktree-path> -> preserve submodule objects, then remove
+  preserve_submodule_objects "$1"
+  git -C "$ROOT" worktree remove --force "$1" 2>/dev/null || true
+}
+
 review_prompt_for_resolve() { # review_prompt_for_resolve <card> <card_branch> <base_branch>
   local file=$1 card_branch=$2 base_branch=$3
   cat <<EOF
@@ -1459,7 +1502,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   [[ $file == "$KB/resolving/"* ]] || move_card "$file" resolving >/dev/null
   file=$KB/resolving/$(basename "$file")
   fm_set "$file" resume_phase ""
-  [[ -n $card_wt ]] && git -C "$ROOT" worktree remove --force "$card_wt" 2>/dev/null || true
+  [[ -n $card_wt ]] && kanban_remove_worktree "$card_wt"
 
   # Resuming a review-infra-blocked resolve card (see cmd_resume): the
   # resolve worktree/branch already survived the block, reuse them instead
@@ -1483,7 +1526,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
 
   if $initial_merge_error; then
     echo "resolve merge failed without producing conflict entries; branches are kept" | append_history "$file" "error"
-    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    kanban_remove_worktree "$resolve_wt"
     fail_card "$file" merge >/dev/null
     echo "$tag FAIL resolve merge setup failed -> failed (branches kept)"
     notify_result failed "$title"
@@ -1584,7 +1627,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   if ! $resolved; then
     printf 'conflict files: %s\nresolve branch %s and original card branch %s are kept for manual inspection.\n' \
       "$conflict_files" "$resolve_branch" "$card_branch" | append_history "$file" "gave up (conflict unresolved)"
-    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    kanban_remove_worktree "$resolve_wt"
     fail_card "$file" resolve >/dev/null
     if [[ $review_enabled == true ]]; then
       echo "$tag FAIL resolve score=$ATT_SCORE attempts exhausted -> failed (branches $resolve_branch, $card_branch kept)"
@@ -1609,9 +1652,19 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     notify_result blocked "$title"
     return
   fi
+  preserve_submodule_objects "$resolve_wt"
+  if ! verify_submodule_gitlinks "$resolve_branch" "$base_branch"; then
+    merge_lock release
+    printf '%s\nresolve branch %s and original card branch %s are kept for manual inspection.\n' \
+      "$VERIFY_SUBMODULE_REASON" "$resolve_branch" "$card_branch" | append_history "$file" "submodule objects unreachable"
+    fail_card "$file" merge >/dev/null
+    echo "$tag FAIL submodule gitlink unreachable -> failed (branches $resolve_branch, $card_branch kept)"
+    notify_result failed "$title"
+    return
+  fi
   if git -C "$ROOT" merge-base --is-ancestor "$resolve_branch" HEAD 2>/dev/null; then
     merge_lock release
-    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    kanban_remove_worktree "$resolve_wt"
     git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
     fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
     echo "merge was already present on $base_branch" | append_history "$file" "merged"
@@ -1625,7 +1678,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     merge_secs=$((SECONDS - merge_t0))
     fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
     echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
-    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    kanban_remove_worktree "$resolve_wt"
     git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
     move_card "$file" done >/dev/null
@@ -1638,7 +1691,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   else
     git -C "$ROOT" merge --abort 2>/dev/null || true
     merge_lock release
-    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    kanban_remove_worktree "$resolve_wt"
     local resolve_note
     if [[ $review_enabled == true ]]; then resolve_note="resolve passed review (score $ATT_SCORE)"; else resolve_note="resolve completed (review disabled)"; fi
     printf '%s but merging %s into %s failed; branches %s and %s kept for manual merge.\n' \
@@ -1798,7 +1851,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         fm_set "$file" blocked_kind "$blocked_kind"
         printf 'worker stopped without consuming an attempt (kind: %s):%s\nworktree is discarded.\n' \
           "$blocked_kind" "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
-        git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+        kanban_remove_worktree "$wt"
         git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
         move_card "$file" blocked >/dev/null
         echo "$tag BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
@@ -1824,7 +1877,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         git -C "$wt" add -A
         git -C "$wt" commit -q --allow-empty -m "kanban: $title (failed attempt $attempts)"
         echo "worker exited with status $ATT_WORKER_STATUS; reviewer was not run" | append_history "$file" "worker failure"
-        git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+        kanban_remove_worktree "$wt"
         fail_card "$file" worker >/dev/null
         echo "$tag FAIL worker exit=$ATT_WORKER_STATUS -> failed (branch $branch kept; review skipped)"
         notify_result failed "$title"
@@ -1883,7 +1936,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
 
   if ! $passed; then
     printf 'branch %s is kept for manual inspection.\n' "$branch" | append_history "$file" "gave up"
-    git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+    kanban_remove_worktree "$wt"
     if [[ $review_enabled == true || -n ${ATT_REPORT_ERROR:-} ]]; then
       fail_card "$file" review >/dev/null
       echo "$tag FAIL outcome=${ATT_OUTCOME:-legacy} score=$ATT_SCORE attempts exhausted -> failed (branch $branch kept)"
@@ -1909,9 +1962,19 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     notify_result blocked "$title"
     return
   fi
+  preserve_submodule_objects "$wt"
+  if ! verify_submodule_gitlinks "$branch" "$base_branch"; then
+    merge_lock release
+    printf '%s\nbranch %s is kept for manual inspection.\n' "$VERIFY_SUBMODULE_REASON" "$branch" |
+      append_history "$file" "submodule objects unreachable"
+    fail_card "$file" merge >/dev/null
+    echo "$tag FAIL submodule gitlink unreachable -> failed (branch $branch kept)"
+    notify_result failed "$title"
+    return
+  fi
   if git -C "$ROOT" merge-base --is-ancestor "$branch" HEAD 2>/dev/null; then
     merge_lock release
-    git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+    kanban_remove_worktree "$wt"
     git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
     fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
@@ -1926,7 +1989,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     merge_secs=$((SECONDS - merge_t0))
     fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
     echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
-    git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+    kanban_remove_worktree "$wt"
     git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
     move_card "$file" done >/dev/null
@@ -2078,7 +2141,7 @@ cmd_run() {
       local bid
       bid=$(fm_get "$orphan" id "?")
       if [[ $bid != "?" ]]; then
-        git -C "$ROOT" worktree remove --force "$KB/wt/$bid" 2>/dev/null || true
+        kanban_remove_worktree "$KB/wt/$bid"
         git -C "$ROOT" branch -q -D "kanban/$bid" 2>/dev/null || true
       fi
       move_card "$orphan" todo >/dev/null
