@@ -279,6 +279,8 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("KANBAN_REVIEW_CMD=", log)
         self.assertIn("KANBAN_RESOLVE_CMD=", log)
         self.assertIn("KANBAN_HERDR_ROLE=resolver", log)
+        self.assertIn("KANBAN_OPERATION_CMD=", log)
+        self.assertIn("KANBAN_HERDR_ROLE=operator", log)
         self.assertIn("KANBAN_NOTIFY_CMD=", log)
         self.assertIn("herdr-notify-secretary.sh", log)
         self.assertIn("KANBAN_HERDR_SECRETARY=secretary-project", log)
@@ -312,6 +314,32 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("agent prompt secretary-project", notification)
         self.assertIn("dispatcher が終了コード 42", notification)
         self.assertIn(str(dispatcher_log), notification)
+
+    def test_dispatcher_uses_one_validated_worker_snapshot_for_its_lifetime(self):
+        bootstrap = self.run_secretary("bootstrap", self.project)
+        self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
+        probe = self.root / "probe-kanban.sh"
+        probe.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "case \"$KANBAN_WORKER_CMD\" in\n"
+            "  \"$EXPECTED_ROOT\"/.kanban/wt/runtime.*/herdr-agent-worker.sh) ;;\n"
+            "  *) echo \"not a runtime snapshot: $KANBAN_WORKER_CMD\" >&2; exit 9 ;;\n"
+            "esac\n"
+            "bash -n \"$KANBAN_WORKER_CMD\"\n"
+            "test -f \"$(dirname \"$KANBAN_WORKER_CMD\")/activity_log.py\"\n"
+            "printf 'runtime=%s\\n' \"$(dirname \"$KANBAN_WORKER_CMD\")\"\n",
+            encoding="utf-8",
+        )
+        probe.chmod(0o755)
+        env = self.env.copy()
+        env.update({"KANBAN_BIN": str(probe), "EXPECTED_ROOT": str(self.project)})
+
+        result = self.run_secretary("__run-dispatcher-pane", self.project, env=env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        runtime_line = next(line for line in result.stdout.splitlines() if line.startswith("runtime="))
+        self.assertFalse(Path(runtime_line.removeprefix("runtime=")).exists())
 
     def test_dispatch_refuses_to_steal_secretary_name_owned_by_another_pane(self):
         self.run_secretary("bootstrap", self.project)
@@ -1536,6 +1564,55 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertIn("phase durations: worker=", card_text)
         self.assertIn("phase durations: merge=", card_text)
 
+    @FULL_ONLY
+    def test_operator_card_runs_once_in_main_checkout_without_review_or_merge(self):
+        evidence = Path(self.temp.name) / "operator-evidence.txt"
+        operator = self._write_script(
+            "operator.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                test "$(pwd -P)" = "$(cd "$KANBAN_TEST_MAIN_ROOT" && pwd -P)"
+                printf '%s\n' "$KANBAN_TEST_MAIN_ROOT" > "$KANBAN_TEST_EVIDENCE"
+                """
+            ),
+        )
+        added = subprocess.run(
+            [str(KANBAN_SH), "add", "push and deploy", "--operate"],
+            input="Push main and deploy the verified site.",
+            cwd=self.project,
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(added.returncode, 0, added.stderr)
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": "/usr/bin/false",
+                "KANBAN_OPERATION_CMD": str(operator),
+                "KANBAN_REVIEW_ENABLED": "false",
+                "KANBAN_TEST_EVIDENCE": str(evidence),
+                "KANBAN_JOBS": "4",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(evidence.exists(), result.stdout + result.stderr)
+        self.assertEqual(evidence.read_text(encoding="utf-8").strip(), str(self.project))
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        text = done[0].read_text(encoding="utf-8")
+        self.assertIn("task_kind: operation", text)
+        self.assertIn("review_enabled: false", text)
+        self.assertIn("review_source: operation", text)
+        self.assertIn("attempts: 1", text)
+        self.assertNotIn("kanban/", self._git("branch", "--show-current").stdout)
+
     def _seed_conflict(self):
         (self.project / "file.txt").write_text("base\n", encoding="utf-8")
         self._git("add", "-A")
@@ -2218,6 +2295,7 @@ class SecretaryBoardAdminContractTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("kanban remove", text, str(path))
             self.assertIn("kanban config", text, str(path))
+            self.assertIn("--operate", text, str(path))
         self.assertIn(
             "todo以外を拒否", (REPO / "kanban.sh").read_text(encoding="utf-8")
         )
@@ -2321,9 +2399,10 @@ class TestTierContractTests(unittest.TestCase):
         "test_resolve_max_attempts_exceeded_moves_to_failed_with_history",
         "test_resolve_cmd_receives_card_routing_and_conflict_context",
         "test_resolving_orphan_is_reclaimed_and_not_double_processed",
+        "test_operator_card_runs_once_in_main_checkout_without_review_or_merge",
     }
 
-    def test_full_only_membership_is_exactly_the_documented_six(self):
+    def test_full_only_membership_is_exactly_the_documented_seven(self):
         # FULL_ONLY's skipIf condition is frozen at decoration time (module
         # import), so re-patching KANBAN_TEST_TIER at test time cannot
         # retroactively toggle __unittest_skip__. Read the source instead:

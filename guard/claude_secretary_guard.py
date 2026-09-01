@@ -17,8 +17,8 @@ GUARD_MATCHER below). Reads the standard hook JSON on stdin and decides:
 Per-tool policy inside a secretary pane:
   - Task/Agent (in-process subagent/collaboration delegation) -> always deny.
   - Edit/Write/NotebookEdit (direct file mutation) -> always deny. Board
-    administration goes through validated `kanban add/remove/config` CLI
-    operations (Bash invocations), never through these tools.
+    administration goes through the `kanban` CLI (Bash invocations), never
+    through these tools.
   - Bash -> classified by guard/command_classify.py, an allowlist (not a
     denylist) covering read-only git/inspection commands and the
     `kanban`/`kanban-secretary.sh` subcommands a secretary is allowed to
@@ -53,7 +53,7 @@ DENY_EDIT_TOOLS = {"Edit", "Write", "NotebookEdit"}
 BASH_TOOLS = {"Bash"}
 
 CARD_HINT = (
-    'board変更は `kanban add|remove|config ...` だけを使い、'
+    'board変更は `kanban ...` を使い、'
     "`kanban-secretary.sh dispatch` で visible Herdr pane へ渡すこと。"
 )
 

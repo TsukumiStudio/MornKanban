@@ -12,12 +12,12 @@
 #   cwd    : the card's worktree (kanban.sh cd's before invoking us)
 #   stdout : agent transcript tail, recorded into the card History
 #
-#   KANBAN_HERDR_ROLE : "worker" (default), "reviewer", or "resolver"
+#   KANBAN_HERDR_ROLE : "worker" (default), "reviewer", "resolver", or "operator"
 #     (pane/agent name)
 #   KANBAN_CARD_BACKEND / KANBAN_REVIEWER / KANBAN_RESOLVER : card's backend
 #     routing, from kanban.sh (auto|claude|codex); "auto" resolves via
 #     KANBAN_BACKEND_ORDER the same way kanban.sh's resolve_backend() does.
-#   KANBAN_CARD_EFFORT : optional card-level effort shared by all three roles.
+#   KANBAN_CARD_EFFORT : optional card-level effort shared by all roles.
 set -euo pipefail
 
 if [[ ${HERDR_ENV:-} != 1 ]]; then

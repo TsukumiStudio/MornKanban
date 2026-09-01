@@ -347,6 +347,12 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - 修正は診断後の別カード。ユーザーが明示的に同時修正を求めた時だけ通常の実装カードに含める
 - 5分時点で結論をまとめ、10分以内に終わらない場合は途中成果を残して `BLOCKED: scope/timebox` とする
 
+## 外部操作カード
+
+- ユーザーが明示したpush/deploy/publish等は `kanban add --operate` で起票する
+- operatorはworktreeではなく本体checkoutで1回だけ動き、mergeと直列化され、reviewer審査を行わない
+- operatorはカードに明記された外部操作だけを行う。実装変更や無関係なcommitへ広げない
+
 ## 秘書契約 (最重要)
 
 - **秘書はファイル重複・依存順序・実行中カードとの競合を理由に起票を保留しない。**
@@ -410,6 +416,7 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 - カード追加後は `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
 - worker並列数は既定4。`jobs:` / `KANBAN_JOBS` / `-j` は正の整数ならMornKanban側の上限なし（実機・API・Herdrの容量だけが制約）
 - 秘書はユーザー指示による運用変更を `kanban config set jobs|default_backend|default_model|reviewer|review_model|resolver|resolve_model <value>` で行ってよい。project/boardファイルを直接編集しない
+- 秘書は `kanban` CLI の全コマンドを実行してよい。push/deploy等の直接実行はせず、`--operate` カードへ渡す
 - 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはtodo以外を拒否する
 - Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
 - `dispatcher pane started` はペインへの起動要求が通っただけ。`dispatcher_failed` 通知時は `.kanban/wt/dispatcher.log` を読み、実際の終了理由を報告する。復旧目的でも `git init` / `commit` 等を勝手に行わない
@@ -421,8 +428,8 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 **実装しない。検証しない。commit/push/tag しない。in-process agent を起動しない。カードを起票して visible Herdr へ dispatch する。**
 
 - 許可: KANBAN.md/README/board の読み取り、read-only git (status/log/diff/show 等)、
-  `kanban add/remove/config/show/list/init/send`、`kanban-secretary.sh bootstrap/dispatch/end`、ユーザーへの報告
-- 禁止: project/boardファイルの直接編集・作成・削除（raw rmを含む）、build/test/lint/formatter/server 起動、bare `kanban run`、
+  `kanban` CLI の全コマンド、`kanban-secretary.sh bootstrap/dispatch/end`、ユーザーへの報告
+- 禁止: project/boardファイルの直接編集・作成・削除（raw rmを含む）、build/test/lint/formatter/server 起動、
   headless agent CLI (`claude -p`/`codex exec`)、Claude/Codex の in-process Agent/Task/subagent、
   git の変更系全般 (add/commit/push/merge/rebase/reset/checkout/branch作成削除/tag/worktree等)、
   GitHub/GitLab 等の外部変更 (push/release/PR/issue/tag publish)、package publish、deploy
@@ -439,7 +446,7 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 **一切使わない**。visible Herdr pane を経由しない実装・調査・検証・レビュー・
 競合解決は、カードもワークツリーも board 履歴も残らず契約違反になる。
 
-- 許可: `.kanban/KANBAN.md` とボードの確認、`kanban add` / `kanban remove` / `kanban config` / `kanban send`、
+- 許可: `.kanban/KANBAN.md` とボードの確認、全ての `kanban` CLI操作、
   `kanban-secretary.sh dispatch` / `dispatch --once`、ユーザーへの報告
 - 禁止: `Agent`/`Task` (Claude Code)、collaboration/subagent 起動 (Codex)、
   `herdr-agent-worker.sh` 経由の visible pane を開かないその他の in-process delegation
@@ -451,7 +458,7 @@ EOF
 }
 
 add_usage() {
-  echo 'usage: kanban add "title" [-b claude|codex|auto] [-m model] [-e effort] [--depends-on card-id] [-t threshold] [--review|--no-review] [--diagnose] < description'
+  echo 'usage: kanban add "title" [-b claude|codex|auto] [-m model] [-e effort] [--depends-on card-id] [-t threshold] [--review|--no-review] [--diagnose|--operate] < description'
 }
 
 cmd_add() {
@@ -472,7 +479,8 @@ cmd_add() {
       -t|--threshold) [[ $# -ge 2 ]] || die "$1 requires a value"; threshold=$2; shift 2 ;;
       --review) review_enabled=true; review_source=card; shift ;;
       --no-review) review_enabled=false; review_source=card; shift ;;
-      --diagnose) task_kind=diagnose; shift ;;
+      --diagnose) [[ $task_kind == implementation ]] || die "only one task kind may be selected"; task_kind=diagnose; shift ;;
+      --operate) [[ $task_kind == implementation ]] || die "only one task kind may be selected"; task_kind=operation; shift ;;
       --) shift; [[ $# -eq 1 && -z $title ]] || die "expected exactly one title after --"; title=$1; shift ;;
       -*) die "unknown option for kanban add: $1" ;;
       *) [[ -z $title ]] || die "unexpected argument: $1 (title is already set)"; title=$1; shift ;;
@@ -493,6 +501,10 @@ cmd_add() {
   if [[ $task_kind == diagnose && $review_enabled == auto ]]; then
     review_enabled=false
     review_source=diagnose
+  fi
+  if [[ $task_kind == operation ]]; then
+    review_enabled=false
+    review_source=operation
   fi
   local desc
   if [[ ! -t 0 ]]; then desc=$(cat); else desc=$title; fi
@@ -606,6 +618,15 @@ DIAGNOSIS-ONLY TIMEBOX CONTRACT
 - Do not add related benchmarks, UI, refactors, mutation tests, or fixes unless this card explicitly asks for them.
 
 EOF
+  elif [[ $kind == operation ]]; then
+    cat <<'EOF'
+OPERATOR CONTRACT
+- You run in the project's main checkout, not a card worktree.
+- Perform only the Git, publish, deploy, or other external mutation explicitly authorized by this card.
+- Do not change implementation or create unrelated commits. Verify and report the actual remote/deploy result.
+- Never ask an interactive question. If authority or required state is missing, make the answer's first line: BLOCKED: <reason>
+
+EOF
   fi
   card_task "$file"
   feedback=$(latest_rework_feedback "$file")
@@ -697,6 +718,11 @@ resolve_cmd() { # resolve_cmd <card-backend> <card-model> <card-effort> -> resol
     codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}${effort:+ -c model_reasoning_effort=$effort}" ;;
     *) die "unknown resolver backend: $b" ;;
   esac
+}
+
+operation_cmd() { # operation_cmd <card-backend> <card-model> <card-effort>
+  if [[ -n ${KANBAN_OPERATION_CMD:-} ]]; then echo "$KANBAN_OPERATION_CMD"; return; fi
+  worker_cmd "$@"
 }
 
 detect_blocked() { # detect_blocked <worker-output> -> sets BLOCKED_REASON (empty = not blocked)
@@ -888,10 +914,14 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   effort=$(fm_get "$file" effort "")
   validate_effort "$effort"
   title=$(fm_get "$file" title "")
-  wcmd=$(worker_cmd "$backend" "$model" "$effort")
+  task_kind=$(fm_get "$file" task_kind implementation)
+  if [[ $task_kind == operation ]]; then
+    wcmd=$(operation_cmd "$backend" "$model" "$effort")
+  else
+    wcmd=$(worker_cmd "$backend" "$model" "$effort")
+  fi
   retries=$(fm_get "$file" worker_infra_retries 0)
   attempt_label=$(($(fm_get "$file" attempts 0) + 1))
-  task_kind=$(fm_get "$file" task_kind implementation)
   timebox_secs=""
   if [[ $task_kind == diagnose ]]; then
     timebox_secs=$(($(fm_get "$file" diagnosis_max_minutes "$DEFAULT_DIAGNOSIS_MAX_MINUTES") * 60))
@@ -1176,7 +1206,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   fi
 }
 
-process_card_seq() { # non-git fallback: run in place, retry via todo
+process_card_seq() { # in-place execution: non-git fallback and serialized operation cards
   local file=$1
   local title threshold max_attempts attempts review_infra_max review_enabled review_source
   title=$(fm_get "$file" title "?")
@@ -1556,7 +1586,11 @@ cmd_run() {
           done
         fi
       }
-      if [[ -n ${KANBAN_DEBUG:-} ]]; then
+      if [[ $(fm_get "$picked" task_kind implementation) == operation ]]; then
+        ( merge_lock acquire
+          trap 'st=$?; merge_lock release; job_crash_net "$st" "$picked"' EXIT
+          process_card_seq "$picked" ) &
+      elif [[ -n ${KANBAN_DEBUG:-} ]]; then
         ( exec 2>"$KB/wt/job.$(basename "$picked").trace"; set -x
           trap 'job_crash_net $? "$picked"; echo "JOB EXIT status=$?" >&2' EXIT
           process_card_wt "$picked" "$base_branch" ) &

@@ -367,7 +367,7 @@ EOF
 #     for worker, reviewer, and resolver, on both Claude and Codex -----------
 test_role_backend_matrix() {
   local role backend wt
-  for role in worker reviewer resolver; do
+  for role in worker reviewer resolver operator; do
     for backend in claude codex; do
       note "scenario: role=$role backend=$backend transient idle then late answer"
       new_scenario

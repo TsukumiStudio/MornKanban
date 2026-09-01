@@ -93,10 +93,15 @@ While secretary mode is active:
    decision in the card when policy already answers it; otherwise require
    `BLOCKED: <needed decision and reason>` instead of `AskUserQuestion` or a
    numbered choice UI.
+   When the user explicitly requests push, deploy, publish, or another
+   external mutation, file it with `kanban add --operate`. The operator runs
+   once in the main checkout, serialized with merges, and performs only the
+   external action authorized by that card; never give this work to a normal
+   worktree worker.
 4. Start the visible dispatcher with
    `__MORNKANBAN_REPO__/kanban-secretary.sh dispatch "$PWD"`. The helper opens
    the dispatcher below the secretary, places AI panes on the right and stacks
-   additional AIs downward, and binds the visible worker, reviewer, resolver,
+   additional AIs downward, and binds the visible worker, reviewer, resolver, operator,
    and secretary notification commands. Its fixed status rows show the live
    AI backend/model/effort; `unknown` means the agent inherited a value the
    wrapper cannot observe. Do not replace it with bare
@@ -134,8 +139,8 @@ run `kanban resume <id>`. Never select an interactive option for the user.
 ## What a secretary pane may and may not do
 
 Allowed: reading `.kanban/KANBAN.md`, the README contract, and board/card
-files; read-only git (`status`/`log`/`diff`/`show`/`branch`/...);
-`kanban add`/`remove`/`config set`/`show`/`list`/`init`/`send`;
+files; read-only git (`status`/`log`/`diff`/`show`/`branch`/...); every
+`kanban` CLI command;
 `kanban-secretary.sh
 bootstrap`/`dispatch`/`end`; replying to the user.
 
@@ -148,12 +153,11 @@ dispatcher start. Per-card backend/model/effort still belongs on
 `kanban add -b/-m/-e`. Do not change these settings opportunistically.
 
 Forbidden, even if the user asks for the work directly: direct project or
-board file write/edit/delete (including raw `rm`), build/test/lint/format/server commands, bare `kanban
-run`, headless agent CLIs (`claude -p`, `codex exec`), Claude/Codex
+board file write/edit/delete (including raw `rm`), build/test/lint/format/server commands, headless agent CLIs (`claude -p`, `codex exec`), Claude/Codex
 in-process Agent/Task/subagent/collaboration tools, any git mutation
 (add/commit/push/merge/rebase/reset/checkout/branch/tag/worktree/...), and
 any external change (`gh`/GitHub/GitLab publish, package publish, deploy).
-Turn the request into a card instead.
+Turn external changes into an `--operate` card instead.
 
 ## Forbidden: in-process delegation from this pane
 
@@ -166,7 +170,7 @@ close — it produces work with no card, no worktree, no board history, and no
 visible Herdr pane the user can watch or interrupt.
 
 - **Allowed** in this pane: reading `.kanban/KANBAN.md` and the board to
-  decide how to split work; `kanban add` / `kanban remove` / `kanban config` / `kanban send`;
+  decide how to split work; every `kanban` CLI command;
   `kanban-secretary.sh dispatch` / `dispatch --once`; reporting to the user.
 - **Forbidden** in this pane: `Agent`/`Task` (Claude Code), collaboration or
   subagent spawning (Codex), or any other in-process delegation that does not

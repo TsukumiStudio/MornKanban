@@ -46,9 +46,11 @@ class TestCommandClassify(unittest.TestCase):
         allowed, reason = classify.classify(cmd)
         self.assertFalse(allowed, "expected deny for %r, got allow: %s" % (cmd, reason))
 
-    # allowed: card creation / board confirmation / dispatcher
-    def test_allows_kanban_card_and_board_commands(self):
+    # The secretary may use the whole kanban CLI; restrictions still apply
+    # to every non-kanban command in the same shell invocation.
+    def test_allows_all_kanban_commands(self):
         for cmd in [
+            "kanban",
             'kanban add "title"',
             "kanban show 123",
             "kanban list",
@@ -58,6 +60,13 @@ class TestCommandClassify(unittest.TestCase):
             "kanban remove 20260901-172101-5531",
             "kanban config set jobs 8",
             "kanban config set default_model gpt-5.6-sol",
+            "kanban resume 20260901-200631-30037",
+            "kanban run --once",
+            "kanban install",
+            "kanban update",
+            "kanban uninstall",
+            "kanban future-command --future-option",
+            "./kanban.sh resume 20260901-200631-30037",
         ]:
             self.allow(cmd)
 
@@ -120,8 +129,6 @@ class TestCommandClassify(unittest.TestCase):
     def test_denies_headless_agent_cli(self):
         self.deny("claude -p 'do it'")
         self.deny("codex exec 'do it'")
-        self.deny("kanban run")
-        self.deny("kanban run --once")
 
     def test_denies_external_publish(self):
         self.deny("gh pr create")
@@ -222,9 +229,10 @@ class TestGuardDecision(TempProjectMixin, unittest.TestCase):
         self.assertTrue(deny)
         self.assertEqual(category, "bash")
 
-    def test_allows_kanban_add_bash_in_secretary_pane(self):
-        deny, _, _, _ = self.decide("Bash", {"command": 'kanban add "t"'}, self.secretary_env)
-        self.assertFalse(deny)
+    def test_allows_any_kanban_bash_in_secretary_pane(self):
+        for command in ('kanban add "t"', "kanban resume card", "kanban run --once"):
+            deny, _, _, _ = self.decide("Bash", {"command": command}, self.secretary_env)
+            self.assertFalse(deny, command)
 
     def test_allows_readonly_tools_untouched(self):
         for tool in ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite"]:

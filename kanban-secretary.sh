@@ -134,7 +134,7 @@ marker.clear_marker(sys.argv[2])
 }
 
 run_dispatcher_pane() {
-  local once=false target=$PWD root log status notify_error
+  local once=false target=$PWD root log status notify_error runtime_dir runtime_worker
   local -a dispatcher_cmd
   if [[ ${1:-} == --once ]]; then once=true; shift; fi
   if [[ $# -gt 0 ]]; then target=$1; shift; fi
@@ -142,6 +142,19 @@ run_dispatcher_pane() {
   root=$(kanban_project_root "$target") || die "no .kanban directory found"
   log=$root/.kanban/wt/dispatcher.log
   mkdir -p "$(dirname "$log")"
+
+  # One dispatcher must use one known-good wrapper version. The source
+  # checkout may be updated while another project's dispatcher is alive.
+  runtime_dir=$(mktemp -d "$root/.kanban/wt/runtime.XXXXXX")
+  trap "rm -rf $(shell_quote "$runtime_dir")" EXIT
+  cp "$REPO/herdr-agent-worker.sh" "$REPO/activity_log.py" "$runtime_dir/"
+  runtime_worker=$runtime_dir/herdr-agent-worker.sh
+  chmod +x "$runtime_worker"
+  bash -n "$runtime_worker" || die "worker runtime snapshot failed bash -n: $runtime_worker"
+  export KANBAN_WORKER_CMD=$runtime_worker
+  export KANBAN_REVIEW_CMD="env KANBAN_HERDR_ROLE=reviewer $runtime_worker"
+  export KANBAN_RESOLVE_CMD="env KANBAN_HERDR_ROLE=resolver $runtime_worker"
+  export KANBAN_OPERATION_CMD="env KANBAN_HERDR_ROLE=operator $runtime_worker"
 
   dispatcher_cmd=("$KANBAN_BIN" run)
   $once && dispatcher_cmd+=(--once)
@@ -182,6 +195,7 @@ dispatch() {
   command="$command KANBAN_WORKER_CMD=$(shell_quote "$REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_REVIEW_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=reviewer $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_RESOLVE_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=resolver $REPO/herdr-agent-worker.sh")"
+  command="$command KANBAN_OPERATION_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=operator $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_NOTIFY_CMD=$(shell_quote "$REPO/herdr-notify-secretary.sh")"
   command="$command KANBAN_ACTIVITY_LOG=$(shell_quote "$root/.kanban/activity.jsonl")"
   command="$command KANBAN_HERDR_SECRETARY=$(shell_quote "$SECRETARY_NAME")"

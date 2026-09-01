@@ -1,7 +1,7 @@
 """Fail-closed classifier for Bash commands issued from a secretary pane.
 
-Secretary panes may only: read policy/board files, run validated `kanban`
-add/remove/config/show/list/init/version/send operations, run `kanban-secretary.sh`
+Secretary panes may only: read policy/board files, run `kanban` operations,
+run `kanban-secretary.sh`
 bootstrap/dispatch/end, and run a small set of read-only inspection commands
 (read-only git, cat/ls/grep/find/... with no write side effect). Every other
 command - implementation, verification, git mutation, GitHub/GitLab
@@ -49,11 +49,6 @@ _GIT_WRITE_FLAGS = {
     "-d", "-D", "-m", "-M", "-c", "-C", "-f", "--force",
     "--delete", "--set-upstream", "--set-upstream-to", "add", "rm",
     "prune", "set-url", "rename",
-}
-
-_KANBAN_ALLOWED_SUBCOMMANDS = {
-    "init", "add", "remove", "config", "show", "list", "ls", "send", "version", "--version",
-    "projects",
 }
 
 _KANBAN_SECRETARY_SUBCOMMANDS = {"bootstrap", "dispatch", "end"}
@@ -122,12 +117,7 @@ def _classify_argv(argv):
         return True, "read-only git %s" % sub
 
     if name in ("kanban", "kanban.sh"):
-        if len(argv) < 2:
-            return False, "kanban with no subcommand"
-        sub = argv[1]
-        if sub not in _KANBAN_ALLOWED_SUBCOMMANDS:
-            return False, "kanban mutation subcommand: %s (headless run/install is not the secretary path)" % sub
-        return True, "kanban %s" % sub
+        return True, "kanban command"
 
     if name == "kanban-secretary.sh":
         sub = argv[1] if len(argv) > 1 else ""
