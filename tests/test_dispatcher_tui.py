@@ -20,14 +20,15 @@ class DispatcherTuiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.root)], check=True)
         for state in dispatcher_tui.STATES:
-            (self.root / ".kanban" / state).mkdir(parents=True, exist_ok=True)
+            (self.root / ".git" / "kanban" / state).mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         self.temp.cleanup()
 
     def card(self, state, card_id, title, attempts=1, max_attempts=3):
-        path = self.root / ".kanban" / state / (card_id + ".md")
+        path = self.root / ".git" / "kanban" / state / (card_id + ".md")
         path.write_text(
             "---\nid: %s\ntitle: %s\nattempts: %s\nmax_attempts: %s\n---\n"
             % (card_id, title, attempts, max_attempts),
@@ -56,7 +57,7 @@ class DispatcherTuiTests(unittest.TestCase):
 
     def test_active_row_shows_live_agent_routing_and_drops_it_after_exit(self):
         self.card("doing", "c1", "表示を修正")
-        activity = self.root / ".kanban" / "activity.jsonl"
+        activity = self.root / ".git" / "kanban" / "activity.jsonl"
         started = {
             "event": "agent_started",
             "card_id": "c1",
@@ -96,7 +97,7 @@ class DispatcherTuiTests(unittest.TestCase):
     def test_board_move_becomes_a_timestamped_transition(self):
         card = self.card("todo", "c1", "表示を修正")
         before = dispatcher_tui.scan_board(str(self.root))
-        card.rename(self.root / ".kanban" / "doing" / card.name)
+        card.rename(self.root / ".git" / "kanban" / "doing" / card.name)
         after = dispatcher_tui.scan_board(str(self.root))
 
         moves = dispatcher_tui.diff_board(
@@ -112,7 +113,7 @@ class DispatcherTuiTests(unittest.TestCase):
         self.assertEqual(moves[0]["title"], "表示を修正")
 
     def test_non_tty_mode_preserves_output_log_and_exit_status(self):
-        log = self.root / ".kanban" / "wt" / "dispatcher.log"
+        log = self.root / ".git" / "kanban" / "wt" / "dispatcher.log"
         result = subprocess.run(
             [
                 sys.executable,
@@ -136,7 +137,7 @@ class DispatcherTuiTests(unittest.TestCase):
         self.assertIn("dispatcher child output", log.read_text(encoding="utf-8"))
 
     def test_terminating_plain_tui_also_terminates_dispatcher_child(self):
-        log = self.root / ".kanban" / "wt" / "dispatcher.log"
+        log = self.root / ".git" / "kanban" / "wt" / "dispatcher.log"
         child_pid = self.root / "child.pid"
         process = subprocess.Popen(
             [

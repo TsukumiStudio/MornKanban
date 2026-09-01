@@ -7,7 +7,7 @@ fought over one agent name (a real incident forced hand-picking
 project-specific default instead - basic form `secretary-<project-slug>` -
 and applies the documented override precedence:
 
-  environment (KANBAN_HERDR_SECRETARY) > .kanban/KANBAN.md frontmatter
+  environment (KANBAN_HERDR_SECRETARY) > .git/kanban/KANBAN.md frontmatter
   (secretary_agent) > this generated default
 
 python3 standard library only, matching the rest of MornKanban's
@@ -31,7 +31,7 @@ _MAX_SLUG_LEN = _MAX_NAME_LEN - len(_PREFIX)
 
 
 class SecretaryNameError(Exception):
-    """Invalid explicit override, or a root with no .kanban directory."""
+    """Invalid explicit override, or a root with no Git-common board."""
 
 
 def validate_agent_name(name, what="secretary agent name"):
@@ -140,7 +140,7 @@ def _read_frontmatter_override(kanban_md_path):
 
 def resolve(root, env_override=None):
     """Resolve the secretary agent name for `root` (an existing project
-    root containing .kanban/). Returns (name, source) where source is one
+    Git project root containing a board). Returns (name, source) where source is one
     of "environment", "kanban_md", "generated".
 
     Raises SecretaryNameError for an invalid explicit override (env or
@@ -148,10 +148,10 @@ def resolve(root, env_override=None):
     case, so a typo'd override fails loudly instead of quietly colliding
     with (or silently diverging from) another project.
     """
-    root = os.path.realpath(root)
-    kanban_dir = os.path.join(root, ".kanban")
-    if not os.path.isdir(kanban_dir):
-        raise SecretaryNameError("%s has no .kanban directory" % root)
+    try:
+        root, kanban_dir = store.project_paths(root)
+    except store.RegistryError as exc:
+        raise SecretaryNameError(str(exc))
 
     if env_override:
         return validate_agent_name(env_override, "KANBAN_HERDR_SECRETARY"), "environment"

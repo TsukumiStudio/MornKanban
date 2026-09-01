@@ -61,11 +61,12 @@ class RegistryTests(unittest.TestCase):
         return result
 
     def _init(self, path):
+        subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
         r = self._run("init", cwd=path)
         self.assertIn("initialized", r.stdout)
 
     def _card_files(self, project, state="todo"):
-        return sorted(glob.glob(str(project / ".kanban" / state / "*.md")))
+        return sorted(glob.glob(str(project / ".git" / "kanban" / state / "*.md")))
 
     # --- registry CRUD -----------------------------------------------------
 
@@ -110,7 +111,7 @@ class RegistryTests(unittest.TestCase):
         plain.mkdir()
         r = self._run("projects", "add", "plain", str(plain), check=False)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn(".kanban", r.stderr)
+        self.assertIn("Git repository", r.stderr)
 
     def test_rejects_duplicate_alias(self):
         self._run("projects", "add", "project-a", str(self.a))
@@ -141,7 +142,7 @@ class RegistryTests(unittest.TestCase):
         r = self._run("send", "project-b", "AからB", cwd=self.a, input_text="本文A")
         dest = Path(r.stdout.strip())
         self.assertTrue(dest.is_file())
-        self.assertEqual(dest.parent, (self.b / ".kanban" / "todo").resolve())
+        self.assertEqual(dest.parent, (self.b / ".git" / "kanban" / "todo").resolve())
         self.assertEqual(self._card_files(self.a), [])
 
         content = dest.read_text(encoding="utf-8")
@@ -155,7 +156,7 @@ class RegistryTests(unittest.TestCase):
         self._run("projects", "add", "project-b", str(self.b))
         r = self._run("send", "project-a", "BからA", cwd=self.b, input_text="本文B")
         dest = Path(r.stdout.strip())
-        self.assertEqual(dest.parent, (self.a / ".kanban" / "todo").resolve())
+        self.assertEqual(dest.parent, (self.a / ".git" / "kanban" / "todo").resolve())
         self.assertIn("source_alias: project-b", dest.read_text(encoding="utf-8"))
 
     def test_send_from_unrelated_cwd_has_no_source_alias(self):
@@ -168,7 +169,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_send_applies_target_kanban_md_defaults(self):
         self._run("projects", "add", "project-b", str(self.b))
-        (self.b / ".kanban" / "KANBAN.md").write_text(
+        (self.b / ".git" / "kanban" / "KANBAN.md").write_text(
             "---\ndefault_backend: codex\ndefault_model: gpt-5.3-codex-spark\nthreshold: 55\n---\n",
             encoding="utf-8",
         )
@@ -206,13 +207,13 @@ class RegistryTests(unittest.TestCase):
         backlog = Path(self._run(
             "send", "project-b", "structured", *fields, input_text="details"
         ).stdout.strip())
-        self.assertEqual(backlog.parent, (self.b / ".kanban" / "backlog").resolve())
+        self.assertEqual(backlog.parent, (self.b / ".git" / "kanban" / "backlog").resolve())
         self.assertIn("card_schema: structured", backlog.read_text(encoding="utf-8"))
 
         ready = Path(self._run(
             "send", "project-b", "ready", *fields, "--ready", input_text="details"
         ).stdout.strip())
-        self.assertEqual(ready.parent, (self.b / ".kanban" / "todo").resolve())
+        self.assertEqual(ready.parent, (self.b / ".git" / "kanban" / "todo").resolve())
 
     def test_structured_send_ready_rejects_missing_definition_without_card(self):
         self._run("projects", "add", "project-b", str(self.b))
@@ -287,12 +288,12 @@ class RegistryTests(unittest.TestCase):
         self._run("projects", "add", "project-b", str(self.b))
         sleeper = subprocess.Popen(["sleep", "30"])
         self._procs.append(sleeper)
-        (self.b / ".kanban" / ".lock").write_text(str(sleeper.pid), encoding="utf-8")
+        (self.b / ".git" / "kanban" / ".lock").write_text(str(sleeper.pid), encoding="utf-8")
         try:
             r = self._run("send", "project-b", "t", input_text="b")
             self.assertIn("running (pid %d)" % sleeper.pid, r.stderr)
         finally:
-            (self.b / ".kanban" / ".lock").unlink(missing_ok=True)
+            (self.b / ".git" / "kanban" / ".lock").unlink(missing_ok=True)
 
     # --- concurrency ----------------------------------------------------
 

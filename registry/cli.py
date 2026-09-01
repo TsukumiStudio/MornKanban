@@ -273,7 +273,7 @@ def cmd_send(args):
     todo_dir = os.path.join(kanban_dir, "todo")
     if not os.path.isdir(todo_dir):
         print(
-            "kanban send: %s no longer has a .kanban/todo directory "
+            "kanban send: %s no longer has a todo directory "
             "(project may have been moved/uninitialized; check `kanban projects show %s`)"
             % (kanban_dir, args.alias),
             file=sys.stderr,
@@ -422,7 +422,7 @@ def build_parser():
     sr = secretary_sub.add_parser(
         "resolve", help="print {name, source, root} JSON for a project root"
     )
-    sr.add_argument("root", help="project root (must already contain .kanban/)")
+    sr.add_argument("root", help="Git project root (must already contain .git/kanban/)")
     sr.set_defaults(func=cmd_secretary_resolve)
 
     return p

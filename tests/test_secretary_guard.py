@@ -32,7 +32,13 @@ class TempProjectMixin:
         self.tmp = tempfile.mkdtemp(prefix="mornkanban-guard-test-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.root = os.path.join(self.tmp, "project")
-        os.makedirs(os.path.join(self.root, ".kanban"))
+        os.makedirs(self.root)
+        subprocess.run(["git", "init", "-q", "-b", "main", self.root], check=True)
+        subprocess.run(
+            ["git", "-C", self.root, "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "--allow-empty", "-qm", "init"], check=True,
+        )
+        os.makedirs(os.path.join(self.root, ".git", "kanban"))
 
 
 # --- command_classify.py: allowlist and bypass attempts ---------------------
@@ -55,6 +61,7 @@ class TestCommandClassify(unittest.TestCase):
             "kanban show 123",
             "kanban list",
             "kanban init",
+            "kanban migrate",
             "kanban --version",
             'kanban send alias "title"',
             "kanban remove 20260901-172101-5531",
@@ -95,8 +102,8 @@ class TestCommandClassify(unittest.TestCase):
             "kanban inspect diff",
             "kanban inspect show HEAD",
             "kanban inspect branch",
-            "cat .kanban/KANBAN.md",
-            "ls -la .kanban",
+            "cat .git/kanban/KANBAN.md",
+            "ls -la .git/kanban",
             "grep -rn foo .",
             "pwd",
             "find . -name '*.md'",
@@ -117,7 +124,7 @@ class TestCommandClassify(unittest.TestCase):
         self.allow("cat missing 2>/dev/null")
         self.allow("cat missing 2>&1")
         self.deny("printf secret 3<>/tmp/file >&3")
-        self.deny("rm .kanban/todo/card.md")
+        self.deny("rm .git/kanban/todo/card.md")
 
     def test_denies_git_mutation(self):
         for cmd in [
@@ -290,7 +297,9 @@ class TestGuardDecision(TempProjectMixin, unittest.TestCase):
 
     def test_other_project_secretary_not_cross_blocked(self):
         other_root = os.path.join(self.tmp, "other-project")
-        os.makedirs(os.path.join(other_root, ".kanban"))
+        os.makedirs(other_root)
+        subprocess.run(["git", "init", "-q", "-b", "main", other_root], check=True)
+        os.makedirs(os.path.join(other_root, ".git", "kanban"))
         marker.write_marker(other_root, "pane-other-secretary", "secretary-other")
         # pane-secretary is the *first* project's secretary, not the second's
         deny, _, _, _ = self.decide("Task", {}, self.secretary_env, cwd=other_root)
@@ -343,8 +352,12 @@ class TestSecretaryMarker(TempProjectMixin, unittest.TestCase):
         self.assertEqual(marker.project_root_from(nested), os.path.realpath(self.root))
 
     def test_project_root_from_card_worktree_uses_outer_project(self):
-        nested = os.path.join(self.root, ".kanban", "wt", "card-1", "src")
-        os.makedirs(os.path.join(self.root, ".kanban", "wt", "card-1", ".kanban"))
+        worktree = os.path.join(self.root, ".git", "kanban", "wt", "card-1")
+        subprocess.run(
+            ["git", "-C", self.root, "worktree", "add", "-q", "-b", "test-card", worktree],
+            check=True,
+        )
+        nested = os.path.join(worktree, "src")
         os.makedirs(nested)
         self.assertEqual(marker.project_root_from(nested), os.path.realpath(self.root))
 
@@ -480,6 +493,7 @@ class TestSecretaryScriptMarkerLifecycle(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.project = os.path.join(self.tmp, "project")
         os.makedirs(self.project)
+        subprocess.run(["git", "init", "-q", "-b", "main", self.project], check=True)
         self.log = os.path.join(self.tmp, "herdr.log")
 
         fake_bin = os.path.join(self.tmp, "bin")

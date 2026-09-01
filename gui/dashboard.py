@@ -263,14 +263,11 @@ def _registry_detail():
 
 
 def _find_kanban_root(start):
-    d = os.path.realpath(start)
-    while True:
-        if os.path.isdir(os.path.join(d, ".kanban")):
-            return d
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
+    try:
+        root, _ = registry_store.project_paths(start)
+        return root
+    except registry_store.RegistryError:
+        return None
 
 
 def _project_detail(cwd=None):
@@ -367,7 +364,7 @@ def render_status(status, caps):
 
     proj = status["project"]
     proj_body = ["状態: %s" % state_badge(caps, proj["state"])]
-    proj_body.append("root: %s" % (proj["root"] or "(このディレクトリ以下に .kanban なし)"))
+    proj_body.append("root: %s" % (proj["root"] or "(Git盤面なし)"))
     lines.append(_box(caps, "現在のディレクトリ", proj_body))
 
     return "\n\n".join(lines)
@@ -396,22 +393,22 @@ GUIDE_FLOWS = [
         "kanban uninstall / kanban-setup.sh uninstall",
         "このインストーラが作成した CLI、スキル、Claude秘書ガードだけを削除",
         "~/.local/bin/kanban, Claude/Codexのskill、~/.claude/settings.jsonの管理対象hook",
-        "リポジトリ本体、project board (.kanban/)、registry (すべて削除されない)",
+        "リポジトリ本体、project board (.git/kanban/)、registry (すべて削除されない)",
     ),
     (
         "project で init",
         "対象 project の root",
         "kanban init",
-        ".kanban/{todo,doing,review,done,failed}/ と KANBAN.md ポリシーの雛形を作成 (既存 KANBAN.md は上書きしない)",
-        "対象 project 直下の .kanban/",
+        ".git/kanban/{todo,doing,review,done,failed}/ と KANBAN.md ポリシーの雛形を作成 (既存 KANBAN.md は上書きしない)",
+        "対象 project 直下の .git/kanban/",
         "他の project、PC 共通の registry",
     ),
     (
         "秘書として開始",
         "Herdr pane 内 (対象 project)",
         "$kanban-dispatch 秘書として開始",
-        "対話エージェントを秘書モードにし、.kanban/ を初期化して Herdr 実行を検証",
-        "対象 project の .kanban/ (未初期化なら)",
+        "対話エージェントを秘書モードにし、.git/kanban/ を初期化して Herdr 実行を検証",
+        "対象 project の .git/kanban/ (未初期化なら)",
         "他 project、CLI/スキルの導入状態",
     ),
     (
@@ -419,7 +416,7 @@ GUIDE_FLOWS = [
         "対象 project の root",
         "kanban remove <todo-id> / kanban config set <key> <value>",
         "未着手todoの回収、またはjobsとAI/model既定値の安全な変更",
-        "対象 project の .kanban/ 内だけ",
+        "対象 project の .git/kanban/ 内だけ",
         "projectファイル、Git、実行中/完了カードの履歴",
     ),
     (
@@ -428,14 +425,14 @@ GUIDE_FLOWS = [
         "kanban projects add|list|remove <alias> [<path>]",
         "PC 共通 registry へ project の alias を登録/一覧/削除",
         "registry ファイル (projects.json) のみ",
-        "登録先 project 自体の .kanban/ の中身",
+        "登録先 project 自体の .git/kanban/ の中身",
     ),
     (
         "send による別 project への投函",
         "どこからでも",
         "kanban send <alias> <title>",
-        "registry に登録済みの alias 先 project の .kanban/todo/ にカードを1件作成",
-        "送信先 project の .kanban/todo/ に新規カード1件",
+        "registry に登録済みの alias 先 project の .git/kanban/todo/ にカードを1件作成",
+        "送信先 project の .git/kanban/todo/ に新規カード1件",
         "送信元 project、registry、他のカード",
     ),
 ]
@@ -494,7 +491,7 @@ def build_uninstall_preview(status):
             lines.append("削除対象なし: %s/ (未導入)" % sanitize(directory))
     lines.append("削除: %s の MornKanban 管理対象hookのみ (存在する場合)" % sanitize(setup_core.CLAUDE_SETTINGS_PATH))
     lines.append("削除しない: リポジトリ本体 (%s)" % status["repo"])
-    lines.append("削除しない: project board (.kanban/ 配下)、registry")
+    lines.append("削除しない: project board (.git/kanban/ 配下)、registry")
     return lines
 
 

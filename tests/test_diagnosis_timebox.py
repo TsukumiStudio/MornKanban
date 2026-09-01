@@ -72,14 +72,14 @@ class DiagnosisTimeboxTests(unittest.TestCase):
         self.assertIn("Hard maximum: 10 minutes", prompt)
         self.assertIn("Expected output: observed evidence", prompt)
         self.assertIn("BLOCKED: scope/timebox", prompt)
-        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "done").glob("*.md"))), 1)
 
     def test_diagnose_file_changes_are_discarded_and_never_merged(self):
         self._add()
         result = self._run('cat >/dev/null\nprintf "must not merge\\n" > unwanted.txt\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.project / "unwanted.txt").exists())
-        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        failed = list((self.project / ".git" / "kanban" / "failed").glob("*.md"))
         self.assertEqual(len(failed), 1)
         self.assertIn("diagnosis read-only violation", failed[0].read_text(encoding="utf-8"))
 
@@ -94,7 +94,7 @@ class DiagnosisTimeboxTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(count.read_text(encoding="utf-8").strip(), "1")
-        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        blocked = list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertEqual(len(blocked), 1)
         self.assertIn("scope/timebox", blocked[0].read_text(encoding="utf-8"))
 

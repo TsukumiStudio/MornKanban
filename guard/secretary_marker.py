@@ -12,8 +12,14 @@ constraints.
 """
 import json
 import os
+import sys
 import tempfile
 import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+from registry import store as registry_store  # noqa: E402
 
 MARKER_DIR_NAME = ".secretary-guard"
 MARKER_FILE_NAME = "marker.json"
@@ -22,7 +28,8 @@ AUDIT_MAX_LINES = 200
 
 
 def marker_dir(project_root):
-    return os.path.join(project_root, ".kanban", MARKER_DIR_NAME)
+    _, board = registry_store.project_paths(project_root)
+    return os.path.join(board, MARKER_DIR_NAME)
 
 
 def marker_path(project_root):
@@ -114,15 +121,9 @@ def append_audit(project_root, message):
 
 
 def project_root_from(start):
-    """Walk up from `start` looking for a `.kanban` directory. None if absent."""
-    d = os.path.realpath(start)
-    marker = os.sep + ".kanban" + os.sep + "wt" + os.sep
-    if marker in d:
-        d = d.split(marker, 1)[0]
-    while True:
-        if os.path.isdir(os.path.join(d, ".kanban")):
-            return d
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
+    """Resolve the main worktree root for a Git project with a board."""
+    try:
+        root, _ = registry_store.project_paths(start)
+        return root
+    except registry_store.RegistryError:
+        return None

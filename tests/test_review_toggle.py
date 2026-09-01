@@ -112,7 +112,7 @@ class ReviewToggleTests(unittest.TestCase):
         return str(p)
 
     def _card_text(self, state):
-        files = sorted(glob.glob(str(self.repo / ".kanban" / state / "*.md")))
+        files = sorted(glob.glob(str(self.repo / ".git" / "kanban" / state / "*.md")))
         self.assertEqual(len(files), 1, "expected exactly one card in %s: %s" % (state, files))
         return Path(files[0]).read_text()
 
@@ -132,8 +132,8 @@ class ReviewToggleTests(unittest.TestCase):
     # -- 2. project review_enabled: false -> reviewer 0 calls, done, history --
 
     def test_project_false_skips_reviewer(self):
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: true", "review_enabled: false"
             )
         )
@@ -167,8 +167,8 @@ class ReviewToggleTests(unittest.TestCase):
     # -- 4. priority: card > env > project > default -------------------------
 
     def test_priority_card_overrides_env_and_project(self):
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: true", "review_enabled: false"
             )
         )
@@ -184,8 +184,8 @@ class ReviewToggleTests(unittest.TestCase):
         self.assertIn("review_source: card", text)
 
     def test_priority_env_overrides_project(self):
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: true", "review_enabled: true"
             )
         )
@@ -211,8 +211,8 @@ class ReviewToggleTests(unittest.TestCase):
         self.assertIn("invalid boolean", r.stderr)
 
     def test_invalid_boolean_project_dies(self):
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: true", "review_enabled: sortof"
             )
         )
@@ -247,7 +247,7 @@ class ReviewToggleTests(unittest.TestCase):
         self._run("add", "card B", "--no-review", input_text="append B", env=env)
         r = self._run("run", "-j", "2", env=env)
         self.assertNotIn("MUST NOT BE CALLED", r.stdout + r.stderr)
-        done = sorted(glob.glob(str(self.repo / ".kanban" / "done" / "*.md")))
+        done = sorted(glob.glob(str(self.repo / ".git" / "kanban" / "done" / "*.md")))
         self.assertEqual(len(done), 2)
         combined = "\n".join(Path(f).read_text() for f in done)
         self.assertIn("resolve review", combined)
@@ -267,7 +267,7 @@ class ReviewToggleTests(unittest.TestCase):
         self._run("add", "card A", input_text="append A", env=env)
         self._run("add", "card B", input_text="append B", env=env)
         self._run("run", "-j", "2", env=env)
-        done = sorted(glob.glob(str(self.repo / ".kanban" / "done" / "*.md")))
+        done = sorted(glob.glob(str(self.repo / ".git" / "kanban" / "done" / "*.md")))
         self.assertEqual(len(done), 2)
         combined = "\n".join(Path(f).read_text() for f in done)
         self.assertIn("resolve review", combined)
@@ -277,8 +277,8 @@ class ReviewToggleTests(unittest.TestCase):
 
     def test_decision_survives_reclaim(self):
         # Project default starts as false; card resolves against it once...
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: true", "review_enabled: false"
             )
         )
@@ -286,7 +286,7 @@ class ReviewToggleTests(unittest.TestCase):
         env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
         env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_FORBIDDEN)
         self._run("add", "card", input_text="task", env=env)
-        card = Path(sorted(glob.glob(str(self.repo / ".kanban" / "todo" / "*.md")))[0])
+        card = Path(sorted(glob.glob(str(self.repo / ".git" / "kanban" / "todo" / "*.md")))[0])
         # Simulate a card that already went through resolve_card_review on a
         # prior (crashed) dispatcher run: review_enabled/review_source are
         # already persisted as concrete values, sitting in doing/.
@@ -295,7 +295,7 @@ class ReviewToggleTests(unittest.TestCase):
             "review_enabled: false\nreview_source: project",
         )
         self.assertIn("review_source: project", text)
-        card_doing = self.repo / ".kanban" / "doing" / card.name
+        card_doing = self.repo / ".git" / "kanban" / "doing" / card.name
         card_doing.write_text(text)
         card.unlink()
 
@@ -303,8 +303,8 @@ class ReviewToggleTests(unittest.TestCase):
         # project/env state instead of the card's persisted decision, this
         # card would come back reviewed (and fail, since the reviewer is
         # forbidden here).
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: false", "review_enabled: true"
             )
         )
@@ -322,7 +322,7 @@ class ReviewToggleTests(unittest.TestCase):
         env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_FORBIDDEN)
         self._run("add", "card on", input_text="task", env=env)
         self._run("add", "card off", "--no-review", input_text="task", env=env)
-        cards = sorted(glob.glob(str(self.repo / ".kanban" / "todo" / "*.md")))
+        cards = sorted(glob.glob(str(self.repo / ".git" / "kanban" / "todo" / "*.md")))
         self.assertEqual(len(cards), 2)
         on_id = None
         off_id = None
@@ -346,13 +346,13 @@ class ReviewToggleTests(unittest.TestCase):
         # by the dispatcher) must show the *effective* policy from the
         # card>env>project>default chain, not a hardcoded ON fallback.
         env = dict(self.env)
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: true", "review_enabled: false"
             )
         )
         self._run("add", "auto card", input_text="task", env=env)  # no --review/--no-review
-        cards = glob.glob(str(self.repo / ".kanban" / "todo" / "*.md"))
+        cards = glob.glob(str(self.repo / ".git" / "kanban" / "todo" / "*.md"))
         self.assertEqual(len(cards), 1)
         text = Path(cards[0]).read_text()
         self.assertIn("review_enabled: auto", text)  # not yet resolved/frozen
@@ -374,7 +374,7 @@ class ReviewToggleTests(unittest.TestCase):
         self.assertIn("--no-review", r.stderr)
 
     def test_init_template_documents_review_enabled(self):
-        kanban_md = (self.repo / ".kanban" / "KANBAN.md").read_text()
+        kanban_md = (self.repo / ".git" / "kanban" / "KANBAN.md").read_text()
         self.assertIn("review_enabled: true", kanban_md)
         self.assertIn("review_enabled", kanban_md)
         # Japanese explanation of the on/off semantics is part of the template.
@@ -387,8 +387,8 @@ class ReviewToggleTests(unittest.TestCase):
         r_on = self._run("run", "--once", env=env)
         self.assertIn("Review: ON", r_on.stdout + r_on.stderr)
 
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
+        (self.repo / ".git" / "kanban" / "KANBAN.md").write_text(
+            (self.repo / ".git" / "kanban" / "KANBAN.md").read_text().replace(
                 "review_enabled: true", "review_enabled: false"
             )
         )

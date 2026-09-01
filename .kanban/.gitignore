@@ -1,9 +1,0 @@
-wt/
-briefs/
-reports/
-reviews/
-.lock
-.merge.lock
-activity.jsonl
-activity.jsonl.lock
-.secretary-guard/

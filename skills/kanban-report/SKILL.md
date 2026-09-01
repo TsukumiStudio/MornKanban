@@ -35,11 +35,11 @@ configuration, or any external system.
 
 Use only local MornKanban evidence:
 
-- `.kanban/{todo,doing,review,resolving,blocked,done,failed}/*.md` for card
+- `.git/kanban/{todo,doing,review,resolving,blocked,done,failed}/*.md` for card
   titles, current states, attempts, structured kinds, and timestamped History.
-- `.kanban/activity.jsonl` for agent lifecycle, role, backend/model/effort, attempt,
+- `.git/kanban/activity.jsonl` for agent lifecycle, role, backend/model/effort, attempt,
   status, and duration. It contains at most the newest 1000 events.
-- `.kanban/wt/dispatcher.log` only when a dispatcher failure in the requested
+- `.git/kanban/wt/dispatcher.log` only when a dispatcher failure in the requested
   period needs explanation.
 
 Never run any Git command, and never infer work from commits, branches, or

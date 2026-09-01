@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kanban.sh - file-based kanban dispatcher for agent workers.
-# Cards live in <project>/.kanban/{backlog,todo,doing,review,resolving,blocked,done,failed}/ as Markdown
+# Cards live in <project>/.git/kanban/{backlog,todo,doing,review,resolving,blocked,done,failed}/ as Markdown
 # with YAML frontmatter. `kanban run` executes cards via a worker backend
 # (claude / codex, or a visible Herdr wrapper), then scores the result with a
 # review agent and loops until the score passes the threshold or attempts run out.
@@ -48,6 +48,8 @@ SELF_DIR=$(resolve_self_dir "$0")
 VERSION_FILE=$SELF_DIR/VERSION
 SETUP_CLI=$SELF_DIR/gui/setup_cli.py
 REGISTRY_CLI=$SELF_DIR/registry/cli.py
+# shellcheck source=kanban-root.sh
+source "$SELF_DIR/kanban-root.sh"
 
 cmd_version() { python3 "$SETUP_CLI" version; }
 cmd_install() { python3 "$SETUP_CLI" install; }
@@ -55,17 +57,13 @@ cmd_update() { python3 "$SETUP_CLI" update; }
 cmd_uninstall() { python3 "$SETUP_CLI" uninstall; }
 
 find_root() {
-  local d=$PWD
-  while [[ $d != / ]]; do
-    if [[ -d $d/.kanban ]]; then echo "$d"; return 0; fi
-    d=$(dirname "$d")
-  done
-  return 1
+  kanban_project_root "$PWD"
 }
 
 require_root() {
-  ROOT=$(find_root) || die "no .kanban directory found (run: kanban init)"
-  KB=$ROOT/.kanban
+  ROOT=$(find_root) || die "Git repository required"
+  KB=$(kanban_board_dir "$ROOT") || die "could not resolve the Git common directory"
+  [[ -d $KB ]] || die "no board at $KB (run: kanban init)"
   load_project_config
 }
 
@@ -77,7 +75,7 @@ cfg_env() { # cfg_env <file> <key> <env-name>: env wins; else adopt non-empty cf
   fi
 }
 
-load_project_config() { # .kanban/KANBAN.md frontmatter -> defaults (env still wins)
+load_project_config() { # .git/kanban/KANBAN.md frontmatter -> defaults (env still wins)
   local cfg=$KB/KANBAN.md
   if [[ ! -f $cfg ]]; then
     [[ -n ${KANBAN_REVIEW_INFRA_MAX_RETRIES:-} ]] && DEFAULT_REVIEW_INFRA_MAX_RETRIES=$KANBAN_REVIEW_INFRA_MAX_RETRIES
@@ -358,7 +356,9 @@ fail_card() { # fail_card <card> <infrastructure|worker|review|resolve|merge|dis
 }
 
 cmd_init() {
-  local base=${1:-$PWD}/.kanban
+  local target=${1:-$PWD} base
+  ROOT=$(kanban_project_root "$target") || die "Git repository required; initialize Git yourself before kanban init"
+  base=$(kanban_board_dir "$target") || die "could not resolve the Git common directory"
   for s in "${STATES[@]}"; do mkdir -p "$base/$s"; done
   for s in "${STATES[@]}"; do touch "$base/$s/.gitkeep"; done
   mkdir -p "$base/briefs" "$base/reports" "$base/reviews"
@@ -492,7 +492,7 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 - 秘書は `kanban` のboard管理コマンドを実行してよい。`kanban run` だけは使わずvisible dispatchを使う。push/deploy等の直接実行はせず、`--operate` カードへ渡す
 - 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはbacklog/Ready以外を拒否する
 - Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
-- `dispatcher pane started` はペインへの起動要求が通っただけ。`dispatcher_failed` 通知時は `.kanban/wt/dispatcher.log` を読み、実際の終了理由を報告する。復旧目的でも `git init` / `commit` 等を勝手に行わない
+- `dispatcher pane started` はペインへの起動要求が通っただけ。`dispatcher_failed` 通知時は `.git/kanban/wt/dispatcher.log` を読み、実際の終了理由を報告する。復旧目的でも `git init` / `commit` 等を勝手に行わない
 - failed は秘書が即報告する。`blocked_kind: dependency` は自動再開、`user_input` / `scope_timebox` /
   `review_infra` は判断・復旧後に `kanban resume <id>` してdispatchする。`operation_unknown` は外部状態を確認し、
   成功済みなら `kanban operation <id> done`、安全に再試行できる時だけ `kanban operation <id> retry` を使う
@@ -521,7 +521,7 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 **一切使わない**。visible Herdr pane を経由しない実装・調査・検証・レビュー・
 競合解決は、カードもワークツリーも board 履歴も残らず契約違反になる。
 
-- 許可: `.kanban/KANBAN.md` とボードの確認、全ての `kanban` CLI操作、
+- 許可: `.git/kanban/KANBAN.md` とボードの確認、全ての `kanban` CLI操作、
   `kanban-secretary.sh dispatch` / `dispatch --once`、ユーザーへの報告
 - 禁止: `Agent`/`Task` (Claude Code)、collaboration/subagent 起動 (Codex)、
   `herdr-agent-worker.sh` 経由の visible pane を開かないその他の in-process delegation
@@ -530,6 +530,25 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 EOF
   fi
   echo "initialized $base"
+}
+
+cmd_migrate() {
+  local target=${1:-$PWD} root legacy base path
+  root=$(kanban_project_root "$target") || die "Git repository required"
+  base=$(kanban_board_dir "$target") || die "could not resolve the Git common directory"
+  legacy=$root/.kanban
+  [[ -d $legacy ]] || die "no legacy board at $legacy"
+  [[ ! -e $base ]] || die "destination already exists: $base"
+  if [[ -f $legacy/.lock ]] && kill -0 "$(cat "$legacy/.lock")" 2>/dev/null; then
+    die "dispatcher is running; stop it before migration"
+  fi
+  while IFS= read -r path; do
+    case $path in
+      "$legacy"/wt/*) die "registered card worktree still exists: $path" ;;
+    esac
+  done < <(git -C "$root" worktree list --porcelain | awk '/^worktree /{sub(/^worktree /, ""); print}')
+  mv "$legacy" "$base"
+  echo "migrated $legacy -> $base"
 }
 
 add_usage() {
@@ -1449,7 +1468,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$resolve_branch" && [[ -d $resolve_wt ]]; then
     echo "$tag resuming existing resolve worktree/branch"
   elif ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
-    echo "resolve worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
+    echo "resolve worktree add failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
     git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
     fail_card "$file" infrastructure >/dev/null
     echo "$tag FAIL resolve worktree add failed -> failed"
@@ -1631,7 +1650,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   fi
 }
 
-process_card_seq() { # in-place execution: non-git fallback and serialized operation cards
+process_card_seq() { # serialized operation cards run in the main checkout
   local file=$1
   local title threshold max_attempts attempts review_infra_max review_enabled review_source
   title=$(fm_get "$file" title "?")
@@ -1749,7 +1768,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$branch" && [[ -d $wt ]]; then
     echo "$tag resuming existing worktree/branch after restart"
   elif ! git -C "$ROOT" worktree add -q -b "$branch" "$wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
-    echo "worktree add failed; see .kanban/wt/$id.log" | append_history "$file" "error"
+    echo "worktree add failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
     fail_card "$file" infrastructure >/dev/null
     echo "$tag FAIL worktree add failed -> failed"
     notify_result failed "$title"
@@ -1972,13 +1991,7 @@ cmd_run() {
     die "dispatcher already running (pid $lock_pid)"
   fi
   if [[ -d $lockfile ]]; then
-    lock_pid=$(cat "$lockfile/pid" 2>/dev/null || true)
-    if [[ -n $lock_pid ]] && kill -0 "$lock_pid" 2>/dev/null; then
-      die "dispatcher already running (pid $lock_pid)"
-    fi
-    [[ -n $lock_pid ]] || die "dispatcher lock is busy (legacy owner is unknown)"
-    rm -f "$lockfile/pid"
-    rmdir "$lockfile" 2>/dev/null || die "dispatcher lock is busy"
+    die "dispatcher lock is busy"
   elif [[ -f $lockfile ]]; then
     lock_pid=$(cat "$lockfile" 2>/dev/null || true)
     if [[ -n $lock_pid ]] && kill -0 "$lock_pid" 2>/dev/null; then
@@ -2016,19 +2029,10 @@ cmd_run() {
   else
     echo "kanban: Review: OFF (fast iteration; project default; cards may opt in with --review)"
   fi
-  local is_git=false non_git_fallback=false
-  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 && is_git=true
-  if ! $is_git && [[ $jobs_max -gt 1 ]]; then
-    if $jobs_pinned; then die "parallel mode requires a git repository (worktrees)"; fi
-    jobs_max=1
-    non_git_fallback=true
-  fi
-  if $non_git_fallback; then
-    echo "kanban: Jobs: 1 (non-git sequential fallback; no git operation was performed)"
-  elif $jobs_pinned; then
+  if $jobs_pinned; then
     echo "kanban: Jobs: $jobs_max (pinned by -j or KANBAN_JOBS)"
   else
-    echo "kanban: Jobs: $jobs_max (live from .kanban/KANBAN.md; edit jobs: to resize safely)"
+    echo "kanban: Jobs: $jobs_max (live from .git/kanban/KANBAN.md; edit jobs: to resize safely)"
   fi
   echo "[UNRESTRICTED] worker/reviewer permission policy: claude=$(claude_perm_flag) codex=$(codex_sandbox_flag)" >&2
   # Reclaim cards stranded by a crashed dispatcher (lock guarantees exclusivity).
@@ -2073,24 +2077,13 @@ cmd_run() {
       esac
       local bid
       bid=$(fm_get "$orphan" id "?")
-      if $is_git && [[ $bid != "?" ]]; then
+      if [[ $bid != "?" ]]; then
         git -C "$ROOT" worktree remove --force "$KB/wt/$bid" 2>/dev/null || true
         git -C "$ROOT" branch -q -D "kanban/$bid" 2>/dev/null || true
       fi
       move_card "$orphan" todo >/dev/null
     fi
   done
-
-  if ! $is_git; then
-    while :; do
-      refresh_dependency_cards
-      local cards=("$KB"/todo/*.md)
-      [[ -e ${cards[0]} ]] || { echo "todo is empty"; break; }
-      process_card_seq "$(move_card "${cards[0]}" doing)"
-      if $once; then break; fi
-    done
-    return
-  fi
 
   mkdir -p "$KB/wt"
   local base_branch
@@ -2227,6 +2220,7 @@ cmd_operation() { # cmd_operation <id-substring> <done|retry>
 
 case ${1:-} in
   init) shift; cmd_init "$@" ;;
+  migrate) shift; cmd_migrate "$@" ;;
   add) shift; cmd_add "$@" ;;
   ready) shift; cmd_ready "$@" ;;
   remove) shift; cmd_remove "$@" ;;
@@ -2244,5 +2238,5 @@ case ${1:-} in
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|add|ready [--check] <id>|remove <backlog-or-todo-id>|config set <key> <value>|list|show|inspect|run [--once] [-j N]|resume <id>|operation <id> {done|retry}|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|migrate|add|ready [--check] <id>|remove <backlog-or-todo-id>|config set <key> <value>|list|show|inspect|run [--once] [-j N]|resume <id>|operation <id> {done|retry}|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
 esac

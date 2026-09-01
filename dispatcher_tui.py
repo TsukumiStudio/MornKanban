@@ -16,6 +16,8 @@ import threading
 import time
 import unicodedata
 
+from registry import store as registry_store
+
 
 STATES = ("backlog", "todo", "doing", "review", "resolving", "blocked", "done", "failed")
 ACTIVE_STATES = ("doing", "review", "resolving")
@@ -145,7 +147,7 @@ def _active_agents(path):
 def scan_board(root):
     cards = {}
     counts = {state: 0 for state in STATES}
-    kanban = os.path.join(os.path.realpath(root), ".kanban")
+    _, kanban = registry_store.project_paths(root)
     live_agents = _active_agents(os.path.join(kanban, "activity.jsonl"))
     for state in STATES:
         directory = os.path.join(kanban, state)

@@ -98,7 +98,7 @@ class HeadlessPermissionPolicyTests(unittest.TestCase):
 
     def test_init_template_defaults_to_unrestricted(self):
         self._run_kanban("init")
-        content = (self.project / ".kanban" / "KANBAN.md").read_text(encoding="utf-8")
+        content = (self.project / ".git" / "kanban" / "KANBAN.md").read_text(encoding="utf-8")
         self.assertIn("claude_perms: bypassPermissions", content)
         self.assertIn("codex_sandbox: danger-full-access", content)
         self.assertIn("codex_full_bypass: true", content)
@@ -128,7 +128,7 @@ class HeadlessPermissionPolicyTests(unittest.TestCase):
 
     def test_kanban_md_can_dial_back_to_safe_mode(self):
         self._run_kanban("init")
-        kanban_md = self.project / ".kanban" / "KANBAN.md"
+        kanban_md = self.project / ".git" / "kanban" / "KANBAN.md"
         content = kanban_md.read_text(encoding="utf-8")
         content = content.replace("claude_perms: bypassPermissions", "claude_perms: acceptEdits")
         content = content.replace("codex_full_bypass: true", "codex_full_bypass: false")

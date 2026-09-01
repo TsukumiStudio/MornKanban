@@ -19,7 +19,7 @@ the card and dispatch instead.
 The authoritative MornKanban checkout is `__MORNKANBAN_REPO__` (installed
 version `__MORNKANBAN_VERSION__`). Read its
 `README.md`, especially **Secretary Bootstrap**, **Dialogue-Agent Contract**,
-and **Herdr Integration**. Project policy in `.kanban/KANBAN.md` overrides the
+and **Herdr Integration**. Project policy in `.git/kanban/KANBAN.md` overrides the
 generic contract.
 
 ## Start secretary mode
@@ -27,12 +27,12 @@ generic contract.
 When the user invokes this skill to begin a secretary session:
 
 1. Run `__MORNKANBAN_REPO__/kanban-secretary.sh bootstrap "$PWD"`. This
-   initializes `.kanban/` without overwriting an existing policy, verifies the
+   initializes `.git/kanban/` without overwriting an existing policy, verifies the
    current Herdr pane by command rather than inference, and registers this agent
    as the notification target under a project-specific name (`secretary=...`
    in its output — never the fixed `secretary` every project used to share;
    see the repo's README **Secretary agent naming**).
-2. Read `.kanban/KANBAN.md` and the authoritative contract.
+2. Read `.git/kanban/KANBAN.md` and the authoritative contract.
 3. Treat the user's request to start secretary mode as persistent for the rest
    of this conversation, until the user explicitly ends or replaces it.
 4. Reply with one short line stating that secretary mode is active, the
@@ -51,7 +51,7 @@ user to choose an execution mode and never fall back to headless workers.
 
 While secretary mode is active:
 
-1. Read `.kanban/KANBAN.md` before cutting cards.
+1. Read `.git/kanban/KANBAN.md` before cutting cards.
 2. Split the request according to project policy. Give every worker a
    self-contained card containing paths, constraints, machine-checkable
    acceptance criteria, and required test commands; the worker has no
@@ -121,9 +121,8 @@ While secretary mode is active:
    wrapper cannot observe. Do not replace it with bare
    `kanban run`. New boards default to `jobs: 4`; honor the project's live
    `jobs:` value or an explicit user override, and impose no MornKanban upper
-   cap on a positive worker count. A non-git project automatically uses one
-   sequential worker unless an explicit `-j > 1` is requested; never create a
-   Git repository as recovery. `ACK:-` means the prompt was not sent yet,
+   cap on a positive worker count. MornKanban requires an existing Git
+   repository; never create one as recovery. `ACK:-` means the prompt was not sent yet,
    `ACK:…` means the pane received only the short work-order path, and `ACK:✓`
    is separate proof that it read the order. A missing ACK is infrastructure
    trouble, not a failed implementation.
@@ -142,7 +141,7 @@ Cards in `resolving` or `blocked` are handled by their structured state. A
 declared dependency resumes only after its target reaches `done`; a
 `review_infra` block means verification was not performed. If dispatch cannot
 start, do not take over implementation. A `dispatcher_failed` notification
-means the pane command exited nonzero: read `.kanban/wt/dispatcher.log`,
+means the pane command exited nonzero: read `.git/kanban/wt/dispatcher.log`,
 report its actual error, and do not claim the cards ran. Never improvise a
 recovery with `git init`, `commit`, or any other Git mutation. On card
 notifications, inspect
@@ -166,7 +165,7 @@ separate facts and never claim acceptance alone means the branch landed.
 
 ## What a secretary pane may and may not do
 
-Allowed: reading `.kanban/KANBAN.md`, the README contract, and board/card
+Allowed: reading `.git/kanban/KANBAN.md`, the README contract, and board/card
 files; managed Git reads through `kanban inspect status|log|diff|diff-cached|show|branch`;
 `kanban` board-control commands (not bare `kanban run`);
 `kanban-secretary.sh
@@ -198,7 +197,7 @@ resolution yourself. That is exactly the escape hatch this contract exists to
 close — it produces work with no card, no worktree, no board history, and no
 visible Herdr pane the user can watch or interrupt.
 
-- **Allowed** in this pane: reading `.kanban/KANBAN.md` and the board to
+- **Allowed** in this pane: reading `.git/kanban/KANBAN.md` and the board to
   decide how to split work; `kanban` board-control commands;
   `kanban-secretary.sh dispatch` / `dispatch --once`; reporting to the user.
 - **Forbidden** in this pane: `Agent`/`Task` (Claude Code), collaboration or

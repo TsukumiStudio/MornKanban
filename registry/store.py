@@ -1,7 +1,7 @@
 """PC-wide MornKanban project registry: alias -> project root.
 
 Lets `kanban send <alias> "title"` file a card into a registered project's
-`.kanban/todo/` from any directory, any session, regardless of cwd.
+Git-common `kanban/todo/` from any directory, any session, regardless of cwd.
 
 Config lives under `KANBAN_CONFIG_DIR` or the XDG `mornkanban` directory.
 
@@ -99,16 +99,58 @@ def _validate_alias(alias):
         )
 
 
-def _validate_project_path(path):
+def project_paths(path, require_board=True):
+    """Return the main worktree root and Git-common board directory."""
     if not os.path.isdir(path):
         raise RegistryError("not a directory: %s" % path)
-    real = os.path.realpath(path)
-    kanban_dir = os.path.join(real, ".kanban")
-    if not os.path.isdir(kanban_dir):
+    d = os.path.realpath(path)
+    while True:
+        dotgit = os.path.join(d, ".git")
+        if os.path.isdir(dotgit):
+            root, common = d, dotgit
+            break
+        if os.path.isfile(dotgit):
+            try:
+                with open(dotgit, encoding="utf-8") as handle:
+                    line = handle.readline().strip()
+                if not line.startswith("gitdir: "):
+                    raise ValueError
+                git_dir = os.path.realpath(os.path.join(d, line[len("gitdir: "):]))
+                if not os.path.isdir(git_dir):
+                    raise ValueError
+                common_file = os.path.join(git_dir, "commondir")
+                if os.path.isfile(common_file):
+                    with open(common_file, encoding="utf-8") as handle:
+                        rel = handle.readline().strip()
+                    if not rel:
+                        raise ValueError
+                    common = os.path.realpath(os.path.join(git_dir, rel))
+                else:
+                    common = git_dir
+                root = os.path.dirname(common) if os.path.basename(common) == ".git" else d
+                break
+            except (OSError, ValueError):
+                raise RegistryError("invalid .git file: %s" % dotgit)
+        parent = os.path.dirname(d)
+        if parent == d:
+            raise RegistryError("Git repository required: %s" % os.path.realpath(path))
+        d = parent
+    kanban_dir = os.path.realpath(os.path.join(common, "kanban"))
+    if require_board and not os.path.isdir(kanban_dir):
         raise RegistryError(
-            "%s has no .kanban directory (run `kanban init` there first)" % real
+            "%s has no board at %s (run `kanban init` there first)" % (root, kanban_dir)
         )
-    return real, os.path.realpath(kanban_dir)
+    return root, kanban_dir
+
+
+def _validate_project_path(path):
+    return project_paths(path)
+
+
+def _current_entry(entry):
+    current = dict(entry)
+    current["root"], current["kanban_dir"] = _validate_project_path(current["root"])
+    return current
 
 
 def _find_alias_by_root(data, real_root, exclude_alias=None):
@@ -189,12 +231,12 @@ def get(alias):
         raise RegistryError(
             "alias %r is not registered (see `kanban projects list`)" % alias
         )
-    return entry
+    return _current_entry(entry)
 
 
 def list_all():
     data = load()
-    return dict(data["projects"])
+    return {alias: _current_entry(entry) for alias, entry in data["projects"].items()}
 
 
 def find_by_path(path):

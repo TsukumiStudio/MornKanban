@@ -16,6 +16,11 @@ class DependencyWorkflowTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.project)], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.project), "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "--allow-empty", "-qm", "init"], check=True,
+        )
         subprocess.run([str(KANBAN), "init"], cwd=self.project, check=True, capture_output=True, text=True)
         self.worker_log = Path(self.temp.name) / "worker.log"
         self.worker = self._script(
@@ -59,7 +64,7 @@ class DependencyWorkflowTests(unittest.TestCase):
         return re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
 
     def _cards(self, state):
-        return list((self.project / ".kanban" / state).glob("*.md"))
+        return list((self.project / ".git" / "kanban" / state).glob("*.md"))
 
     def test_declared_dependency_waits_without_attempt_then_auto_resumes_on_done(self):
         upstream = self._add("upstream")
@@ -68,12 +73,12 @@ class DependencyWorkflowTests(unittest.TestCase):
         first = self._run("run", "--once")
 
         self.assertEqual(first.returncode, 0, first.stderr)
-        blocked = self._cards("blocked")
-        self.assertEqual(len(blocked), 1, first.stdout)
-        blocked_text = blocked[0].read_text(encoding="utf-8")
-        self.assertIn("blocked_kind: dependency", blocked_text)
-        self.assertIn("dependency_state: todo", blocked_text)
-        self.assertIn("attempts: 0", blocked_text)
+        waiting = self._cards("todo")
+        self.assertEqual(len(waiting), 1, first.stdout)
+        waiting_text = waiting[0].read_text(encoding="utf-8")
+        self.assertIn("dependency ", waiting_text)
+        self.assertIn("reached done; card returned to todo", waiting_text)
+        self.assertIn("attempts: 0", waiting_text)
         self.assertEqual(self.worker_log.read_text(encoding="utf-8").splitlines(), ["upstream"])
 
         second = self._run("run", "--once")
@@ -82,13 +87,13 @@ class DependencyWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self._cards("done")), 2, second.stdout)
         self.assertEqual(self._cards("blocked"), [])
         self.assertEqual(self.worker_log.read_text(encoding="utf-8").splitlines(), ["upstream", "downstream"])
-        done_downstream = self.project / ".kanban" / "done" / downstream.name
+        done_downstream = self.project / ".git" / "kanban" / "done" / downstream.name
         self.assertIn("dependency ready", done_downstream.read_text(encoding="utf-8"))
 
     def test_failed_dependency_stays_blocked_until_that_card_reaches_done(self):
         upstream = self._add("upstream")
         downstream = self._add("downstream", "--depends-on", self._id(upstream))
-        failed_upstream = self.project / ".kanban" / "failed" / upstream.name
+        failed_upstream = self.project / ".git" / "kanban" / "failed" / upstream.name
         upstream.rename(failed_upstream)
 
         self.assertEqual(self._run("run", "--once").returncode, 0)
@@ -99,7 +104,7 @@ class DependencyWorkflowTests(unittest.TestCase):
         self.assertIn("attempts: 0", blocked[0].read_text(encoding="utf-8"))
         self.assertFalse(self.worker_log.exists())
 
-        failed_upstream.rename(self.project / ".kanban" / "done" / upstream.name)
+        failed_upstream.rename(self.project / ".git" / "kanban" / "done" / upstream.name)
         resumed = self._run("run", "--once")
 
         self.assertEqual(resumed.returncode, 0, resumed.stderr)

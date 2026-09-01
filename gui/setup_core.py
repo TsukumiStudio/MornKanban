@@ -134,7 +134,7 @@ def skill_installed():
 
 
 def in_worktree():
-    return "/.kanban/wt/" in REPO
+    return "/.git/kanban/wt/" in REPO
 
 
 def path_contains(directory):

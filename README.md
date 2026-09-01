@@ -21,11 +21,11 @@ agent available as a project secretary.
 
 ## Design principles
 
-MornKanban follows the leader/worker separation described in [ゲーム制作における Herdrとgit worktreeの自立型マルチエージェント環境](https://qiita.com/yuji_yasuhara/items/99c589264a006658a15a): the secretary owns planning and dispatch, each worker gets one isolated worktree, cards pass a Definition of Ready, and review consumes durable evidence. It currently retains explicit differences: board state stays under `.kanban/` rather than `.git/kanban`, reviewer/resolver/operator are dedicated visible roles, accepted work is merged automatically through durable checkpoints, unrestricted execution remains the trusted-project default, and concurrency defaults to four without an artificial upper limit.
+MornKanban follows the leader/worker separation described in [ゲーム制作における Herdrとgit worktreeの自立型マルチエージェント環境](https://qiita.com/yuji_yasuhara/items/99c589264a006658a15a): the secretary owns planning and dispatch, every worktree shares one local `.git/kanban` board, each worker gets one isolated worktree, cards pass a Definition of Ready, and review consumes durable evidence. MornKanban adds visible dedicated reviewer/resolver/operator roles and automatic merge checkpoints.
 
 ## Quick start
 
-Requirements: macOS, Bash 3.2+, Python 3, [Herdr](https://herdr.dev), and at
+Requirements: an existing Git repository, macOS, Bash 3.2+, Python 3, [Herdr](https://herdr.dev), and at
 least one supported agent CLI (Claude Code or Codex).
 
 ```sh
@@ -45,16 +45,18 @@ the secretary for work normally; it creates cards and starts the visible
 dispatcher.
 
 For manual board setup, run `kanban init`. It creates
-`.kanban/{backlog,todo,doing,review,resolving,blocked,done,failed}/`, persistent
+`.git/kanban/{backlog,todo,doing,review,resolving,blocked,done,failed}/`, persistent
 `briefs/`, `reports/`, `reviews/`, and a project policy template at
-`.kanban/KANBAN.md`; a second run never overwrites the policy. `todo` is the
+`.git/kanban/KANBAN.md`; a second run never overwrites the policy. `todo` is the
 Ready queue; `backlog` cards are never dispatched.
 
 ## Installation and setup
 
 - `kanban-setup.sh install` creates or repairs the `~/.local/bin/kanban` symlink, installs the Claude Code and Codex skills, and installs the Claude secretary guard.
-- Commit `.kanban/KANBAN.md` and card records when the board history should travel with the project.
-- Customize `.kanban/KANBAN.md` for the project's agent/model composition and card policy before regular use.
+- The board is local runtime state under Git's common directory; it is shared by all worktrees and is never committed.
+- Customize `.git/kanban/KANBAN.md` for the project's agent/model composition and card policy before regular use.
+
+Pre-0.11 projects must stop their dispatcher and run `kanban migrate` once. This moves the old project-root `.kanban` directory to `.git/kanban`; normal commands do not support the old path. MornKanban never runs `git init`, creates an initial commit, or edits Git history during migration.
 
 ## Setup Wizard
 
@@ -78,10 +80,10 @@ Ready queue; `backlog` cards are never dispatched.
 
 ## Secretary Bootstrap (one-liner)
 
-A secretary agent is started with **`$kanban-dispatch 秘書として開始`** (the phrase 「**kanban の秘書として待機して**」 also triggers the skill). Everything else lives in the installed skill, this README, and the project's `.kanban/KANBAN.md`, not in the prompt. On that request the agent must:
+A secretary agent is started with **`$kanban-dispatch 秘書として開始`** (the phrase 「**kanban の秘書として待機して**」 also triggers the skill). Everything else lives in the installed skill, this README, and the project's `.git/kanban/KANBAN.md`, not in the prompt. On that request the agent must:
 
 1. Run `kanban-secretary.sh bootstrap` from the MornKanban checkout. It runs `kanban init` when needed, verifies the current Herdr pane, and registers this agent as the notification target. It never overwrites an existing `KANBAN.md`.
-2. Read `.kanban/KANBAN.md` and the Dialogue-Agent Contract below.
+2. Read `.git/kanban/KANBAN.md` and the Dialogue-Agent Contract below.
 3. Reply with **one short line** (e.g. 「秘書モード開始。課題を待機中 (worker=claude/sonnet, -j 4)」) — no plan dumps.
 4. Treat the bootstrap request as active for the rest of the conversation. For each subsequent user request: split it into cards per policy, start the visible dispatcher, reply briefly, and return to waiting. Never implement in the dialogue session.
 5. React to card-settlement pushes (`KANBAN_NOTIFY_CMD`) per policy: inspect `failure_kind`/`blocked_kind` and History, distinguish product failure from infrastructure failure or unverified work, and summarize when the board settles.
@@ -90,7 +92,7 @@ Herdr is required for secretary sessions. The bootstrap must test `HERDR_ENV`, `
 
 ## Period reports (`$kanban-report`)
 
-`$kanban-report` creates a graphical activity report from local card History and `.kanban/activity.jsonl`, then delivers the same slide deck as editable PPTX and rendered PDF. It runs only when the user asks for a report, retrospective, work recap, or postmortem. With no dates it covers today (00:00 through now, local timezone) and the current project; explicit dates and multi-project scope override those defaults.
+`$kanban-report` creates a graphical activity report from local card History and `.git/kanban/activity.jsonl`, then delivers the same slide deck as editable PPTX and rendered PDF. It runs only when the user asks for a report, retrospective, work recap, or postmortem. With no dates it covers today (00:00 through now, local timezone) and the current project; explicit dates and multi-project scope override those defaults.
 
 The report workflow is read-only against MornKanban projects and never runs Git. It distinguishes work-process failures, product failures, infrastructure failures, dependency waits, and unverified work; current card directories are not presented as historical end-state evidence without a timestamped History transition. The activity log retains only its newest 1000 events, so reports disclose possible truncation instead of inventing complete agent metrics.
 
@@ -99,8 +101,8 @@ The report workflow is read-only against MornKanban projects and never runs Git.
 Every project used to default its secretary's Herdr agent name to the same fixed `secretary`, so two projects bootstrapped in the same Herdr environment fought over one agent name — in practice this forced hand-picking a second name like `secretary-kimekyawa` and keeping every later `dispatch` in sync by hand. `kanban-secretary.sh` now resolves a stable, project-specific name instead, with this precedence:
 
 1. **`KANBAN_HERDR_SECRETARY` environment variable** — highest priority; also how a user who already relies on the old fixed `secretary` name keeps it (`KANBAN_HERDR_SECRETARY=secretary` still works unchanged).
-2. **`secretary_agent:` in this project's `.kanban/KANBAN.md` frontmatter** — a persistent, committed override, e.g. `secretary_agent: secretary-kimekyawa`.
-3. **Generated default** — `secretary-<project-slug>`. The slug prefers this exact project's alias in the PC-wide registry (`kanban projects add <alias> <path>`, see **Cross-Project Send**) when one is registered; otherwise it slugifies the project root's directory name. The project's root is identified by its **realpath**, so bootstrapping/dispatching from a subdirectory — or even from inside one of the project's own `.kanban/wt/<id>` card worktrees — always resolves to the same name as bootstrapping from the root itself.
+2. **`secretary_agent:` in this project's `.git/kanban/KANBAN.md` frontmatter** — a persistent local override, e.g. `secretary_agent: secretary-kimekyawa`.
+3. **Generated default** — `secretary-<project-slug>`. The slug prefers this exact project's alias in the PC-wide registry (`kanban projects add <alias> <path>`, see **Cross-Project Send**) when one is registered; otherwise it slugifies the project root's directory name. The project's root is identified by its **realpath**, so bootstrapping/dispatching from a subdirectory — or even from inside one of the project's own `.git/kanban/wt/<id>` card worktrees — always resolves to the same name as bootstrapping from the root itself.
 
 An explicit override (environment or `KANBAN.md`) that isn't a valid Herdr agent name (`^[a-z][a-z0-9_-]{0,63}$`) is rejected outright with a clear error — it is never silently replaced by a different name. A basename that is empty, symbol-only, or entirely non-ASCII (e.g. fully Unicode), or long enough to need truncation, gets a short stable hash suffix appended so unrelated projects in those categories don't collapse onto the same placeholder name; a plain ASCII basename that happens to match another *different* project's basename is **not** auto-disambiguated this way (two projects legitimately named `app` both default to `secretary-app`) — see the next paragraph for how that case is actually handled.
 
@@ -121,7 +123,7 @@ $kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/a
 
 `kanban-secretary.sh end [project-dir]` clears this pane's active-secretary marker (see **Secretary Guard** below) when a secretary session ends; a fresh `bootstrap` in a new pane also supersedes it automatically, so `end` is a courtesy, not a requirement.
 
-## Per-Project Policy: .kanban/KANBAN.md
+## Per-Project Policy: .git/kanban/KANBAN.md
 
 `KANBAN.md` is the project's kanban contract, in two layers:
 
@@ -132,9 +134,9 @@ $kanban-dispatch 秘書として開始   # → "secretary ready: project=~/git/a
 
 ## Dialogue-Agent Contract
 
-When the user assigns implementation work in a project that has `.kanban/`:
+When the user assigns implementation work in a project that has `.git/kanban/`:
 
-1. Read `.kanban/KANBAN.md` and follow its policy; it overrides the generic steps below where they differ.
+1. Read `.git/kanban/KANBAN.md` and follow its policy; it overrides the generic steps below where they differ.
 2. Write a structured card with `--type`, `--size`, `--goal`, one or more `--ac`, and `--scope`; add `--context`, `--out-of-scope`, and repeatable `--verify` where useful. It enters `backlog`. Run `kanban ready --check <id>`, then `kanban ready <id>` to move it into the Ready queue. `kanban add ... --ready` performs the same check at creation time. The worker has no conversation context, so acceptance criteria and verification must be self-contained. Existing free-form cards remain compatible and enter Ready directly. Use `--depends-on` only for a dependency explicitly required by the user or project policy. Leave `--review`/`--no-review` off to inherit project policy. Use `--diagnose` for read-only investigation and `--operate` only for a user-authorized external mutation.
 3. Start `~/git/MornKanban/kanban-secretary.sh dispatch` unless the lock shows a dispatcher is already running. The helper opens a separate Herdr dispatcher pane and binds worker, reviewer, resolver, operator, and notification commands. A nonstandard checkout uses its own absolute helper path.
 4. Return to the user immediately. Do not implement the task in the dialogue session.
@@ -175,7 +177,7 @@ above — self-reported "I know I shouldn't" is not enough:
 
 | Allowed in a secretary pane | Forbidden in a secretary pane |
 | --- | --- |
-| Read `.kanban/KANBAN.md`, the README contract, board/card files | Direct project or board file write/edit/delete (Edit/Write/NotebookEdit tools, `apply_patch`-equivalents, raw `rm`) |
+| Read `.git/kanban/KANBAN.md`, the README contract, board/card files | Direct project or board file write/edit/delete (Edit/Write/NotebookEdit tools, `apply_patch`-equivalents, raw `rm`) |
 | Managed Git inspection (`kanban inspect status|log|diff|diff-cached|show|branch`) | Direct `git`, even apparent reads: repository config can launch helpers; all mutations remain forbidden |
 | `kanban` board-control commands (`add`/`remove`/`config`/`resume`/`operation`/...) | Bare `kanban run` (visible dispatch is the only worker entrypoint), build/test/lint/formatter/server commands run directly outside Kanban |
 | `kanban-secretary.sh bootstrap`/`dispatch`/`end` | Headless agent CLIs (`claude -p`, `codex exec`) |
@@ -206,7 +208,7 @@ Managed `status` and working-tree `diff` run against isolated Git metadata and n
   pre-tool-call deny hook (`~/.codex/hooks` and `~/.codex/rules` are an
   approval-memory/notify surface, not a deny gate) — enforcement there is
   the skill/contract text (this file, `skills/kanban-dispatch/SKILL.md`,
-  `.kanban/KANBAN.md`) only. This is reported honestly, never displayed as
+  `.git/kanban/KANBAN.md`) only. This is reported honestly, never displayed as
   `enforced`.
 
 `kanban version`/`kanban --version`/`kanban-setup.sh` status output and
@@ -220,7 +222,7 @@ install); `kanban uninstall` removes only the managed entry.
 
 **Scope and lifecycle:** `kanban-secretary.sh bootstrap` atomically records
 the current Herdr pane id as the project's active secretary marker
-(`.kanban/.secretary-guard/marker.json`, keyed by project root realpath); a
+(`.git/kanban/.secretary-guard/marker.json`, keyed by project root realpath); a
 re-bootstrap in a new pane silently supersedes a stale marker left by a
 dead pane, and `kanban-secretary.sh end` clears it explicitly. The guard
 denies a tool only when the invoking pane id matches that marker for the
@@ -230,7 +232,7 @@ or unreadable marker fails open toward *allowing* the tool.
 
 **When a deny fires**, the message tells the agent to file a card and
 dispatch instead of asking the user to re-confirm the boundary. A capped,
-secret-free audit log (`.kanban/.secretary-guard/audit.log`, timestamp +
+secret-free audit log (`.git/kanban/.secretary-guard/audit.log`, timestamp +
 tool + category + reason only — never the command text or conversation
 body) records what was denied.
 
@@ -256,7 +258,7 @@ Custom worker commands (`KANBAN_WORKER_CMD`) receive the card's routing as `KANB
 
 ## Model Policy (default)
 
-Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and design roles**. Hands-on workers and reviewers default to a lower tier — claude cards to `sonnet`, light codex cards to `gpt-5.3-codex-spark` — regardless of backend. Raise a specific card with `-m` only for design-heavy or hard cards, and note why in the card. For `gpt-5.6-sol`, use `-e medium` for normal work and `-e high` for complex implementation instead of inheriting an unnecessarily high shared setting. Projects customize models in `.kanban/KANBAN.md` (`default_model`, `review_model`), but effort remains a per-card choice.
+Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and design roles**. Hands-on workers and reviewers default to a lower tier — claude cards to `sonnet`, light codex cards to `gpt-5.3-codex-spark` — regardless of backend. Raise a specific card with `-m` only for design-heavy or hard cards, and note why in the card. For `gpt-5.6-sol`, use `-e medium` for normal work and `-e high` for complex implementation instead of inheriting an unnecessarily high shared setting. Projects customize models in `.git/kanban/KANBAN.md` (`default_model`, `review_model`), but effort remains a per-card choice.
 
 ## Herdr Integration (no headless workers)
 
@@ -266,11 +268,11 @@ Top-tier models (fable / opus) are reserved for the **secretary (dialogue) and d
 ~/git/MornKanban/kanban-secretary.sh dispatch
 ```
 
-The helper verifies that it is called from the current Herdr pane, keeps focus on the secretary, uses the project's `jobs` setting, and closes the dispatcher's pane when the run finishes. At startup it copies and `bash -n` validates one private worker-wrapper snapshot, so a later MornKanban checkout update cannot change a running dispatcher's script. `dispatcher pane started` confirms only that Herdr accepted the pane command. The dispatcher output remains visible and is also written to `.kanban/wt/dispatcher.log`; a nonzero exit sends the secretary a `dispatcher_failed` notification with the exit status and log path, so it reports the real startup/runtime error instead of assuming cards ran. The secretary must not improvise recovery with `git init`, `commit`, or another Git mutation. `dispatch --once` preserves the browser-role exclusivity contract.
+The helper verifies that it is called from the current Herdr pane, keeps focus on the secretary, uses the project's `jobs` setting, and closes the dispatcher's pane when the run finishes. At startup it copies and `bash -n` validates one private worker-wrapper snapshot, so a later MornKanban checkout update cannot change a running dispatcher's script. `dispatcher pane started` confirms only that Herdr accepted the pane command. The dispatcher output remains visible and is also written to `.git/kanban/wt/dispatcher.log`; a nonzero exit sends the secretary a `dispatcher_failed` notification with the exit status and log path, so it reports the real startup/runtime error instead of assuming cards ran. The secretary must not improvise recovery with `git init`, `commit`, or another Git mutation. `dispatch --once` preserves the browser-role exclusivity contract.
 
 The secretary has no board watcher of its own, so card results are pushed to it: set `KANBAN_NOTIFY_CMD` and the dispatcher invokes it as `<cmd> <done|failed|blocked> <title>` whenever a card settles (never fatal to the run). The pane runner also invokes the hook as `<cmd> dispatcher_failed <log-path> <exit-status>` if the dispatcher itself stops unsuccessfully. `herdr-notify-secretary.sh` is the Herdr hook — it prompts the secretary agent (name from `KANBAN_HERDR_SECRETARY`, which `dispatch` always sets to that project's resolved secretary name — see **Secretary agent naming** above; a standalone invocation with no `KANBAN_HERDR_SECRETARY` resolves the same name itself from its own project root) to inspect structured state and History instead of treating every failure as a product verdict.
 
-The wrapper starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker/operator backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, resolver backend from `KANBAN_RESOLVER`, and `auto` resolved via `KANBAN_BACKEND_ORDER`. Every role gets the **same** full-trust permission policy (see **UNRESTRICTED permission policy** below). The dispatcher writes each exact worker prompt to `.kanban/briefs/<id>-rN.md`, the full answer to `reports/<id>-rN.md`, and the reviewer output to `reviews/<id>-rN.md`. Workers receive the stable card specification plus only the latest rework feedback; reviewers inspect files/diff first, then receive that attempt's report as evidence. Accumulated History is not resent. Structured implementation reports must contain `Summary`, `Acceptance Criteria & Evidence`, `Verification`, `Changes`, `Deviations & Decisions`, and `Follow-ups`; missing sections produce `needs_info` without launching a reviewer. The startup ACK remains separately required.
+The wrapper starts an interactive agent whose `--kind` (`claude` or `codex`) follows the card's own routing — worker/operator backend from `KANBAN_CARD_BACKEND`, reviewer backend from `KANBAN_REVIEWER`, resolver backend from `KANBAN_RESOLVER`, and `auto` resolved via `KANBAN_BACKEND_ORDER`. Every role gets the **same** full-trust permission policy (see **UNRESTRICTED permission policy** below). The dispatcher writes each exact worker prompt to `.git/kanban/briefs/<id>-rN.md`, the full answer to `reports/<id>-rN.md`, and the reviewer output to `reviews/<id>-rN.md`. Workers receive the stable card specification plus only the latest rework feedback; reviewers inspect files/diff first, then receive that attempt's report as evidence. Accumulated History is not resent. Structured implementation reports must contain `Summary`, `Acceptance Criteria & Evidence`, `Verification`, `Changes`, `Deviations & Decisions`, and `Follow-ups`; missing sections produce `needs_info` without launching a reviewer. The startup ACK remains separately required.
 
 The pane title and wrapper diagnostic identify the role and `UNRESTRICTED` policy. It accepts the folder-trust dialog, waits specifically for `idle`/`done`, and records `agent_started` only after Herdr accepts the task prompt; `agent_acknowledged` is a separate fact shown by the dispatcher. A rejected prompt becomes an immediate infrastructure retry instead of an invisible wait. Completion still requires a card/role/attempt-bound stable `.kanban-answer.md`, never terminal chrome. If an agent finishes chat without that file, the wrapper asks the same session once to write only the missing answer, waits up to 60 seconds, then reports `missing_answer` rather than rerunning the whole task silently. Panes are closed when the attempt ends.
 
@@ -282,7 +284,7 @@ All agents run **without any permission prompt or sandbox restriction** by defau
 
 **Risk**: an unrestricted agent can read/write files outside the worktree, read credentials on disk, make arbitrary network requests, and run any local process or git/GitHub command — including against a card body that carries a prompt injection. Treat every card as if its instructions could be adversarial.
 
-**Dial it back per project** by overriding these in `.kanban/KANBAN.md` frontmatter (or the matching env var, which always wins):
+**Dial it back per project** by overriding these in `.git/kanban/KANBAN.md` frontmatter (or the matching env var, which always wins):
 
 ```yaml
 claude_perms: acceptEdits        # or manual / plan / dontAsk — see `claude --help`
@@ -302,9 +304,9 @@ A project's own explicit `claude_perms`/`codex_sandbox`/`codex_full_bypass`/`cod
 
 ## Dispatcher Behavior
 
-`kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel. It requires the visible worker wrapper supplied by `kanban-secretary.sh dispatch`; a bare invocation cannot fall back to `claude -p` or `codex exec`. New boards default to `jobs: 4`. Any positive integer is accepted: MornKanban imposes no artificial upper limit, though the machine's process, memory, API, and Herdr capacity still apply. Without `-j` or `KANBAN_JOBS`, the dispatcher uses `.kanban/KANBAN.md`'s `jobs:` value and re-reads it while running. Raising it fills new slots; lowering it keeps current jobs alive and only pauses new starts. In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:
+`kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel. It requires the visible worker wrapper supplied by `kanban-secretary.sh dispatch`; a bare invocation cannot fall back to `claude -p` or `codex exec`. New boards default to `jobs: 4`. Any positive integer is accepted: MornKanban imposes no artificial upper limit, though the machine's process, memory, API, and Herdr capacity still apply. Without `-j` or `KANBAN_JOBS`, the dispatcher uses `.git/kanban/KANBAN.md`'s `jobs:` value and re-reads it while running. Raising it fills new slots; lowering it keeps current jobs alive and only pauses new starts. In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:
 
-1. Create branch `kanban/<id>` and worktree `.kanban/wt/<id>` from the branch checked out at dispatch start.
+1. Create branch `kanban/<id>` and worktree `.git/kanban/wt/<id>` from the branch checked out at dispatch start.
 2. Persist the exact brief and full worker report, require startup ACK, and commit the result on the card branch. Accumulated History stays on disk and is not resent.
 3. Validate the structured report headings. A separate reviewer inspects diff/files before the report, then outputs `{"outcome":"accept|needs_info|rework|spike","score":0-100,"feedback":"..."}`. Legacy score-only JSON remains accepted for old cards.
 4. `accept` records `accepted_at`, then the serialized `--no-ff` merge records `merged_at` and moves the card to `done`. `needs_info`/`rework` retry in the same worktree. `spike` parks as `blocked_kind: review_decision` without discarding the branch/worktree. Legacy score-only reviews still use the configured threshold.
@@ -317,7 +319,7 @@ An `--operate` card is the narrow exception to worktree execution: it runs once 
 A card that passed review can still conflict with `main` at merge time if another card landed first. Instead of dropping straight to `failed`, the dispatcher hands the conflict to a resolver role, a formal state distinct from an ordinary worker retry:
 
 1. The card moves `doing`/passed review → `resolving`; the original card branch (`kanban/<id>`) is kept, never discarded.
-2. A fresh worktree/branch (`.kanban/wt/<id>-resolve` / `kanban-resolve/<id>`) is created from the current `main`, and the card branch is merged into it, reproducing the conflict.
+2. A fresh worktree/branch (`.git/kanban/wt/<id>-resolve` / `kanban-resolve/<id>`) is created from the current `main`, and the card branch is merged into it, reproducing the conflict.
 3. The resolver backend (`KANBAN_RESOLVE_CMD`, or the card's own backend/model/effort by default) is given the conflicted file list, both branch names, and the original task, and is instructed to **preserve both sides' intent — never discard one side outright** — and to run whatever tests the task requires.
 4. Once conflict markers are gone, the same review agent inspects the resolve worktree and returns the same typed outcome as a normal attempt.
 5. `accept` → only the **resolve branch** is merged into `main` (the original card branch is deleted without ever being merged itself, so nothing merges twice); both worktrees are removed, card → `done`.
@@ -366,7 +368,7 @@ A reviewer (or resolver review) that never returns a parseable typed review obje
 4. If retries are exhausted, the card moves to `blocked` with frontmatter `blocked_kind: review_infra` — **not** `failed` — and its branch, worktree, and every commit so far are kept. History explains this is a review infrastructure stop, not a code failure, and names the recovery command.
 5. Unlike the ordering-dependency `blocked` kind above, a `review_infra` blocked card is **not** auto-reclaimed to `todo` on dispatcher restart. It stays parked until `kanban resume <id>` resets the infra counters and requeues it; the visible dispatcher then resumes only the pending review on the kept worker or resolver branch. `review_pending` / `resolve_review_pending` checkpoints prevent completed work from being rerun, and merge checkpoints recover a crash before or just after merge without repeating the worker/reviewer.
 
-Outside a git repository the unpinned `jobs: 4` default automatically falls back to one sequential in-place worker; only an explicit `-j`/`KANBAN_JOBS` greater than one is refused. No Git initialization or commit is attempted. Worker/resolver output tail, every review score, and rework instructions are appended to the card's History section. A restarted dispatcher reclaims safe local work, preserves resolver checkpoints, and parks an interrupted external operation as `operation_unknown`. The dispatcher's atomic single-instance lock guarantees no card is picked up twice.
+Git is mandatory; non-Git projects are rejected without fallback, initialization, or an automatic commit. Worker/resolver output tail, every review score, and rework instructions are appended to the card's History section. A restarted dispatcher reclaims safe local work, preserves resolver checkpoints, and parks an interrupted external operation as `operation_unknown`. The dispatcher's atomic single-instance lock guarantees no card is picked up twice.
 
 ## Configuration (environment variables)
 
@@ -391,7 +393,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_REVIEW_ENABLED` | `true`/`false` (aliases: `1`/`0`, `yes`/`no`, `on`/`off`); overrides `KANBAN.md`'s `review_enabled`, but a card's own explicit `--review`/`--no-review` still wins — see **Review on/off** above |
 | `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` / `KANBAN_RESOLVE_CMD` / `KANBAN_OPERATION_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |
 | `KANBAN_NOTIFY_CMD` | Hook run as `<cmd> <done\|failed\|blocked> <title>` when a card settles; pane failures use `<cmd> dispatcher_failed <log-path> <exit-status>` (see Herdr Integration) |
-| `KANBAN_DEBUG` | Write per-job xtrace logs to `.kanban/wt/job.*.trace` |
+| `KANBAN_DEBUG` | Write per-job xtrace logs to `.git/kanban/wt/job.*.trace` |
 | `KANBAN_HERDR_SECRETARY` | Overrides the resolved per-project Herdr secretary agent name (see **Secretary agent naming**); no `KANBAN.md` counterpart of the same name — use the `secretary_agent:` frontmatter key for a persistent override instead |
 | `KANBAN_REVIEW_INFRA_MAX_RETRIES` | Bounded reviewer-infrastructure-error retries before a card moves to `blocked` (kind `review_infra`); default 2 — see **Review infrastructure errors** |
 | `KANBAN_REVIEW_INFRA_BACKOFF_SECONDS` | Base seconds for the review-infra retry backoff (`base × retry number`, capped at 10s); default 2 |
@@ -400,9 +402,9 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 
 The visible dispatcher pane uses `dispatcher_tui.py`, a Python-standard-library terminal UI. Its fixed upper region refreshes once per second and shows state counts, up to four active cards (`Showing M of N` semantics), attempts, work-order ACK (`-` not prompted / `…` waiting / `✓` received), each live agent's actual AI backend/model/effort, and the latest observed card move such as `TODO → DOING`. A value that the wrapper cannot observe because it is inherited from the agent is shown as `unknown`, never guessed. The lower region continuously shows the tail of the normal dispatcher log. Routing metadata precedes display-width-truncated Japanese titles so it remains visible inside a narrow pane.
 
-The TUI follows terminal resizes and uses symbols plus labels rather than color alone. On a non-TTY, `TERM=dumb`, or a pane smaller than 40×10, it falls back to the original plain streaming log. Both modes write the complete raw child output to `.kanban/wt/dispatcher.log` and preserve the dispatcher's real exit status for failure notification.
+The TUI follows terminal resizes and uses symbols plus labels rather than color alone. On a non-TTY, `TERM=dumb`, or a pane smaller than 40×10, it falls back to the original plain streaming log. Both modes write the complete raw child output to `.git/kanban/wt/dispatcher.log` and preserve the dispatcher's real exit status for failure notification.
 
-Each visible worker/reviewer/resolver/operator also appends a bounded correlation event to `.kanban/activity.jsonl`. The newest 1000 events retain only operational metadata. Full worker briefs/reports and reviewer outputs live locally in `.kanban/briefs`, `reports`, and `reviews`; these may contain source paths or agent output and should be protected like the cards themselves.
+Each visible worker/reviewer/resolver/operator also appends a bounded correlation event to `.git/kanban/activity.jsonl`. The newest 1000 events retain only operational metadata. Full worker briefs/reports and reviewer outputs live locally in `.git/kanban/briefs`, `reports`, and `reviews`; these may contain source paths or agent output and should be protected like the cards themselves.
 
 ## Cross-Project Send (file a card into any registered project, from anywhere)
 
@@ -411,15 +413,15 @@ Each visible worker/reviewer/resolver/operator also appends a bounded correlatio
 ### Registering projects
 
 ```sh
-kanban projects add <alias> <path>      # register: realpath-normalized, must already have .kanban (run `kanban init` first)
+kanban projects add <alias> <path>      # register: realpath-normalized Git project with .git/kanban
 kanban projects list [--json]           # alias -> root, one per line (or JSON)
-kanban projects show <alias>            # root, .kanban dir, timestamps, dispatcher running/stopped
+kanban projects show <alias>            # root, shared board dir, timestamps, dispatcher running/stopped
 kanban projects update <alias> <path>   # repoint an existing alias at a new path
 kanban projects remove <alias>          # unregister (send stops recognizing it immediately)
 ```
 
 - Aliases are lowercase letters/digits/`-`/`_`, starting with a letter or digit, max 64 chars; anything else is rejected with a clear error.
-- A path with no `.kanban` directory, a path that doesn't exist, a duplicate alias, or a path already registered under a different alias (checked by `realpath`, so a symlink or `..` traversal can't register a second alias for the same project) are all rejected — `--force` on `add` overrides the alias/path-duplicate checks explicitly.
+- A non-Git path, a Git project with no `.git/kanban` board, a path that doesn't exist, a duplicate alias, or a path already registered under a different alias are rejected. `--force` on `add` overrides only alias/path duplicates.
 - The registry file defaults to `${XDG_CONFIG_HOME:-~/.config}/mornkanban/projects.json`; `KANBAN_CONFIG_DIR` changes its config directory and `KANBAN_PROJECTS_FILE` changes the exact file.
 
 ### Sending a card
@@ -430,10 +432,10 @@ kanban send <alias> "title" [-b claude|codex|auto] [-m model] [-e effort] [--dep
 
 - Legacy cards enter the destination Ready queue. Structured cards enter its `backlog` unless `--ready` passes the same required-field check. A card is never written in the source project merely because `send` ran there.
 - `--diagnose` and `--operate` preserve the same mutually-exclusive task contracts as local `kanban add`, including review-off metadata for read-only diagnosis and serialized external operations.
-- Unset `-b`/`-m`/`-t` default from the destination's own `.kanban/KANBAN.md` (`default_backend`/`default_model`/`threshold`), exactly like a card added locally with `kanban add` there; unset `-e` inherits the agent's shared effort setting. The sending project's policy is never consulted.
+- Unset `-b`/`-m`/`-t` default from the destination's own `.git/kanban/KANBAN.md` (`default_backend`/`default_model`/`threshold`), exactly like a card added locally with `kanban add` there; unset `-e` inherits the agent's shared effort setting. The sending project's policy is never consulted.
 - The card's frontmatter records `source_alias` (set only when the current directory — or `--from PATH` — is itself inside a registered project), `source_path` (always, the realpath of where the send was issued from), and `dispatched_via: send`, so a worker or reviewer can see where a card came from without leaking any secret/env-var values.
 - Card IDs use a random suffix and an atomic temp-file/hardlink write inside the destination state directory, so concurrent sends do not expose partial cards.
-- `kanban send` never starts or touches a dispatcher. If the destination's `.kanban/.lock` shows no live process, it prints (to stderr, after the created card's path on stdout) that the card is filed but nothing will run it until `kanban run` or the visible Herdr dispatcher is started there — it does not silently fall back to a headless worker.
+- `kanban send` never starts or touches a dispatcher. If the destination's `.git/kanban/.lock` shows no live process, it prints (to stderr, after the created card's path on stdout) that the card is filed but nothing will run it until `kanban run` or the visible Herdr dispatcher is started there — it does not silently fall back to a headless worker.
 
 ## Testing MornKanban Itself
 
@@ -441,7 +443,7 @@ This repo's suite has three bounded tiers — see `gui/VERIFY.md`. Use `python3 
 
 ## Constraints
 
-- One dispatcher per project (`.kanban/.lock`); parallelism comes from `-j`, not from extra dispatchers.
+- One dispatcher per project (`.git/kanban/.lock`); parallelism comes from `-j`, not from extra dispatchers.
 - Parallel cards that edit the same files will collide at merge time; the resolver role handles that automatically (see `resolving` above) and only lands in `failed` if it cannot genuinely resolve it. The secretary must not hold cards back to avoid this — split by file boundaries where convenient, but never as a precondition for adding a card.
 - Merging targets the branch checked out when `kanban run` started; keep the main checkout clean while the dispatcher runs, and do not switch branches under it.
 - Structured cards cannot reach Ready without type, size, goal, acceptance criteria, and scope; reviewers still verify the actual diff and evidence rather than trusting prose.

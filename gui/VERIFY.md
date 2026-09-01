@@ -64,7 +64,7 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
 
 テスト対象:
 
-- 秘書 bootstrap が `.kanban/KANBAN.md` を初期化し、current Herdr agent をproject固有の`secretary-<slug>`名で登録する
+- 秘書 bootstrap が `.git/kanban/KANBAN.md` を初期化し、current Herdr agent をproject固有の`secretary-<slug>`名で登録する
 - visible dispatcher が worker / reviewer / resolver / operator / notify を一組で別 Herdr pane に渡す
 - visible worker がprompt拒否を即時失敗として記録し、folder trust後はidle/doneまで待ち、回答ファイル忘れを同じsessionへの一度の再要求で回収する
 - Herdr 外では秘書を開始せず、Herdr必須として失敗する

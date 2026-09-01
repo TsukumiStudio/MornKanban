@@ -29,7 +29,7 @@ shell_quote() {
 # resolve_secretary_name <root> -> sets SECRETARY_NAME / SECRETARY_SOURCE.
 # Priority (enforced by registry/secretary.py, shared with dispatch and the
 # herdr-notify-secretary.sh fallback): environment (KANBAN_HERDR_SECRETARY)
-# > .kanban/KANBAN.md `secretary_agent:` > generated `secretary-<slug>`
+# > .git/kanban/KANBAN.md `secretary_agent:` > generated `secretary-<slug>`
 # default. An invalid explicit override fails loudly here instead of
 # silently falling back to a different name.
 resolve_secretary_name() {
@@ -71,7 +71,7 @@ for agent in d.get("result", {}).get("agents", []):
         break
 ' "$SECRETARY_NAME" "$HERDR_PANE_ID") || die "could not parse Herdr agent list"
     if [[ -n $owner ]]; then
-      die "secretary name '$SECRETARY_NAME' is already owned by pane $owner; refusing to steal another project's agent (set secretary_agent in $root/.kanban/KANBAN.md)"
+      die "secretary name '$SECRETARY_NAME' is already owned by pane $owner; refusing to steal another project's agent (set secretary_agent in $(kanban_board_dir "$root")/KANBAN.md)"
     fi
     herdr agent rename "$HERDR_PANE_ID" "$SECRETARY_NAME" >/dev/null ||
       die "failed to repair secretary identity '$current' -> '$SECRETARY_NAME' for pane $HERDR_PANE_ID"
@@ -81,7 +81,7 @@ for agent in d.get("result", {}).get("agents", []):
 }
 
 bootstrap() {
-  local target=${1:-$PWD} root git_root
+  local target=${1:-$PWD} root board git_root
   require_herdr
   target=$(cd "$target" && pwd)
   if root=$(kanban_project_root "$target"); then
@@ -91,8 +91,9 @@ bootstrap() {
   fi
   # `kanban init` is idempotent and never overwrites an existing KANBAN.md.
   (cd "$target" && "$KANBAN_BIN" init)
-  root=$(kanban_project_root "$target") || die "kanban init did not create .kanban"
-  [[ -f $root/.kanban/KANBAN.md ]] || die "$root/.kanban/KANBAN.md is missing"
+  root=$(kanban_project_root "$target") || die "kanban init did not create a Git board"
+  board=$(kanban_board_dir "$root") || die "could not resolve the Git common directory"
+  [[ -f $board/KANBAN.md ]] || die "$board/KANBAN.md is missing"
 
   resolve_secretary_name "$root"
 
@@ -104,7 +105,7 @@ bootstrap() {
 could not register this agent as '$SECRETARY_NAME' for project '$root' (name source: $SECRETARY_SOURCE).
 If another project's secretary is already using this name, set a distinct one and bootstrap again:
   - one-off: KANBAN_HERDR_SECRETARY=<name> $0 bootstrap $root
-  - persistent: add 'secretary_agent: <name>' to $root/.kanban/KANBAN.md frontmatter
+  - persistent: add 'secretary_agent: <name>' to $board/KANBAN.md frontmatter
 This agent was NOT renamed; no other project's running agent was touched."
 
   # Record this pane as the project's active secretary. Project/pane scoped;
@@ -123,7 +124,7 @@ guard_status_line() {
 
 end() {
   local target=${1:-$PWD} root
-  root=$(kanban_project_root "$target") || die "no .kanban directory found"
+  root=$(kanban_project_root "$target") || die "Git repository with a board required"
   python3 -c '
 import os, sys
 sys.path.insert(0, os.path.join(sys.argv[1], "guard"))
@@ -134,18 +135,20 @@ marker.clear_marker(sys.argv[2])
 }
 
 run_dispatcher_pane() {
-  local once=false target=$PWD root log status notify_error runtime_dir runtime_worker
+  local once=false target=$PWD root board log status notify_error runtime_dir runtime_worker
   local -a dispatcher_cmd
   if [[ ${1:-} == --once ]]; then once=true; shift; fi
   if [[ $# -gt 0 ]]; then target=$1; shift; fi
   [[ $# -eq 0 ]] || die "internal dispatcher runner received unexpected arguments"
-  root=$(kanban_project_root "$target") || die "no .kanban directory found"
-  log=$root/.kanban/wt/dispatcher.log
+  root=$(kanban_project_root "$target") || die "Git repository with a board required"
+  board=$(kanban_board_dir "$root") || die "could not resolve the Git common directory"
+  [[ -d $board ]] || die "no board at $board"
+  log=$board/wt/dispatcher.log
   mkdir -p "$(dirname "$log")"
 
   # One dispatcher must use one known-good wrapper version. The source
   # checkout may be updated while another project's dispatcher is alive.
-  if ! runtime_dir=$(mktemp -d "$root/.kanban/wt/runtime.XXXXXX"); then
+  if ! runtime_dir=$(mktemp -d "$board/wt/runtime.XXXXXX"); then
     status=70
     printf 'kanban-secretary: worker runtime snapshot could not be created\n' | tee -a "$log" >&2
     "$REPO/herdr-notify-secretary.sh" dispatcher_failed "$log" "$status" >/dev/null 2>&1 || true
@@ -187,16 +190,18 @@ run_dispatcher_pane() {
 }
 
 dispatch() {
-  local once=false target=$PWD root lock pane command
+  local once=false target=$PWD root board lock pane command
   if [[ ${1:-} == --once ]]; then once=true; shift; fi
   if [[ $# -gt 0 ]]; then target=$1; shift; fi
   [[ $# -eq 0 ]] || die "usage: $0 dispatch [--once] [project-dir]"
 
   require_herdr
-  root=$(kanban_project_root "$target") || die "no .kanban directory found (run bootstrap first)"
+  root=$(kanban_project_root "$target") || die "Git repository required (run bootstrap first)"
+  board=$(kanban_board_dir "$root") || die "could not resolve the Git common directory"
+  [[ -d $board ]] || die "no board at $board (run bootstrap first)"
   resolve_secretary_name "$root"
   ensure_secretary_binding "$root"
-  lock=$root/.kanban/.lock
+  lock=$board/.lock
   if [[ -f $lock ]] && kill -0 "$(cat "$lock")" 2>/dev/null; then
     echo "dispatcher already running: pid=$(cat "$lock")"
     return 0
@@ -212,7 +217,7 @@ dispatch() {
   command="$command KANBAN_RESOLVE_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=resolver $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_OPERATION_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=operator $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_NOTIFY_CMD=$(shell_quote "$REPO/herdr-notify-secretary.sh")"
-  command="$command KANBAN_ACTIVITY_LOG=$(shell_quote "$root/.kanban/activity.jsonl")"
+  command="$command KANBAN_ACTIVITY_LOG=$(shell_quote "$board/activity.jsonl")"
   command="$command KANBAN_HERDR_SECRETARY=$(shell_quote "$SECRETARY_NAME")"
   command="$command KANBAN_HERDR_SECRETARY_PANE=$(shell_quote "$HERDR_PANE_ID")"
   command="$command KANBAN_HERDR_DISPATCHER_PANE=$(shell_quote "$pane")"

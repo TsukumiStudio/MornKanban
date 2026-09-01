@@ -187,7 +187,7 @@ pane=$(jget 'd["result"]["pane"]["pane_id"]' <<<"$pane_json") ||
   infra_error pane_layout_failed "could not read the new AI pane id"
 
 # Label the pane so the user can tell WHO is doing WHAT at a glance. All
-# roles run full-trust by default (see .kanban/KANBAN.md's worker/reviewer
+# roles run full-trust by default (see .git/kanban/KANBAN.md's worker/reviewer
 # 権限ポリシー section) so the pane title says so plainly, not just via color.
 label="kanban AI ${role} UNRESTRICTED ${backend}/${model:-unknown}/${effort:-unknown}: ${KANBAN_CARD_TITLE:-?}"
 herdr pane rename "$pane" "$(echo "$label" | cut -c1-48)" >/dev/null 2>&1 ||
@@ -206,7 +206,7 @@ pane_lock_owned=false
 # exists, should reuse the same KANBAN_CLAUDE_PERMS/KANBAN_CODEX_* knobs):
 # default is full-trust (no permission prompt, no sandbox/approval), driven
 # by KANBAN_CLAUDE_PERMS / KANBAN_CODEX_SANDBOX / KANBAN_CODEX_FULL_BYPASS /
-# KANBAN_CODEX_APPROVAL, which kanban.sh exports from .kanban/KANBAN.md
+# KANBAN_CODEX_APPROVAL, which kanban.sh exports from .git/kanban/KANBAN.md
 # frontmatter (env wins) when it invokes this wrapper as
 # KANBAN_WORKER_CMD/KANBAN_REVIEW_CMD.
 echo "herdr-agent-worker: [UNRESTRICTED] role=$role backend=$backend" >&2

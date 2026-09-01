@@ -303,7 +303,9 @@ class CollectStatusFixtureTests(unittest.TestCase):
 
     def test_project_detected_when_inside_kanban_project(self):
         project = self.root / "proj"
-        (project / ".kanban" / "todo").mkdir(parents=True)
+        project.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(project)], check=True)
+        (project / ".git" / "kanban" / "todo").mkdir(parents=True)
         nested = project / "src" / "deep"
         nested.mkdir(parents=True)
         status = self.dashboard.collect_status(cwd=str(nested))
@@ -326,7 +328,9 @@ class CollectStatusFixtureTests(unittest.TestCase):
         registry = importlib.import_module("registry.store")
         importlib.reload(registry)
         project = self.root / "regproj"
-        (project / ".kanban").mkdir(parents=True)
+        project.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(project)], check=True)
+        (project / ".git" / "kanban").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"KANBAN_PROJECTS_FILE": str(self.home / "cfg" / "projects.json")}):
             registry.add("regproj", str(project))
             status = self.dashboard.collect_status(cwd=str(self.root))

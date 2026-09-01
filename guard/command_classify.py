@@ -41,7 +41,7 @@ _HARD_DENY_BINARIES = {
 }
 
 _KANBAN_SUBCOMMANDS = {
-    "", "init", "add", "remove", "config", "list", "ls", "show",
+    "", "init", "migrate", "add", "remove", "config", "list", "ls", "show",
     "resume", "operation", "inspect", "projects", "send", "--version", "version",
     "install", "update", "uninstall",
 }

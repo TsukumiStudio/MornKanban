@@ -20,8 +20,8 @@ KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
 
 # Distribution files copied to build a standalone repo outside this worktree
 # (setup_core.install_cli/install_skills/run_update all refuse to run from a
-# .kanban/wt/<id> worktree by design).
-DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "dispatcher_tui.py", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
+# .git/kanban/wt/<id> worktree by design).
+DIST_FILES = ["kanban.sh", "kanban-root.sh", "kanban-secretary.sh", "kanban-setup.sh", "dispatcher_tui.py", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
 
 # `KANBAN_TEST_TIER=fast` skips the handful of tests that drive a real
 # `kanban.sh run --once` end to end (real git worktree/branch/merge
@@ -54,7 +54,7 @@ def _init_git_repo(path, origin=None):
     run("init", "-q")
     run("checkout", "-q", "-b", "main")
     run("add", "-A")
-    run("-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-q", "-m", "init")
+    run("-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "--allow-empty", "-q", "-m", "init")
     if origin is not None:
         run("remote", "add", "origin", str(origin))
         run("push", "-q", "origin", "main")
@@ -68,6 +68,7 @@ class SecretaryScriptTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.project = self.root / "project"
         self.project.mkdir()
+        _init_git_repo(self.project)
         self.log = self.root / "herdr.log"
         fake_bin = self.root / "bin"
         fake_bin.mkdir()
@@ -129,7 +130,7 @@ class SecretaryScriptTests(unittest.TestCase):
         result = self.run_secretary("bootstrap", self.project)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((self.project / ".kanban" / "KANBAN.md").is_file())
+        self.assertTrue((self.project / ".git" / "kanban" / "KANBAN.md").is_file())
         self.assertNotIn("execution=", result.stdout)
         # No project-wide fixed "secretary" default any more: the basename
         # of self.project is "project", so the generated default is
@@ -151,15 +152,13 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("secretary=secretary-project", sub_result.stdout)
 
     def test_bootstrap_resolved_name_is_stable_from_inside_a_card_worktree(self):
-        # .kanban/wt/<id> checkouts carry their own tracked .kanban/ subtree
-        # (todo/doing/... are committed); bootstrapping from inside one must
-        # still resolve the outer project's identity, not the worktree's own.
-        wt = self.project / ".kanban" / "wt" / "20260101-000000-1"
-        wt.mkdir(parents=True)
-        (wt / ".kanban").mkdir()
-
         root_result = self.run_secretary("bootstrap", self.project)
         self.assertEqual(root_result.returncode, 0, root_result.stderr)
+        wt = self.project / ".git" / "kanban" / "wt" / "20260101-000000-1"
+        subprocess.run(
+            ["git", "-C", str(self.project), "worktree", "add", "-q", "-b", "test-card", str(wt)],
+            check=True,
+        )
         self.log.write_text("", encoding="utf-8")
         wt_result = self.run_secretary("bootstrap", wt)
 
@@ -169,7 +168,7 @@ class SecretaryScriptTests(unittest.TestCase):
     def test_bootstrap_honors_kanban_md_secretary_agent_override(self):
         result = self.run_secretary("bootstrap", self.project)
         self.assertEqual(result.returncode, 0, result.stderr)
-        kanban_md = self.project / ".kanban" / "KANBAN.md"
+        kanban_md = self.project / ".git" / "kanban" / "KANBAN.md"
         content = kanban_md.read_text(encoding="utf-8")
         kanban_md.write_text(
             content.replace("codex_sandbox: danger-full-access", "codex_sandbox: danger-full-access\nsecretary_agent: secretary-override"),
@@ -186,7 +185,7 @@ class SecretaryScriptTests(unittest.TestCase):
     def test_bootstrap_environment_override_beats_kanban_md(self):
         result = self.run_secretary("bootstrap", self.project)
         self.assertEqual(result.returncode, 0, result.stderr)
-        kanban_md = self.project / ".kanban" / "KANBAN.md"
+        kanban_md = self.project / ".git" / "kanban" / "KANBAN.md"
         content = kanban_md.read_text(encoding="utf-8")
         kanban_md.write_text(
             content.replace("codex_sandbox: danger-full-access", "codex_sandbox: danger-full-access\nsecretary_agent: secretary-from-md"),
@@ -306,7 +305,7 @@ class SecretaryScriptTests(unittest.TestCase):
         result = self.run_secretary("__run-dispatcher-pane", self.project, env=env)
 
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
-        dispatcher_log = self.project / ".kanban" / "wt" / "dispatcher.log"
+        dispatcher_log = self.project / ".git" / "kanban" / "wt" / "dispatcher.log"
         logged = dispatcher_log.read_text(encoding="utf-8")
         self.assertIn("parallel mode requires", logged)
         self.assertIn("dispatcher exited with status 42", logged)
@@ -323,7 +322,7 @@ class SecretaryScriptTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "set -eu\n"
             "case \"$KANBAN_WORKER_CMD\" in\n"
-            "  \"$EXPECTED_ROOT\"/.kanban/wt/runtime.*/herdr-agent-worker.sh) ;;\n"
+            "  \"$EXPECTED_ROOT\"/.git/kanban/wt/runtime.*/herdr-agent-worker.sh) ;;\n"
             "  *) echo \"not a runtime snapshot: $KANBAN_WORKER_CMD\" >&2; exit 9 ;;\n"
             "esac\n"
             "bash -n \"$KANBAN_WORKER_CMD\"\n"
@@ -333,7 +332,7 @@ class SecretaryScriptTests(unittest.TestCase):
         )
         probe.chmod(0o755)
         env = self.env.copy()
-        env.update({"KANBAN_BIN": str(probe), "EXPECTED_ROOT": str(self.project)})
+        env.update({"KANBAN_BIN": str(probe), "EXPECTED_ROOT": str(self.project.resolve())})
 
         result = self.run_secretary("__run-dispatcher-pane", self.project, env=env)
 
@@ -392,7 +391,7 @@ class SecretaryScriptTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Herdr is required", result.stderr)
-        self.assertFalse((self.project / ".kanban").exists())
+        self.assertFalse((self.project / ".git" / "kanban").exists())
 
 
 class SecretaryNameResolutionTests(unittest.TestCase):
@@ -418,7 +417,9 @@ class SecretaryNameResolutionTests(unittest.TestCase):
 
     def _project(self, name):
         root = Path(self.temp.name) / name
-        (root / ".kanban").mkdir(parents=True)
+        root.mkdir(parents=True)
+        _init_git_repo(root)
+        (root / ".git" / "kanban").mkdir()
         return root
 
     def test_default_name_is_project_specific_not_the_old_fixed_secretary(self):
@@ -474,7 +475,7 @@ class SecretaryNameResolutionTests(unittest.TestCase):
 
     def test_env_override_wins_over_kanban_md_override(self):
         root = self._project("app")
-        (root / ".kanban" / "KANBAN.md").write_text(
+        (root / ".git" / "kanban" / "KANBAN.md").write_text(
             "---\nsecretary_agent: secretary-from-md\n---\n", encoding="utf-8"
         )
         name, source = self.secretary.resolve(str(root), env_override="secretary-from-env")
@@ -483,7 +484,7 @@ class SecretaryNameResolutionTests(unittest.TestCase):
 
     def test_kanban_md_override_wins_over_generated_default(self):
         root = self._project("app")
-        (root / ".kanban" / "KANBAN.md").write_text(
+        (root / ".git" / "kanban" / "KANBAN.md").write_text(
             "---\nsecretary_agent: secretary-from-md\n---\n", encoding="utf-8"
         )
         name, source = self.secretary.resolve(str(root))
@@ -503,7 +504,7 @@ class SecretaryNameResolutionTests(unittest.TestCase):
 
     def test_invalid_kanban_md_override_raises_instead_of_silently_substituting(self):
         root = self._project("app")
-        (root / ".kanban" / "KANBAN.md").write_text(
+        (root / ".git" / "kanban" / "KANBAN.md").write_text(
             "---\nsecretary_agent: Not Valid!\n---\n", encoding="utf-8"
         )
         with self.assertRaises(self.secretary.SecretaryNameError):
@@ -563,7 +564,9 @@ class NotifySecretaryRoutingTests(unittest.TestCase):
 
     def _project(self, name):
         root = self.root / name
-        (root / ".kanban").mkdir(parents=True)
+        root.mkdir(parents=True)
+        _init_git_repo(root)
+        (root / ".git" / "kanban").mkdir()
         return root
 
     def run_notify(self, state, title, cwd=None, env=None):
@@ -758,7 +761,7 @@ class SymlinkEntryPointTests(unittest.TestCase):
 class InstallUninstallTests(unittest.TestCase):
     """End-to-end install/uninstall via kanban.sh, run against a copy of the
     distribution outside this worktree (install/uninstall refuse to run
-    from inside a .kanban/wt/<id> checkout by design)."""
+    from inside a .git/kanban/wt/<id> checkout by design)."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -898,6 +901,7 @@ class CardEffortTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
+        _init_git_repo(self.project)
         subprocess.run([str(KANBAN_SH), "init"], cwd=self.project, check=True, capture_output=True, text=True)
 
     def tearDown(self):
@@ -932,7 +936,7 @@ class CardEffortTests(unittest.TestCase):
         result = self._run("add", "bad effort", "-e", "extreme")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid effort", result.stderr)
-        self.assertEqual(list((self.project / ".kanban" / "todo").glob("*.md")), [])
+        self.assertEqual(list((self.project / ".git" / "kanban" / "todo").glob("*.md")), [])
 
 
 class CardAddArgumentTests(unittest.TestCase):
@@ -940,6 +944,7 @@ class CardAddArgumentTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
+        _init_git_repo(self.project)
         subprocess.run(
             [str(KANBAN_SH), "init"], cwd=self.project,
             check=True, capture_output=True, text=True,
@@ -955,14 +960,14 @@ class CardAddArgumentTests(unittest.TestCase):
         )
 
     def test_init_defaults_are_backend_neutral_and_preserve_gitignore(self):
-        config = (self.project / ".kanban" / "KANBAN.md").read_text(encoding="utf-8")
+        config = (self.project / ".git" / "kanban" / "KANBAN.md").read_text(encoding="utf-8")
         self.assertRegex(config, r"(?m)^default_model:\s*$")
         self.assertRegex(config, r"(?m)^review_model:\s*$")
         self.assertRegex(config, r"(?m)^resolve_model:\s*$")
         for state in ("todo", "doing", "review", "resolving", "blocked", "done", "failed"):
-            self.assertTrue((self.project / ".kanban" / state / ".gitkeep").is_file())
+            self.assertTrue((self.project / ".git" / "kanban" / state / ".gitkeep").is_file())
 
-        ignore = self.project / ".kanban" / ".gitignore"
+        ignore = self.project / ".git" / "kanban" / ".gitignore"
         ignore.write_text(ignore.read_text(encoding="utf-8") + "user-entry\n", encoding="utf-8")
         result = subprocess.run(
             [str(KANBAN_SH), "init"], cwd=self.project,
@@ -985,7 +990,7 @@ class CardAddArgumentTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected_status)
                 self.assertIn(message, result.stdout + result.stderr)
                 self.assertEqual(
-                    list((self.project / ".kanban" / "todo").glob("*.md")), []
+                    list((self.project / ".git" / "kanban" / "todo").glob("*.md")), []
                 )
 
         outside = subprocess.run(
@@ -1000,7 +1005,7 @@ class CardAddArgumentTests(unittest.TestCase):
             result = self._run("task", "-t", value)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("threshold", result.stderr)
-        self.assertEqual(list((self.project / ".kanban" / "todo").glob("*.md")), [])
+        self.assertEqual(list((self.project / ".git" / "kanban" / "todo").glob("*.md")), [])
 
     def test_structured_card_waits_in_backlog_until_definition_of_ready_passes(self):
         incomplete = self._run("incomplete", "--type", "feature")
@@ -1032,11 +1037,44 @@ class CardAddArgumentTests(unittest.TestCase):
         self.assertIn("## Acceptance Criteria\n\n- result is visible", text)
 
 
+class BoardMigrationTests(unittest.TestCase):
+    def test_migrate_refuses_live_dispatcher_then_preserves_board(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            _init_git_repo(project)
+            legacy = project / ".kanban"
+            (legacy / "todo").mkdir(parents=True)
+            card = legacy / "todo" / "card.md"
+            card.write_text("legacy card\n", encoding="utf-8")
+            (legacy / ".lock").write_text(str(os.getpid()), encoding="utf-8")
+
+            refused = subprocess.run(
+                [str(KANBAN_SH), "migrate"], cwd=project,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertTrue(card.exists())
+
+            (legacy / ".lock").unlink()
+            migrated = subprocess.run(
+                [str(KANBAN_SH), "migrate"], cwd=project,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(migrated.returncode, 0, migrated.stderr)
+            self.assertFalse(legacy.exists())
+            self.assertEqual(
+                (project / ".git" / "kanban" / "todo" / "card.md").read_text(encoding="utf-8"),
+                "legacy card\n",
+            )
+
+
 class SecretaryBoardAdminTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
+        _init_git_repo(self.project)
         subprocess.run(
             [str(KANBAN_SH), "init"], cwd=self.project,
             check=True, capture_output=True, text=True,
@@ -1073,7 +1111,7 @@ class SecretaryBoardAdminTests(unittest.TestCase):
             for line in protected.read_text(encoding="utf-8").splitlines()
             if line.startswith("id:")
         )
-        blocked = self.project / ".kanban" / "blocked" / protected.name
+        blocked = self.project / ".git" / "kanban" / "blocked" / protected.name
         protected.rename(blocked)
         refused = self._run("remove", protected_id)
         self.assertNotEqual(refused.returncode, 0)
@@ -1081,7 +1119,7 @@ class SecretaryBoardAdminTests(unittest.TestCase):
         self.assertTrue(blocked.exists())
 
     def test_config_set_updates_only_allowlisted_operational_keys(self):
-        config = self.project / ".kanban" / "KANBAN.md"
+        config = self.project / ".git" / "kanban" / "KANBAN.md"
         for key, value in (
             ("jobs", "12"),
             ("default_backend", "codex"),
@@ -1105,6 +1143,7 @@ class WorkerQuestionBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             project.mkdir()
+            _init_git_repo(project)
             subprocess.run(
                 [str(KANBAN_SH), "init"], cwd=project,
                 check=True, capture_output=True, text=True,
@@ -1113,7 +1152,7 @@ class WorkerQuestionBoundaryTests(unittest.TestCase):
                 [str(KANBAN_SH), "config", "set", "jobs", "1"], cwd=project,
                 check=True, capture_output=True, text=True,
             )
-            config = project / ".kanban" / "KANBAN.md"
+            config = project / ".git" / "kanban" / "KANBAN.md"
             config.write_text(
                 config.read_text(encoding="utf-8").replace(
                     "review_enabled: true", "review_enabled: false"
@@ -1140,7 +1179,7 @@ class WorkerQuestionBoundaryTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            cards = list((project / ".kanban" / "blocked").glob("*.md"))
+            cards = list((project / ".git" / "kanban" / "blocked").glob("*.md"))
             self.assertEqual(len(cards), 1, result.stdout + result.stderr)
             text = cards[0].read_text(encoding="utf-8")
             self.assertIn("attempts: 0", text)
@@ -1150,6 +1189,7 @@ class WorkerQuestionBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             project.mkdir()
+            _init_git_repo(project)
             subprocess.run(
                 [str(KANBAN_SH), "init"], cwd=project,
                 check=True, capture_output=True, text=True,
@@ -1181,7 +1221,7 @@ class WorkerQuestionBoundaryTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            card = next((project / ".kanban" / "blocked").glob("*.md"))
+            card = next((project / ".git" / "kanban" / "blocked").glob("*.md"))
             text = card.read_text(encoding="utf-8")
             self.assertIn("blocked_kind: user_input", text)
             self.assertIn("attempts: 0", text)
@@ -1191,7 +1231,7 @@ class WorkerQuestionBoundaryTests(unittest.TestCase):
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
-            self.assertEqual(len(list((project / ".kanban" / "todo").glob("*.md"))), 1)
+            self.assertEqual(len(list((project / ".git" / "kanban" / "todo").glob("*.md"))), 1)
 
 
 class PromptProjectionTests(unittest.TestCase):
@@ -1202,6 +1242,7 @@ class PromptProjectionTests(unittest.TestCase):
             prompts = root / "prompts"
             project.mkdir()
             prompts.mkdir()
+            _init_git_repo(project)
             subprocess.run([str(KANBAN_SH), "init"], cwd=project, check=True, capture_output=True, text=True)
             worker = root / "worker.sh"
             reviewer = root / "reviewer.sh"
@@ -1259,18 +1300,18 @@ class WorkerParallelismTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             project.mkdir()
+            _init_git_repo(project)
             init = subprocess.run(
                 [str(KANBAN_SH), "init"], cwd=project,
                 text=True, capture_output=True, check=False,
             )
             self.assertEqual(init.returncode, 0, init.stderr)
-            policy = (project / ".kanban" / "KANBAN.md").read_text(encoding="utf-8")
+            policy = (project / ".git" / "kanban" / "KANBAN.md").read_text(encoding="utf-8")
             self.assertIn("jobs: 4", policy)
             self.assertIn("worker並列数は既定4", policy)
             skill = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
             self.assertIn("default to `jobs: 4`", skill)
             self.assertIn("no MornKanban upper", skill)
-            _init_git_repo(project)
             env = {
                 **os.environ,
                 "KANBAN_WORKER_CMD": "/usr/bin/true",
@@ -1285,27 +1326,16 @@ class WorkerParallelismTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn("Jobs: 1000000 (pinned", run.stdout)
 
-    def test_non_git_default_jobs_falls_back_to_sequential(self):
+    def test_non_git_project_is_rejected_without_fallback(self):
         with tempfile.TemporaryDirectory() as td:
             project = Path(td) / "project"
             project.mkdir()
-            subprocess.run([str(KANBAN_SH), "init"], cwd=project, check=True, capture_output=True, text=True)
-            subprocess.run(
-                [str(KANBAN_SH), "add", "plain project task", "--no-review"], cwd=project,
-                input="task", text=True, check=True, capture_output=True,
-            )
-            worker = Path(td) / "worker.sh"
-            worker.write_text("#!/usr/bin/env bash\ncat >/dev/null\nprintf 'done\\n'\n", encoding="utf-8")
-            worker.chmod(0o755)
-            env = {**os.environ, "KANBAN_WORKER_CMD": str(worker)}
-            env.pop("KANBAN_JOBS", None)
-            run = subprocess.run(
-                [str(KANBAN_SH), "run", "--once"], cwd=project, env=env,
+            result = subprocess.run(
+                [str(KANBAN_SH), "init"], cwd=project,
                 text=True, capture_output=True, check=False,
             )
-            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertIn("non-git sequential fallback", run.stdout)
-            self.assertEqual(len(list((project / ".kanban" / "done").glob("*.md"))), 1)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Git repository required", result.stderr)
 
 
 class HerdrAgentWorkerBackendTests(unittest.TestCase):
@@ -1675,14 +1705,14 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        done = self.project / ".kanban" / "done" / card.name
+        done = self.project / ".git" / "kanban" / "done" / card.name
         self.assertTrue(done.exists(), result.stdout + result.stderr)
         text = done.read_text(encoding="utf-8")
         self.assertIn("review_outcome: accept", text)
         self.assertRegex(text, r"(?m)^accepted_at: .+")
         self.assertRegex(text, r"(?m)^merged_at: .+")
         card_id = re.search(r"(?m)^id: (.+)$", text).group(1)
-        base = self.project / ".kanban"
+        base = self.project / ".git" / "kanban"
         self.assertIn("## Goal", (base / "briefs" / f"{card_id}-r1.md").read_text(encoding="utf-8"))
         self.assertIn("## Verification", (base / "reports" / f"{card_id}-r1.md").read_text(encoding="utf-8"))
         self.assertIn('"outcome":"accept"', (base / "reviews" / f"{card_id}-r1.md").read_text(encoding="utf-8"))
@@ -1712,7 +1742,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(reviewer_called.exists())
-        failed = self.project / ".kanban" / "failed" / card.name
+        failed = self.project / ".git" / "kanban" / "failed" / card.name
         text = failed.read_text(encoding="utf-8")
         self.assertIn("review_outcome: needs_info", text)
         self.assertIn("worker report is incomplete", text)
@@ -1736,11 +1766,11 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        blocked = self.project / ".kanban" / "blocked" / card.name
+        blocked = self.project / ".git" / "kanban" / "blocked" / card.name
         text = blocked.read_text(encoding="utf-8")
         self.assertIn("blocked_kind: review_decision", text)
         self.assertIn("review_outcome: spike", text)
-        self.assertTrue((self.project / ".kanban" / "wt" / card_id).is_dir())
+        self.assertTrue((self.project / ".git" / "kanban" / "wt" / card_id).is_dir())
 
         restarted = self._run(
             "run", "--once",
@@ -1751,7 +1781,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(restarted.returncode, 0, restarted.stderr)
         self.assertTrue(blocked.exists())
-        self.assertTrue((self.project / ".kanban" / "wt" / card_id).is_dir())
+        self.assertTrue((self.project / ".git" / "kanban" / "wt" / card_id).is_dir())
 
     @FULL_ONLY
     def test_no_conflict_merge_still_works(self):
@@ -1779,7 +1809,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         self.assertEqual((self.project / "new_file.txt").read_text(encoding="utf-8"), "from worker\n")
         card_text = done[0].read_text(encoding="utf-8")
@@ -1828,7 +1858,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(evidence.exists(), result.stdout + result.stderr)
         self.assertEqual(evidence.read_text(encoding="utf-8").strip(), str(self.project))
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         text = done[0].read_text(encoding="utf-8")
         self.assertIn("task_kind: operation", text)
@@ -1854,8 +1884,8 @@ class DispatcherWorkflowTests(unittest.TestCase):
             "KANBAN_JOBS": "1",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(list((self.project / ".kanban" / "done").glob("*.md")), [])
-        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertEqual(list((self.project / ".git" / "kanban" / "done").glob("*.md")), [])
+        blocked = list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertEqual(len(blocked), 1, result.stdout)
         self.assertIn("blocked_kind: operation_unknown", blocked[0].read_text(encoding="utf-8"))
 
@@ -1876,7 +1906,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(count.read_text().splitlines(), ["run"])
-        card = next((self.project / ".kanban" / "blocked").glob("*.md"))
+        card = next((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertIn("blocked_kind: operation_unknown", card.read_text(encoding="utf-8"))
 
     def test_stranded_operation_is_not_automatically_reexecuted(self):
@@ -1890,7 +1920,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
             input="publish", text=True, capture_output=True, env=self.env, check=True,
         )
         card = Path(added.stdout.strip())
-        card.rename(self.project / ".kanban" / "doing" / card.name)
+        card.rename(self.project / ".git" / "kanban" / "doing" / card.name)
         result = self._run("run", "--once", env_overrides={
             "KANBAN_WORKER_CMD": "/usr/bin/false",
             "KANBAN_OPERATION_CMD": str(operator),
@@ -1900,7 +1930,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(evidence.exists(), result.stdout + result.stderr)
-        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        blocked = list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertEqual(len(blocked), 1)
         self.assertIn("blocked_kind: operation_unknown", blocked[0].read_text(encoding="utf-8"))
 
@@ -1937,7 +1967,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(count.read_text().strip(), "1")
-        card = next((self.project / ".kanban" / "blocked").glob("*.md"))
+        card = next((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertIn("blocked_kind: operation_unknown", card.read_text(encoding="utf-8"))
         self.assertIn("blocked uncertain publish", notifications.read_text(encoding="utf-8"))
 
@@ -1948,7 +1978,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
 
         resolved = self._run("operation", card_id, "done", env_overrides=env)
         self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
-        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "done").glob("*.md"))), 1)
         self.assertEqual(count.read_text().strip(), "1")
 
     def test_operation_retry_requires_explicit_resolution(self):
@@ -1982,7 +2012,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
         self.assertEqual(self._run("run", "--once", env_overrides=env).returncode, 0)
         self.assertEqual(count.read_text().strip(), "2")
-        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "done").glob("*.md"))), 1)
 
     def _seed_conflict(self):
         (self.project / "file.txt").write_text("base\n", encoding="utf-8")
@@ -2054,7 +2084,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         card_text = done[0].read_text(encoding="utf-8")
         self.assertIn("merge conflict", card_text)
@@ -2068,7 +2098,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
 
     @FULL_ONLY
     def test_failed_resolver_cannot_merge_unresolved_content_without_review(self):
-        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg = self.project / ".git" / "kanban" / "KANBAN.md"
         cfg.write_text(
             cfg.read_text(encoding="utf-8").replace("review_enabled: true", "review_enabled: false"),
             encoding="utf-8",
@@ -2087,15 +2117,15 @@ class DispatcherWorkflowTests(unittest.TestCase):
             "KANBAN_JOBS": "1",
         })
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(list((self.project / ".kanban" / "done").glob("*.md")), [])
-        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertEqual(list((self.project / ".git" / "kanban" / "done").glob("*.md")), [])
+        blocked = list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertEqual(len(blocked), 1, result.stdout)
         self.assertIn("blocked_kind: review_infra", blocked[0].read_text(encoding="utf-8"))
         self.assertNotIn("<<<<<<<", (self.project / "file.txt").read_text(encoding="utf-8"))
 
     @FULL_ONLY
     def test_noop_resolver_cannot_hide_binary_conflict(self):
-        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg = self.project / ".git" / "kanban" / "KANBAN.md"
         cfg.write_text(
             cfg.read_text(encoding="utf-8").replace("review_enabled: true", "review_enabled: false"),
             encoding="utf-8",
@@ -2123,8 +2153,8 @@ class DispatcherWorkflowTests(unittest.TestCase):
             "KANBAN_REVIEW_ENABLED": "false", "KANBAN_JOBS": "1",
         })
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(list((self.project / ".kanban" / "done").glob("*.md")), [])
-        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        self.assertEqual(list((self.project / ".git" / "kanban" / "done").glob("*.md")), [])
+        failed = list((self.project / ".git" / "kanban" / "failed").glob("*.md"))
         self.assertEqual(len(failed), 1, result.stdout + result.stderr)
         self.assertIn("failure_kind: resolve", failed[0].read_text(encoding="utf-8"))
         self.assertEqual((self.project / "binary.dat").read_bytes(), b"\0main\n")
@@ -2182,7 +2212,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         card_text = done[0].read_text(encoding="utf-8")
         self.assertIn("still conflicted", card_text)
@@ -2193,7 +2223,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
 
     @FULL_ONLY
     def test_resolve_max_attempts_exceeded_moves_to_failed_with_history(self):
-        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg = self.project / ".git" / "kanban" / "KANBAN.md"
         text = cfg.read_text(encoding="utf-8")
         self.assertIn("resolve_max_attempts: 2", text)
         cfg.write_text(text.replace("resolve_max_attempts: 2", "resolve_max_attempts: 1"), encoding="utf-8")
@@ -2240,7 +2270,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        failed = list((self.project / ".git" / "kanban" / "failed").glob("*.md"))
         self.assertEqual(len(failed), 1, result.stdout + result.stderr)
         card_text = failed[0].read_text(encoding="utf-8")
         self.assertIn("conflict files: file.txt", card_text)
@@ -2302,7 +2332,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertIn(f"card=kanban/{card_id}", dumped)
 
     def test_dispatcher_refuses_second_run_while_lock_is_live(self):
-        lock = self.project / ".kanban" / ".lock"
+        lock = self.project / ".git" / "kanban" / ".lock"
         lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
         result = self._run("run", "--once")
@@ -2310,11 +2340,11 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already running", result.stdout + result.stderr)
 
-    def test_dispatcher_does_not_steal_pidless_initializing_lock(self):
-        (self.project / ".kanban" / ".dispatcher.lock").mkdir()
+    def test_dispatcher_does_not_steal_non_file_lock(self):
+        (self.project / ".git" / "kanban" / ".dispatcher.lock").mkdir()
         result = self._run("run", "--once", env_overrides={"KANBAN_WORKER_CMD": "/usr/bin/true"})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("owner is unknown", result.stdout + result.stderr)
+        self.assertIn("lock is busy", result.stdout + result.stderr)
 
     def test_bare_run_refuses_hidden_headless_agent_execution(self):
         result = self._run("run", "--once")
@@ -2368,7 +2398,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         text = text.replace("attempts: 0", "attempts: 1\nmerge_pending: 1\npass_result: 95")
         card.write_text(text, encoding="utf-8")
         branch = "kanban/%s" % card_id
-        wt = self.project / ".kanban" / "wt" / card_id
+        wt = self.project / ".git" / "kanban" / "wt" / card_id
         self._git("worktree", "add", "-q", "-b", branch, str(wt), "main")
         (wt / "merge-pending.txt").write_text(title + "\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
@@ -2376,7 +2406,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
             ["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t",
              "commit", "-q", "-m", "prepared"], check=True,
         )
-        card.rename(self.project / ".kanban" / "doing" / card.name)
+        card.rename(self.project / ".git" / "kanban" / "doing" / card.name)
         return card_id, branch
 
     @FULL_ONLY
@@ -2392,7 +2422,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(worker_called.exists())
-        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "done").glob("*.md"))), 1)
         self.assertEqual((self.project / "merge-pending.txt").read_text(), "resume merge\n")
 
     @FULL_ONLY
@@ -2409,12 +2439,12 @@ class DispatcherWorkflowTests(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(worker_called.exists())
-        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "done").glob("*.md"))), 1)
         self.assertIn("merge was already present", result.stdout)
 
     @FULL_ONLY
     def test_branch_change_while_waiting_for_merge_lock_never_merges_wrong_branch(self):
-        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg = self.project / ".git" / "kanban" / "KANBAN.md"
         cfg.write_text(
             cfg.read_text(encoding="utf-8").replace("review_enabled: true", "review_enabled: false"),
             encoding="utf-8",
@@ -2429,7 +2459,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 set -eu
                 cat >/dev/null
                 printf 'card change\n' > lock-result.txt
-                mkdir "$KANBAN_TEST_MAIN_ROOT/.kanban/.merge.lock"
+                mkdir "$KANBAN_TEST_MAIN_ROOT/.git/kanban/.merge.lock"
                 touch "$LOCK_READY"
                 """
             ),
@@ -2450,16 +2480,16 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertTrue(ready.exists())
         time.sleep(1.2)  # old ordering has now checked HEAD and is waiting on the lock
         self._git("checkout", "-q", "switched")
-        (self.project / ".kanban" / ".merge.lock").rmdir()
+        (self.project / ".git" / "kanban" / ".merge.lock").rmdir()
         stdout, stderr = proc.communicate(timeout=20)
         self.assertEqual(proc.returncode, 0, stdout + stderr)
         self.assertFalse((self.project / "lock-result.txt").exists())
-        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        blocked = list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertEqual(len(blocked), 1, stdout + stderr)
         self.assertIn("blocked_kind: main_branch_changed", blocked[0].read_text(encoding="utf-8"))
 
     def _run_live_jobs_case(self, *, pinned):
-        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg = self.project / ".git" / "kanban" / "KANBAN.md"
         text = cfg.read_text(encoding="utf-8")
         text = text.replace("jobs: 4", "jobs: 1")
         text = text.replace("review_enabled: true", "review_enabled: false")
@@ -2528,13 +2558,13 @@ class DispatcherWorkflowTests(unittest.TestCase):
         # Simulate a dispatcher that crashed mid-resolve: the card is stuck in
         # resolving/ with leftover worktrees/branches from the interrupted
         # attempt.
-        wt = self.project / ".kanban" / "wt"
+        wt = self.project / ".git" / "kanban" / "wt"
         self._git("worktree", "add", "-q", "-b", f"kanban/{card_id}", str(wt / card_id), "main")
         self._git(
             "worktree", "add", "-q", "-b", f"kanban-resolve/{card_id}",
             str(wt / f"{card_id}-resolve"), "main",
         )
-        resolving_dir = self.project / ".kanban" / "resolving"
+        resolving_dir = self.project / ".git" / "kanban" / "resolving"
         resolving_dir.mkdir(exist_ok=True)
         card.rename(resolving_dir / card.name)
 
@@ -2562,7 +2592,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         self.assertEqual(len(list(resolving_dir.glob("*.md"))), 0)
         branches = self._git("branch", "--list").stdout
@@ -2631,7 +2661,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
         self.assertEqual(review_count.read_text(encoding="utf-8").strip(), "2")
@@ -2680,7 +2710,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
         card_text = done[0].read_text(encoding="utf-8")
@@ -2713,7 +2743,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result.stdout + result.stderr)
         card_text = done[0].read_text(encoding="utf-8")
         self.assertIn("report/{stamp}-{token}", card_text)
@@ -2738,7 +2768,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(review_called.exists())
-        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        failed = list((self.project / ".git" / "kanban" / "failed").glob("*.md"))
         self.assertEqual(len(failed), 1, result.stdout)
         text = failed[0].read_text(encoding="utf-8")
         self.assertIn("failure_kind: worker", text)
@@ -2773,7 +2803,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        blocked = list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))
         self.assertEqual(len(blocked), 1, result.stdout + result.stderr)
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
         card_text = blocked[0].read_text(encoding="utf-8")
@@ -2782,7 +2812,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertIn("not a code failure", card_text)
         branches = self._git("branch", "--list").stdout
         self.assertIn(f"kanban/{card_id}", branches)
-        self.assertTrue((self.project / ".kanban" / "wt" / card_id).is_dir())
+        self.assertTrue((self.project / ".git" / "kanban" / "wt" / card_id).is_dir())
 
     def test_blocked_review_infra_card_is_not_reclaimed_by_dispatcher_restart(self):
         worker_count = Path(self.temp.name) / "worker_count"
@@ -2809,7 +2839,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         }
         result = self._run("run", "--once", env_overrides=env_overrides)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(list((self.project / ".kanban" / "blocked").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))), 1)
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
 
         # Simulate a dispatcher restart (`kanban run --once` again): the
@@ -2818,8 +2848,8 @@ class DispatcherWorkflowTests(unittest.TestCase):
         result2 = self._run("run", "--once", env_overrides=env_overrides)
         self.assertEqual(result2.returncode, 0, result2.stderr)
         self.assertIn("todo is empty", result2.stdout)
-        self.assertEqual(len(list((self.project / ".kanban" / "blocked").glob("*.md"))), 1)
-        self.assertEqual(len(list((self.project / ".kanban" / "todo").glob("*.md"))), 0)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "todo").glob("*.md"))), 0)
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
         branches = self._git("branch", "--list").stdout
         self.assertIn(f"kanban/{card_id}", branches)
@@ -2855,17 +2885,17 @@ class DispatcherWorkflowTests(unittest.TestCase):
         }
         result = self._run("run", "--once", env_overrides=env_overrides)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(list((self.project / ".kanban" / "blocked").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "blocked").glob("*.md"))), 1)
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
 
         result2 = self._run("resume", card_id, env_overrides=env_overrides)
         self.assertEqual(result2.returncode, 0, result2.stderr)
-        self.assertEqual(len(list((self.project / ".kanban" / "todo").glob("*.md"))), 1)
-        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 0)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "todo").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".git" / "kanban" / "done").glob("*.md"))), 0)
 
         result3 = self._run("run", "--once", env_overrides=env_overrides)
         self.assertEqual(result3.returncode, 0, result3.stderr)
-        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        done = list((self.project / ".git" / "kanban" / "done").glob("*.md"))
         self.assertEqual(len(done), 1, result3.stdout + result3.stderr)
         # the worker must not be re-invoked on resume -- only the reviewer
         # is re-run against the work already committed on the kept branch.
@@ -2875,7 +2905,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         # Regression: a genuine low-quality review (real parseable JSON,
         # just under threshold) must still behave exactly as before --
         # infra classification must never swallow a real verdict.
-        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg = self.project / ".git" / "kanban" / "KANBAN.md"
         text = cfg.read_text(encoding="utf-8")
         cfg.write_text(text.replace("max_attempts: 3", "max_attempts: 2"), encoding="utf-8")
 
@@ -2904,7 +2934,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        failed = list((self.project / ".git" / "kanban" / "failed").glob("*.md"))
         self.assertEqual(len(failed), 1, result.stdout + result.stderr)
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "2")
         card_text = failed[0].read_text(encoding="utf-8")
