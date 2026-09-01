@@ -39,6 +39,12 @@ cat >/dev/null
 echo '{"score": 95, "feedback": "fine"}'
 """
 
+REVIEWER_RECORD_MODEL = """#!/usr/bin/env bash
+cat >/dev/null
+echo "${KANBAN_REVIEW_MODEL:-}" > "$KANBAN_STATE_DIR/review_model_seen"
+echo '{"score": 95, "feedback": "fine"}'
+"""
+
 REVIEWER_FAIL_ONCE_THEN_PASS = """#!/usr/bin/env bash
 cat >/dev/null
 state_file="$KANBAN_STATE_DIR/review_calls"
@@ -406,6 +412,101 @@ class ReviewToggleTests(unittest.TestCase):
         self.assertIn("Review: OFF (fast iteration)", readme)
         self.assertIn("--review", readme)
         self.assertIn("--no-review", readme)
+
+
+class ReviewModelDefaultTests(unittest.TestCase):
+    """review_model defaults to haiku (token-cost default); env/config still win."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repo = self.root / "proj"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "t@t.com"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "t"], check=True)
+        (self.repo / "f.txt").write_text("line1\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "init"], check=True)
+
+        self.env = dict(os.environ)
+        self.env["HOME"] = str(self.root / "home")
+        self.env["KANBAN_DISPATCH_POLL_INTERVAL"] = "0.05"
+        (self.root / "home").mkdir()
+        self.env.pop("KANBAN_REVIEW_ENABLED", None)
+        self.env.pop("KANBAN_REVIEW_MODEL", None)
+        self.env["KANBAN_STATE_DIR"] = str(self.root)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _run(self, *args, input_text=None, env=None, check=True):
+        result = subprocess.run(
+            ["bash", str(KANBAN_SH), *args],
+            cwd=str(self.repo),
+            input=input_text,
+            capture_output=True,
+            text=True,
+            env=env if env is not None else self.env,
+        )
+        if check and result.returncode != 0:
+            self.fail("kanban %s failed: %s\n%s" % (" ".join(args), result.stdout, result.stderr))
+        return result
+
+    def _script(self, name, content):
+        p = self.root / name
+        p.write_text(content)
+        p.chmod(0o755)
+        return str(p)
+
+    def _seen_model(self):
+        return (self.root / "review_model_seen").read_text().strip()
+
+    def test_init_template_defaults_review_model_to_haiku(self):
+        self._run("init")
+        kanban_md = (self.repo / ".git" / "kanban" / "KANBAN.md").read_text()
+        self.assertRegex(kanban_md, r"(?m)^review_model:\s*haiku\s*$")
+
+    def test_reviewer_receives_haiku_by_default(self):
+        self._run("init")
+        env = dict(self.env)
+        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
+        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_RECORD_MODEL)
+        self._run("add", "card", input_text="task", env=env)
+        self._run("run", "--once", env=env)
+        self.assertEqual(self._seen_model(), "haiku")
+
+    def test_config_set_review_model_overrides_default(self):
+        self._run("init")
+        env = dict(self.env)
+        self._run("config", "set", "review_model", "sonnet", env=env)
+        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
+        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_RECORD_MODEL)
+        self._run("add", "card", input_text="task", env=env)
+        self._run("run", "--once", env=env)
+        self.assertEqual(self._seen_model(), "sonnet")
+
+    def test_env_var_overrides_config_and_default(self):
+        self._run("init")
+        env = dict(self.env)
+        self._run("config", "set", "review_model", "sonnet", env=env)
+        env["KANBAN_REVIEW_MODEL"] = "opus"
+        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
+        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_RECORD_MODEL)
+        self._run("add", "card", input_text="task", env=env)
+        self._run("run", "--once", env=env)
+        self.assertEqual(self._seen_model(), "opus")
+
+    def test_missing_kanban_md_still_falls_back_to_haiku(self):
+        self._run("init")
+        kanban_md_path = self.repo / ".git" / "kanban" / "KANBAN.md"
+        kanban_md_path.unlink()
+        env = dict(self.env)
+        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
+        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_RECORD_MODEL)
+        self._run("add", "card", input_text="task", env=env)
+        self._run("run", "--once", env=env)
+        self.assertEqual(self._seen_model(), "haiku")
 
 
 if __name__ == "__main__":

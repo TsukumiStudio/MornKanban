@@ -962,7 +962,7 @@ class CardAddArgumentTests(unittest.TestCase):
     def test_init_defaults_are_backend_neutral_and_preserve_gitignore(self):
         config = (self.project / ".git" / "kanban" / "KANBAN.md").read_text(encoding="utf-8")
         self.assertRegex(config, r"(?m)^default_model:\s*$")
-        self.assertRegex(config, r"(?m)^review_model:\s*$")
+        self.assertRegex(config, r"(?m)^review_model:\s*haiku\s*$")
         self.assertRegex(config, r"(?m)^resolve_model:\s*$")
         for state in ("todo", "doing", "review", "resolving", "blocked", "done", "failed"):
             self.assertTrue((self.project / ".git" / "kanban" / state / ".gitkeep").is_file())

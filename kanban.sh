@@ -16,6 +16,7 @@ DEFAULT_MAX_ATTEMPTS=3
 DEFAULT_RESOLVE_MAX_ATTEMPTS=2
 DEFAULT_BACKEND=auto
 DEFAULT_MODEL=""
+DEFAULT_REVIEW_MODEL="haiku"
 DEFAULT_JOBS=4
 BACKENDS="claude codex"
 # A reviewer/resolver-reviewer that never returns a valid score (pane lost,
@@ -80,6 +81,7 @@ load_project_config() { # .git/kanban/KANBAN.md frontmatter -> defaults (env sti
   if [[ ! -f $cfg ]]; then
     [[ -n ${KANBAN_REVIEW_INFRA_MAX_RETRIES:-} ]] && DEFAULT_REVIEW_INFRA_MAX_RETRIES=$KANBAN_REVIEW_INFRA_MAX_RETRIES
     [[ -n ${KANBAN_REVIEW_INFRA_BACKOFF_SECONDS:-} ]] && DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=$KANBAN_REVIEW_INFRA_BACKOFF_SECONDS
+    [[ -z ${KANBAN_REVIEW_MODEL:-} ]] && export KANBAN_REVIEW_MODEL=$DEFAULT_REVIEW_MODEL
     return 0
   fi
   DEFAULT_BACKEND=$(fm_get "$cfg" default_backend "$DEFAULT_BACKEND")
@@ -98,6 +100,7 @@ load_project_config() { # .git/kanban/KANBAN.md frontmatter -> defaults (env sti
   cfg_env "$cfg" backend_order KANBAN_BACKEND_ORDER
   cfg_env "$cfg" reviewer KANBAN_REVIEWER
   cfg_env "$cfg" review_model KANBAN_REVIEW_MODEL
+  [[ -z ${KANBAN_REVIEW_MODEL:-} ]] && export KANBAN_REVIEW_MODEL=$DEFAULT_REVIEW_MODEL
   cfg_env "$cfg" resolver KANBAN_RESOLVER
   cfg_env "$cfg" resolve_model KANBAN_RESOLVE_MODEL
   cfg_env "$cfg" jobs KANBAN_JOBS
@@ -374,7 +377,7 @@ backend_order: claude codex
 default_backend: auto
 default_model:
 reviewer: auto
-review_model:
+review_model: haiku
 resolver: auto
 resolve_model:
 threshold: 80
@@ -435,7 +438,7 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 ## エージェント・モデル構成
 
 - **既定方針: 上位モデル (fable / opus 等) は秘書・設計役だけ。手を動かすワーカーとレビュワー・resolver は下位モデルで十分**
-- 既定: 通常実装は claude / sonnet、軽微な修正は codex / gpt-5.3-codex-spark (codex カードは -m 必須。model 名はバックエンド固有)
+- 既定: 通常実装は claude / sonnet。軽量カードは `-e low` または `--no-review`、軽微な修正は `-b codex -m gpt-5.3-codex-spark` (codex カードは -m 必須。model 名はバックエンド固有)、レビューは `review_model: haiku` 既定
 - effort はカード単位で `-e low|medium|high|xhigh|max`。gpt-5.6-solは通常medium、難所highとし、共通設定のxhighを無条件に継承させない
 - 設計・難所のカードだけ例外的に -m opus 等へ上げる (理由をカードに書く)
 - resolver も既定では worker と同じ下位モデル (`resolver` / `resolve_model`)
