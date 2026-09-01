@@ -1294,6 +1294,81 @@ class PromptProjectionTests(unittest.TestCase):
                 self.assertIn("WORKER_OUTPUT_SENTINEL", prompt)
                 self.assertNotIn("FEEDBACK_SENTINEL", prompt)
 
+    def test_resume_decision_reaches_worker_and_resolver_prompts(self):
+        # Regression: a secretary decision passed to `kanban resume -m` must
+        # reach the re-run worker/resolver prompt, otherwise a resumed
+        # user_input card restarts identically and blocks again.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "project"
+            prompts = root / "prompts"
+            project.mkdir()
+            prompts.mkdir()
+            _init_git_repo(project)
+            subprocess.run([str(KANBAN_SH), "init"], cwd=project, check=True, capture_output=True, text=True)
+            worker = root / "worker.sh"
+            worker.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    if [[ ! -f "$MARKER" ]]; then
+                      touch "$MARKER"
+                      cat > "$PROMPTS/worker-before.txt"
+                      echo 'KANBAN_INFRA_ERROR: agent_question: which approach?' >&2
+                      exit 1
+                    fi
+                    cat > "$PROMPTS/worker-after.txt"
+                    printf 'WORKER_DONE_SENTINEL\\n'
+                    """
+                ),
+                encoding="utf-8",
+            )
+            worker.chmod(0o755)
+            env = {
+                **os.environ,
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_JOBS": "1",
+                "PROMPTS": str(prompts),
+                "MARKER": str(root / "worker.marker"),
+            }
+            added = subprocess.run(
+                [str(KANBAN_SH), "add", "resume decision card", "--no-review"], cwd=project,
+                input="TASK_SENTINEL", text=True, capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(added.returncode, 0, added.stderr)
+            card_id = re.search(
+                r"^id: (\S+)$", Path(added.stdout.strip()).read_text(encoding="utf-8"), re.M
+            ).group(1)
+
+            blocked = subprocess.run(
+                [str(KANBAN_SH), "run", "--once"], cwd=project,
+                text=True, capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(blocked.returncode, 0, blocked.stderr)
+            blocked_card = next((project / ".git" / "kanban" / "blocked").glob("*.md"))
+            self.assertIn("blocked_kind: user_input", blocked_card.read_text(encoding="utf-8"))
+
+            resumed = subprocess.run(
+                [str(KANBAN_SH), "resume", card_id, "-m", "DECISION_SENTINEL"], cwd=project,
+                text=True, capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            todo_card = next((project / ".git" / "kanban" / "todo").glob("*.md"))
+            self.assertIn("### ", todo_card.read_text(encoding="utf-8"))
+            self.assertIn("user decision", todo_card.read_text(encoding="utf-8"))
+
+            resumed_run = subprocess.run(
+                [str(KANBAN_SH), "run", "--once"], cwd=project,
+                text=True, capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(resumed_run.returncode, 0, resumed_run.stderr)
+
+            first_prompt = (prompts / "worker-before.txt").read_text(encoding="utf-8")
+            second_prompt = (prompts / "worker-after.txt").read_text(encoding="utf-8")
+            self.assertNotIn("DECISION_SENTINEL", first_prompt)
+            self.assertIn("## User decision", second_prompt)
+            self.assertIn("DECISION_SENTINEL", second_prompt)
+
 
 class WorkerParallelismTests(unittest.TestCase):
     def test_default_is_four_and_large_explicit_job_count_has_no_product_cap(self):
