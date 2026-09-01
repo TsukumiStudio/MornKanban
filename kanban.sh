@@ -253,6 +253,15 @@ END {printf "%s", feedback}
 ' "$1"
 }
 
+latest_user_decision() { # body of the newest user-decision History entry
+  awk '
+/^### [0-9][0-9][0-9][0-9]-.* user decision/ {capture=1; decision=""; next}
+/^### [0-9][0-9][0-9][0-9]-/ {capture=0}
+capture {decision=decision $0 ORS}
+END {printf "%s", decision}
+' "$1"
+}
+
 append_history() { # append_history <file> <heading> ; body from stdin
   # iconv -c: worker output can carry invalid UTF-8 (terminal control bytes);
   # once they land in the card, every later python read of it explodes.
@@ -807,7 +816,7 @@ cmd_config() {
 }
 
 worker_prompt_for_card() { # worker_prompt_for_card <card>
-  local file=$1 kind target maximum feedback
+  local file=$1 kind target maximum feedback decision
   kind=$(fm_get "$file" task_kind implementation)
   if [[ $kind == diagnose ]]; then
     target=$(fm_get "$file" diagnosis_target_minutes "$DEFAULT_DIAGNOSIS_TARGET_MINUTES")
@@ -837,6 +846,10 @@ EOF
   feedback=$(latest_rework_feedback "$file")
   if [[ -n $feedback ]]; then
     printf '\n## Latest reviewer feedback\n\n%s' "$feedback"
+  fi
+  decision=$(latest_user_decision "$file")
+  if [[ -n $decision ]]; then
+    printf '\n## User decision\n\n%s' "$decision"
   fi
 }
 
@@ -1409,7 +1422,7 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   # review_with_infra_retry -- so an infra failure there never re-runs the
   # resolver.
   local file=$1 workdir=$2 conflict_files=$3 base_branch=$4 card_branch=$5
-  local id backend model effort wcmd out title prompt t0 attempt_label status=0 infra_cat
+  local id backend model effort wcmd out title prompt t0 attempt_label status=0 infra_cat decision
   ATT_RESOLVE_SECS=0
   ATT_REVIEW_SECS=0
   ATT_RESOLVE_BLOCKED_KIND=""
@@ -1424,6 +1437,10 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   attempt_label="resolve-$(($(fm_get "$file" resolve_attempts 0) + 1))"
   prompt=$(printf 'You are the conflict-resolution role for MornKanban. Card branch %s passed review but conflicts with the current base branch %s. Resolve the conflict in this worktree, preserving the intent of BOTH sides -- never simply discard one side. Run any tests the task requires, then stage every resolved, created, or deleted file with git add/rm and leave the tree conflict-free.\n\nConflicted files:\n%s\n\nOriginal task:\n%s\n' \
     "$card_branch" "$base_branch" "$conflict_files" "$(card_task "$file")")
+  decision=$(latest_user_decision "$file")
+  if [[ -n $decision ]]; then
+    prompt=$(printf '%s\n## User decision\n\n%s' "$prompt" "$decision")
+  fi
   t0=$SECONDS
   out=$( (cd "$workdir" && printf '%s' "$prompt" |
     KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \
@@ -2227,9 +2244,17 @@ cmd_run() {
   echo "todo is empty"
 }
 
-cmd_resume() { # cmd_resume <id-substring> -> resume a supported parked card
+cmd_resume() { # cmd_resume <id-substring> [-m decision] -> resume a supported parked card
   require_root
-  local pat=${1:?usage: kanban resume <id>}
+  local pat="" decision=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -m|--decision) [[ $# -ge 2 ]] || die "$1 requires a value"; decision=$2; shift 2 ;;
+      -*) die "unknown option for kanban resume: $1" ;;
+      *) [[ -z $pat ]] || die "unexpected argument: $1 (id is already set)"; pat=$1; shift ;;
+    esac
+  done
+  [[ -n $pat ]] || die "usage: kanban resume <id> [-m decision]"
   local hits=("$KB"/blocked/*"$pat"*.md)
   [[ -e ${hits[0]} ]] || die "no blocked card matching '$pat'"
   [[ ${#hits[@]} -eq 1 ]] || die "'$pat' matches multiple blocked cards; use the full id"
@@ -2244,6 +2269,9 @@ cmd_resume() { # cmd_resume <id-substring> -> resume a supported parked card
   fm_set "$file" review_infra_retries 0
   fm_set "$file" worker_infra_retries 0
   fm_set "$file" blocked_kind ""
+  if [[ -n $decision ]]; then
+    printf '%s\n' "$decision" | append_history "$file" "user decision"
+  fi
   local id
   id=$(fm_get "$file" id "?")
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/kanban-resolve/$id"; then
@@ -2299,5 +2327,5 @@ case ${1:-} in
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|migrate|add|ready [--check] <id>|remove <backlog-or-todo-id>|config set <key> <value>|list|show|inspect|run [--once] [-j N]|resume <id>|operation <id> {done|retry}|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|migrate|add|ready [--check] <id>|remove <backlog-or-todo-id>|config set <key> <value>|list|show|inspect|run [--once] [-j N]|resume <id> [-m decision]|operation <id> {done|retry}|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
 esac
