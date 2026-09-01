@@ -21,6 +21,25 @@ sys.path.insert(0, REPO)
 from monitor import board, discovery, launchagent, server  # noqa: E402
 
 
+class StaticUiContractTest(unittest.TestCase):
+    def test_board_uses_full_width_with_independent_column_scroll(self):
+        with open(os.path.join(REPO, "monitor", "static", "style.css"), encoding="utf-8") as fh:
+            css = fh.read()
+        with open(os.path.join(REPO, "monitor", "static", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        self.assertIn("grid-template-columns: repeat(7, minmax(0, 1fr))", css)
+        self.assertIn(".board-column-items", css)
+        self.assertIn('el("div", "board-column-items")', app)
+        self.assertIn("items.scrollTop = scrollPositions[s] || 0;", app)
+        self.assertNotIn("max-width: 1200px", css)
+
+    def test_monitor_refreshes_every_second(self):
+        with open(os.path.join(REPO, "monitor", "static", "app.js"), encoding="utf-8") as fh:
+            app = fh.read()
+        self.assertIn("const POLL_MS = 1000;", app)
+        self.assertIn("if (refreshRunning) return;", app)
+
+
 def write_card(kanban_dir, state, filename, frontmatter, body="## Task\n\nbody\n\n## History\n"):
     d = os.path.join(kanban_dir, state)
     os.makedirs(d, exist_ok=True)

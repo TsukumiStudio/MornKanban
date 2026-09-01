@@ -6,7 +6,7 @@
     todo: "Todo", doing: "Doing", review: "Review", resolving: "Resolving",
     blocked: "Blocked", done: "Done", failed: "Failed",
   };
-  const POLL_MS = 8000;
+  const POLL_MS = 1000;
 
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -50,6 +50,7 @@
   const state = window.MonitorState.createState();
   let boardAbort = null;
   let modalAbort = null;
+  let refreshRunning = false;
 
   function renderProjects(data) {
     projectsList.textContent = "";
@@ -104,8 +105,10 @@
       const h = el("h4");
       h.appendChild(el("span", "badge-" + s, STATE_LABELS[s]));
       col.appendChild(h);
-      col.appendChild(el("div", "board-skeleton-item"));
-      col.appendChild(el("div", "board-skeleton-item"));
+      const items = el("div", "board-column-items");
+      items.appendChild(el("div", "board-skeleton-item"));
+      items.appendChild(el("div", "board-skeleton-item"));
+      col.appendChild(items);
       boardColumns.appendChild(col);
     }
   }
@@ -122,6 +125,10 @@
   }
 
   function renderBoardColumns(data) {
+    const scrollPositions = {};
+    for (const items of boardColumns.querySelectorAll(".board-column-items[data-state]")) {
+      scrollPositions[items.dataset.state] = items.scrollTop;
+    }
     boardColumns.textContent = "";
     for (const s of STATES) {
       const col = el("div", "board-column");
@@ -129,6 +136,8 @@
       h.appendChild(el("span", "badge-" + s, STATE_LABELS[s]));
       h.appendChild(document.createTextNode(" (" + data.counts[s] + ")"));
       col.appendChild(h);
+      const items = el("div", "board-column-items");
+      items.dataset.state = s;
       for (const c of data.columns[s]) {
         const item = el("div", "card-item");
         item.appendChild(el("div", null, c.title || c.filename));
@@ -143,9 +152,11 @@
         const reviewLabel = c.review_enabled === "false" ? "Review: OFF" : "Review: ON";
         item.appendChild(el("div", "card-sub", [c.backend, c.model, "attempts " + c.attempts + "/" + c.max_attempts, reviewLabel].filter(Boolean).join(" · ")));
         item.addEventListener("click", () => openCard(state.selectedSlug, s, c.filename));
-        col.appendChild(item);
+        items.appendChild(item);
       }
+      col.appendChild(items);
       boardColumns.appendChild(col);
+      items.scrollTop = scrollPositions[s] || 0;
     }
   }
 
@@ -305,9 +316,11 @@
   modalClose.addEventListener("click", closeModalUI);
   modal.addEventListener("click", (ev) => { if (ev.target === modal) closeModalUI(); });
   backBtn.addEventListener("click", closeBoard);
-  refreshBtn.addEventListener("click", () => refreshAll(true));
+  refreshBtn.addEventListener("click", refreshAll);
 
-  async function refreshAll(manual) {
+  async function refreshAll() {
+    if (refreshRunning) return;
+    refreshRunning = true;
     try {
       const [projects, activity] = await Promise.all([
         fetchJSON("/api/projects"),
@@ -319,9 +332,11 @@
       updatedAt.textContent = "最終更新: " + new Date().toLocaleTimeString();
     } catch (e) {
       updatedAt.textContent = "更新失敗: " + (e.message || e);
+    } finally {
+      refreshRunning = false;
     }
   }
 
-  refreshAll(true);
-  setInterval(() => refreshAll(false), POLL_MS);
+  refreshAll();
+  setInterval(refreshAll, POLL_MS);
 })();

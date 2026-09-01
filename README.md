@@ -313,6 +313,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 
 - Start in the foreground: `./kanban-monitor.sh` from the MornKanban checkout, or `kanban monitor` from anywhere (both are equivalent to `kanban monitor run`). Open `http://127.0.0.1:8787/` (default port `8787`). Stop with Ctrl+C.
 - Flags: `--host` (default `127.0.0.1`; only change this if you intentionally want to expose the viewer beyond localhost — a warning is printed), `--port` (default `8787`), `--root <path>` (repeatable; adds a search root for this run only).
+- The viewer refreshes once per second. The seven board columns fit the full viewport width, and each column keeps its own vertical scroll position across refreshes.
 - python3 standard library only, matching the rest of MornKanban's distribution constraints — no `pip install` is required.
 
 ### Project discovery
