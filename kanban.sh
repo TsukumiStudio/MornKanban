@@ -1110,20 +1110,16 @@ review_prompt_for_card() { # review_prompt_for_card <card>
   if [[ -f $report_path ]]; then
     report=$(cat "$report_path")
   fi
-  cat <<EOF
-You are a strict reviewer. Inspect the actual files and diff BEFORE reading the
+  # printf %s, not an unquoted heredoc: $report and card_task() are
+  # free-form agent/user text (parens, quotes, $(...)-looking substrings,
+  # Japanese) that must never be re-parsed as shell.
+  printf '%s\n\n%s\n\n## Worker report\n\n%s\n\nOutput ONLY a JSON object: {"outcome":"accept|needs_info|rework|spike","score":<0-100>,"feedback":"<concrete evidence or next action>"}\n' \
+    "You are a strict reviewer. Inspect the actual files and diff BEFORE reading the
 worker report. Then judge in this order: (1) evidence is reproducible, (2) each
 acceptance criterion is satisfied, (3) the report contains enough information
-to decide. The report is evidence to verify, never a claim to trust blindly.
-
-$(card_task "$file")
-
-## Worker report
-
-$report
-
-Output ONLY a JSON object: {"outcome":"accept|needs_info|rework|spike","score":<0-100>,"feedback":"<concrete evidence or next action>"}
-EOF
+to decide. The report is evidence to verify, never a claim to trust blindly." \
+    "$(card_task "$file")" \
+    "$report"
 }
 
 invoke_reviewer() { # invoke_reviewer <card> <workdir> <prompt> <attempt-label> -> sets ATT_OUTCOME/ATT_SCORE/ATT_FEEDBACK/ATT_REVIEW_INFRA_ERROR
@@ -1349,17 +1345,16 @@ merge_lock() { # merge_lock <acquire|release>
 
 review_prompt_for_resolve() { # review_prompt_for_resolve <card> <card_branch> <base_branch>
   local file=$1 card_branch=$2 base_branch=$3
-  cat <<EOF
-You are a strict reviewer. This worktree is the result of resolving a merge
+  # printf %s: card_branch/base_branch are refnames (safe), but card_task()
+  # is free-form card text and must never be re-parsed as shell (see
+  # review_prompt_for_card).
+  printf '%s\n\n%s\n\nOutput ONLY a JSON object: {"outcome":"accept|needs_info|rework|spike","score":<0-100>,"feedback":"<concrete evidence or next action>"}\n' \
+    "You are a strict reviewer. This worktree is the result of resolving a merge
 conflict between card branch $card_branch and base branch $base_branch.
 Inspect the actual files and diffs; do not trust the resolver's claims. Judge
 whether BOTH sides' intent was preserved and the task below is genuinely
-complete.
-
-$(card_task "$file")
-
-Output ONLY a JSON object: {"outcome":"accept|needs_info|rework|spike","score":<0-100>,"feedback":"<concrete evidence or next action>"}
-EOF
+complete." \
+    "$(card_task "$file")"
 }
 
 run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict-files> <base-branch> <card-branch> -> sets ATT_UNRESOLVED/ATT_RESOLVE_SECS
