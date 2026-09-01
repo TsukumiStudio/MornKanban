@@ -55,6 +55,9 @@ class TestCommandClassify(unittest.TestCase):
             "kanban init",
             "kanban --version",
             'kanban send alias "title"',
+            "kanban remove 20260901-172101-5531",
+            "kanban config set jobs 8",
+            "kanban config set default_model gpt-5.6-sol",
         ]:
             self.allow(cmd)
 
@@ -92,6 +95,7 @@ class TestCommandClassify(unittest.TestCase):
     def test_denies_file_write_redirection(self):
         self.deny("echo hi > file.txt")
         self.deny("cat a > b")
+        self.deny("rm .kanban/todo/card.md")
 
     def test_denies_git_mutation(self):
         for cmd in [

@@ -1,7 +1,7 @@
 """Fail-closed classifier for Bash commands issued from a secretary pane.
 
-Secretary panes may only: read policy/board files, run `kanban`
-add/show/list/init/version/send, run `kanban-secretary.sh`
+Secretary panes may only: read policy/board files, run validated `kanban`
+add/remove/config/show/list/init/version/send operations, run `kanban-secretary.sh`
 bootstrap/dispatch/end, and run a small set of read-only inspection commands
 (read-only git, cat/ls/grep/find/... with no write side effect). Every other
 command - implementation, verification, git mutation, GitHub/GitLab
@@ -51,8 +51,8 @@ _GIT_WRITE_FLAGS = {
     "prune", "set-url", "rename",
 }
 
-_KANBAN_READONLY_SUBCOMMANDS = {
-    "init", "add", "show", "list", "ls", "send", "version", "--version",
+_KANBAN_ALLOWED_SUBCOMMANDS = {
+    "init", "add", "remove", "config", "show", "list", "ls", "send", "version", "--version",
     "projects",
 }
 
@@ -125,8 +125,8 @@ def _classify_argv(argv):
         if len(argv) < 2:
             return False, "kanban with no subcommand"
         sub = argv[1]
-        if sub not in _KANBAN_READONLY_SUBCOMMANDS:
-            return False, "kanban mutation subcommand: %s (headless run/monitor/install is not the secretary path)" % sub
+        if sub not in _KANBAN_ALLOWED_SUBCOMMANDS:
+            return False, "kanban mutation subcommand: %s (headless run/install is not the secretary path)" % sub
         return True, "kanban %s" % sub
 
     if name == "kanban-secretary.sh":

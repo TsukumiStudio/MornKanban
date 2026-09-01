@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kanban Report"
+  short_description: "Create graphical period reports as slides and PDF"
+  default_prompt: "Use $kanban-report to summarize today's MornKanban activity as a graphical slide deck and PDF."

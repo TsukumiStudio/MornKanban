@@ -53,7 +53,6 @@ cmd_version() { python3 "$SETUP_CLI" version; }
 cmd_install() { python3 "$SETUP_CLI" install; }
 cmd_update() { python3 "$SETUP_CLI" update; }
 cmd_uninstall() { python3 "$SETUP_CLI" uninstall; }
-cmd_monitor() { exec python3 "$SELF_DIR/monitor/cli.py" "$@"; }
 
 find_root() {
   local d=$PWD
@@ -370,6 +369,8 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - ユーザーまたはこのポリシーが明示していない先行カードを、秘書がリリースゲートにしてはならない
 - 明示された依存だけ `kanban add --depends-on <card-id>` で構造化する。依存先がdoneになるまで後続はworker/reviewerを起動せず、attemptを消費しない
 - 実行中に真の依存が判明したworker/resolverは、失敗させず最初の行を `BLOCKED: <理由>` として終了する
+- worker/reviewer/resolverはAskUserQuestion等の対話式選択肢を表示しない。worktree境界・policy・ユーザー判断と衝突したworkerは勝手に選ばず `BLOCKED: <必要な判断と理由>` を返す
+- 質問UIを検出したdispatcherはattempt/reviewを消費せず `blocked_kind: user_input` に駐車し、秘書が判断を確認する。解決後だけ `kanban resume <id>` する
 - `failed` は作業プロセスの失敗であり、製品の検証不合格を意味しない。`failure_kind` とHistoryから製品不具合・インフラ障害・未検証を区別する
 - 依存で止めるのはpush/deploy等の不可逆な外部変更だけ。独立したtest/build/状態確認は止めず、別カードとして投入する
 - インフラ障害で検証未実施なら、デプロイ不可と推測せず「未検証・ユーザー判断が必要」と報告する
@@ -408,7 +409,10 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 - 秘書開始時は `$kanban-dispatch 秘書として開始` を使う。スキルが環境を実測し、以後の会話では対話エージェント自身が実装しない
 - カード追加後は `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
 - worker並列数は既定4。`jobs:` / `KANBAN_JOBS` / `-j` は正の整数ならMornKanban側の上限なし（実機・API・Herdrの容量だけが制約）
+- 秘書はユーザー指示による運用変更を `kanban config set jobs|default_backend|default_model|reviewer|review_model|resolver|resolve_model <value>` で行ってよい。project/boardファイルを直接編集しない
+- 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはtodo以外を拒否する
 - Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
+- `dispatcher pane started` はペインへの起動要求が通っただけ。`dispatcher_failed` 通知時は `.kanban/wt/dispatcher.log` を読み、実際の終了理由を報告する。復旧目的でも `git init` / `commit` 等を勝手に行わない
 - (例) failed カードは秘書がユーザーへ即報告する。resolving/blocked は実行側が
   自律的に処理するので、秘書は failed に落ちた時だけ介入する
 
@@ -417,8 +421,8 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 **実装しない。検証しない。commit/push/tag しない。in-process agent を起動しない。カードを起票して visible Herdr へ dispatch する。**
 
 - 許可: KANBAN.md/README/board の読み取り、read-only git (status/log/diff/show 等)、
-  `kanban add/show/list/init/send`、`kanban-secretary.sh bootstrap/dispatch/end`、ユーザーへの報告
-- 禁止: ファイルの直接編集・作成・削除、build/test/lint/formatter/server 起動、bare `kanban run`、
+  `kanban add/remove/config/show/list/init/send`、`kanban-secretary.sh bootstrap/dispatch/end`、ユーザーへの報告
+- 禁止: project/boardファイルの直接編集・作成・削除（raw rmを含む）、build/test/lint/formatter/server 起動、bare `kanban run`、
   headless agent CLI (`claude -p`/`codex exec`)、Claude/Codex の in-process Agent/Task/subagent、
   git の変更系全般 (add/commit/push/merge/rebase/reset/checkout/branch作成削除/tag/worktree等)、
   GitHub/GitLab 等の外部変更 (push/release/PR/issue/tag publish)、package publish、deploy
@@ -435,7 +439,7 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 **一切使わない**。visible Herdr pane を経由しない実装・調査・検証・レビュー・
 競合解決は、カードもワークツリーも board 履歴も残らず契約違反になる。
 
-- 許可: `.kanban/KANBAN.md` とボードの確認、`kanban add` / `kanban send`、
+- 許可: `.kanban/KANBAN.md` とボードの確認、`kanban add` / `kanban remove` / `kanban config` / `kanban send`、
   `kanban-secretary.sh dispatch` / `dispatch --once`、ユーザーへの報告
 - 禁止: `Agent`/`Task` (Claude Code)、collaboration/subagent 起動 (Codex)、
   `herdr-agent-worker.sh` 経由の visible pane を開かないその他の in-process delegation
@@ -446,24 +450,35 @@ EOF
   echo "initialized $base"
 }
 
+add_usage() {
+  echo 'usage: kanban add "title" [-b claude|codex|auto] [-m model] [-e effort] [--depends-on card-id] [-t threshold] [--review|--no-review] [--diagnose] < description'
+}
+
 cmd_add() {
+  local arg
+  for arg in "$@"; do
+    [[ $arg == -- ]] && break
+    if [[ $arg == -h || $arg == --help ]]; then add_usage; return 0; fi
+  done
   require_root
   local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL effort="" depends_on="" threshold=$DEFAULT_THRESHOLD
   local review_enabled=auto review_source=auto task_kind=implementation
   while [[ $# -gt 0 ]]; do
     case $1 in
-      -b|--backend) backend=$2; shift 2 ;;
-      -m|--model) model=$2; shift 2 ;;
-      -e|--effort) effort=$2; shift 2 ;;
-      --depends-on) depends_on=$2; shift 2 ;;
-      -t|--threshold) threshold=$2; shift 2 ;;
+      -b|--backend) [[ $# -ge 2 ]] || die "$1 requires a value"; backend=$2; shift 2 ;;
+      -m|--model) [[ $# -ge 2 ]] || die "$1 requires a value"; model=$2; shift 2 ;;
+      -e|--effort) [[ $# -ge 2 ]] || die "$1 requires a value"; effort=$2; shift 2 ;;
+      --depends-on) [[ $# -ge 2 ]] || die "$1 requires a value"; depends_on=$2; shift 2 ;;
+      -t|--threshold) [[ $# -ge 2 ]] || die "$1 requires a value"; threshold=$2; shift 2 ;;
       --review) review_enabled=true; review_source=card; shift ;;
       --no-review) review_enabled=false; review_source=card; shift ;;
       --diagnose) task_kind=diagnose; shift ;;
-      *) title=$1; shift ;;
+      --) shift; [[ $# -eq 1 && -z $title ]] || die "expected exactly one title after --"; title=$1; shift ;;
+      -*) die "unknown option for kanban add: $1" ;;
+      *) [[ -z $title ]] || die "unexpected argument: $1 (title is already set)"; title=$1; shift ;;
     esac
   done
-  [[ -n $title ]] || die "usage: kanban add \"title\" [-b claude|codex|auto] [-m model] [-e effort] [--depends-on card-id] [-t threshold] [--review|--no-review] [--diagnose] < description"
+  [[ -n $title ]] || { add_usage >&2; return 1; }
   case $backend in
     auto|claude|codex) ;;
     *) die "unknown backend: $backend (auto|claude|codex)" ;;
@@ -516,6 +531,63 @@ $desc
 ## History
 EOF
   echo "$file"
+}
+
+remove_usage() { echo 'usage: kanban remove <todo-card-id>'; }
+
+cmd_remove() {
+  if [[ ${1:-} == -h || ${1:-} == --help ]]; then remove_usage; return 0; fi
+  require_root
+  [[ $# -eq 1 ]] || { remove_usage >&2; return 1; }
+  local wanted=$1 state file id title
+  local -a hits=()
+  [[ $wanted =~ ^[A-Za-z0-9-]+$ ]] || die "invalid card id: $wanted"
+  for state in "${STATES[@]}"; do
+    for file in "$KB/$state"/*.md; do
+      [[ -e $file ]] || continue
+      id=$(fm_get "$file" id "")
+      [[ $id == *"$wanted"* ]] && hits+=("$file")
+    done
+  done
+  [[ ${#hits[@]} -gt 0 ]] || die "no card matching '$wanted'"
+  [[ ${#hits[@]} -eq 1 ]] || die "'$wanted' matches multiple cards; use the full id"
+  file=${hits[0]}
+  state=$(basename "$(dirname "$file")")
+  [[ $state == todo ]] || die "only todo cards can be removed (card is $state)"
+  id=$(fm_get "$file" id "?")
+  title=$(fm_get "$file" title "?")
+  rm "$file"
+  echo "removed todo card: $id  $title"
+}
+
+config_usage() {
+  echo 'usage: kanban config set <jobs|default_backend|default_model|reviewer|review_model|resolver|resolve_model> <value>'
+}
+
+cmd_config() {
+  if [[ ${1:-} == -h || ${1:-} == --help ]]; then config_usage; return 0; fi
+  require_root
+  [[ $# -eq 3 && $1 == set ]] || { config_usage >&2; return 1; }
+  local key=$2 value=$3 shown
+  case $key in
+    jobs)
+      [[ $value =~ ^[1-9][0-9]*$ ]] || die "jobs must be a positive integer (got: $value)"
+      ;;
+    default_backend|reviewer|resolver)
+      case $value in auto|claude|codex) ;; *) die "$key must be auto, claude, or codex" ;; esac
+      ;;
+    default_model|review_model|resolve_model)
+      if [[ $value == default ]]; then
+        value=""
+      else
+        [[ $value =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]] || die "invalid model: $value"
+      fi
+      ;;
+    *) die "config key is not secretary-editable: $key" ;;
+  esac
+  fm_set "$KB/KANBAN.md" "$key" "$value"
+  shown=${value:-default}
+  echo "updated config: $key=$shown"
 }
 
 worker_prompt_for_card() { # worker_prompt_for_card <card>
@@ -630,7 +702,7 @@ resolve_cmd() { # resolve_cmd <card-backend> <card-model> <card-effort> -> resol
 detect_blocked() { # detect_blocked <worker-output> -> sets BLOCKED_REASON (empty = not blocked)
   BLOCKED_REASON=""
   local first_line
-  first_line=$(printf '%s\n' "$1" | sed -n '1p')
+  first_line=$(printf '%s\n' "$1" | awk 'NF && $0 !~ /^herdr-agent-worker:/ {print; exit}')
   case $first_line in
     BLOCKED:*) BLOCKED_REASON=${first_line#BLOCKED:} ;;
   esac
@@ -806,6 +878,7 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   local file=$1 workdir=$2 infra_max=${3:-$DEFAULT_REVIEW_INFRA_MAX_RETRIES}
   local id backend model effort wcmd out title infra_cat retries t0 attempt_label task_kind timebox_secs
   ATT_BLOCKED_REASON=""
+  ATT_BLOCKED_KIND=""
   ATT_WORKER_STATUS=0
   ATT_WORKER_SECS=0
   ATT_REVIEW_SECS=0
@@ -838,7 +911,16 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
     infra_cat=$(echo "$out" | classify_worker_infra_error)
     if [[ $infra_cat == *scope_timebox* ]]; then
       ATT_WORKER_INFRA_BLOCKED=false
+      ATT_BLOCKED_KIND=scope_timebox
       ATT_BLOCKED_REASON=" scope/timebox (hard maximum reached; partial evidence is in History if available)"
+      ATT_SCORE=0
+      ATT_FEEDBACK=""
+      return
+    fi
+    if [[ $infra_cat == *agent_question* ]]; then
+      ATT_WORKER_INFRA_BLOCKED=false
+      ATT_BLOCKED_KIND=user_input
+      ATT_BLOCKED_REASON=" interactive decision requested; clarify the card or project policy, then run kanban resume"
       ATT_SCORE=0
       ATT_FEEDBACK=""
       return
@@ -863,6 +945,7 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   detect_blocked "$out"
   ATT_BLOCKED_REASON=$BLOCKED_REASON
   if [[ -n $ATT_BLOCKED_REASON ]]; then
+    ATT_BLOCKED_KIND=ordering
     ATT_SCORE=0
     ATT_FEEDBACK=""
   fi
@@ -1118,11 +1201,13 @@ process_card_seq() { # non-git fallback: run in place, retry via todo
     return
   fi
   if [[ -n $ATT_BLOCKED_REASON ]]; then
-    fm_set "$file" blocked_kind ordering
-    printf 'worker reported a real-time ordering dependency:%s\n' "$ATT_BLOCKED_REASON" |
+    local blocked_kind=${ATT_BLOCKED_KIND:-ordering}
+    fm_set "$file" blocked_kind "$blocked_kind"
+    printf 'worker stopped without consuming an attempt (kind: %s):%s\n' "$blocked_kind" "$ATT_BLOCKED_REASON" |
       append_history "$file" "blocked"
     move_card "$file" blocked >/dev/null
-    echo "    BLOCKED ->$ATT_BLOCKED_REASON -> blocked (reclaimed on next dispatcher pass)"
+    echo "    BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
+    if [[ $blocked_kind == user_input ]]; then notify_result blocked "$title"; fi
     return
   fi
 
@@ -1219,13 +1304,15 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         break
       fi
       if [[ -n $ATT_BLOCKED_REASON ]]; then
-        fm_set "$file" blocked_kind ordering
-        printf 'worker reported a real-time ordering dependency:%s\nworktree is discarded; the card restarts on a fresh worktree from the next pickup.\n' \
-          "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
+        local blocked_kind=${ATT_BLOCKED_KIND:-ordering}
+        fm_set "$file" blocked_kind "$blocked_kind"
+        printf 'worker stopped without consuming an attempt (kind: %s):%s\nworktree is discarded.\n' \
+          "$blocked_kind" "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
         git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
         git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
         move_card "$file" blocked >/dev/null
-        echo "$tag BLOCKED ->$ATT_BLOCKED_REASON -> blocked"
+        echo "$tag BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
+        if [[ $blocked_kind == user_input ]]; then notify_result blocked "$title"; fi
         return
       fi
       if [[ $task_kind == diagnose ]]; then
@@ -1404,7 +1491,7 @@ cmd_run() {
       # Review-infra worktree/branch/commits are the whole point of keeping them.
       # Worker-reported ordering blocks are still reclaimed on restart.
       case $(fm_get "$orphan" blocked_kind "") in
-        review_infra|dependency) continue ;;
+        review_infra|dependency|user_input|scope_timebox) continue ;;
       esac
       local bid
       bid=$(fm_get "$orphan" id "?")
@@ -1489,7 +1576,7 @@ cmd_run() {
   echo "todo is empty"
 }
 
-cmd_resume() { # cmd_resume <id-substring> -> re-run only the review step of a review-infra-blocked card
+cmd_resume() { # cmd_resume <id-substring> -> resume a supported parked card
   require_root
   local pat=${1:?usage: kanban resume <id>}
   local hits=("$KB"/blocked/*"$pat"*.md)
@@ -1497,7 +1584,16 @@ cmd_resume() { # cmd_resume <id-substring> -> re-run only the review step of a r
   [[ ${#hits[@]} -eq 1 ]] || die "'$pat' matches multiple blocked cards; use the full id"
   local file=${hits[0]} kind
   kind=$(fm_get "$file" blocked_kind "")
-  [[ $kind == review_infra ]] || die "card is blocked (kind: ${kind:-unknown}); only review_infra blocks can be resumed"
+  case $kind in
+    user_input|scope_timebox)
+      fm_set "$file" blocked_kind ""
+      move_card "$file" todo >/dev/null
+      echo "resumed $kind card to todo"
+      return
+      ;;
+    review_infra) ;;
+    *) die "card is blocked (kind: ${kind:-unknown}); only review_infra, user_input, and scope_timebox blocks can be resumed" ;;
+  esac
 
   fm_set "$file" review_infra_retries 0
   fm_set "$file" worker_infra_retries 0
@@ -1526,11 +1622,12 @@ cmd_resume() { # cmd_resume <id-substring> -> re-run only the review step of a r
 case ${1:-} in
   init) shift; cmd_init "$@" ;;
   add) shift; cmd_add "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  config) shift; cmd_config "$@" ;;
   list|ls) cmd_list ;;
   show) shift; cmd_show "${1:?usage: kanban show <id>}" ;;
   run) shift || true; cmd_run "$@" ;;
   resume) shift; cmd_resume "$@" ;;
-  monitor) shift || true; cmd_monitor "$@" ;;
   projects) shift; python3 "$REGISTRY_CLI" projects "$@" ;;
   send) shift; python3 "$REGISTRY_CLI" send "$@" ;;
   --version) cat "$VERSION_FILE" ;;
@@ -1538,5 +1635,5 @@ case ${1:-} in
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|add|list|show|run [--once] [-j N]|resume <id>|monitor [run|daemon|config]|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|add|remove <todo-id>|config set <key> <value>|list|show|run [--once] [-j N]|resume <id>|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
 esac

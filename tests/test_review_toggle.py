@@ -314,7 +314,7 @@ class ReviewToggleTests(unittest.TestCase):
         self.assertIn("review_source: project", text)
 
 
-    # -- contract: CLI / template / monitor / README surfaces stay in sync ---
+    # -- contract: CLI / template / README surfaces stay in sync ---
 
     def test_show_displays_effective_review_policy(self):
         env = dict(self.env)
@@ -397,51 +397,6 @@ class ReviewToggleTests(unittest.TestCase):
         self._run("add", "card2", "--no-review", input_text="task", env=env2)
         r_off = self._run("run", "--once", env=env2)
         self.assertIn("Review: OFF (fast iteration", r_off.stdout + r_off.stderr)
-
-    def test_monitor_board_json_exposes_review_enabled(self):
-        import sys
-
-        sys.path.insert(0, str(REPO / "monitor"))
-        import importlib
-
-        board = importlib.import_module("board")
-        importlib.reload(board)
-
-        env = dict(self.env)
-        env["KANBAN_WORKER_CMD"] = self._script("worker.sh", WORKER_OK)
-        env["KANBAN_REVIEW_CMD"] = self._script("reviewer.sh", REVIEWER_FORBIDDEN)
-        self._run("add", "card", "--no-review", input_text="task", env=env)
-        detail = board.board_detail(str(self.repo / ".kanban"))
-        matches = [c for c in detail["columns"]["todo"] if c.get("title") == "card"]
-        self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["review_enabled"], "false")
-
-    def test_monitor_board_json_resolves_auto_via_project_default(self):
-        import sys
-
-        sys.path.insert(0, str(REPO / "monitor"))
-        import importlib
-
-        board = importlib.import_module("board")
-        importlib.reload(board)
-
-        env = dict(self.env)
-        (self.repo / ".kanban" / "KANBAN.md").write_text(
-            (self.repo / ".kanban" / "KANBAN.md").read_text().replace(
-                "review_enabled: true", "review_enabled: false"
-            )
-        )
-        self._run("add", "auto card", input_text="task", env=env)  # no --review/--no-review
-        detail = board.board_detail(str(self.repo / ".kanban"))
-        matches = [c for c in detail["columns"]["todo"] if c.get("title") == "auto card"]
-        self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["review_enabled"], "false")
-
-    def test_monitor_static_js_labels_review_state(self):
-        app_js = (REPO / "monitor" / "static" / "app.js").read_text()
-        self.assertIn('"Review: OFF"', app_js)
-        self.assertIn('"Review: ON"', app_js)
-        self.assertIn("review_enabled", app_js)
 
     def test_readme_documents_review_toggle_and_show_label(self):
         readme = (REPO / "README.md").read_text()

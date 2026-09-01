@@ -2,7 +2,7 @@
 """Tests for gui/dashboard.py (the terminal setup dashboard) and its wiring
 into gui/setup_cli.py.
 
-Covers: status collection under fixture HOME/config, terminal capability
+Includes status collection under fixture HOME/config, terminal capability
 fallback (non-TTY, NO_COLOR, TERM=dumb, narrow COLUMNS), display-width-aware
 wrapping for long paths/Japanese text, and the install/uninstall preview +
 confirm + summary flow end to end (via a real pty so sys.stdin.isatty() is
@@ -22,7 +22,7 @@ import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
-DIST_FILES = ["kanban.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "monitor", "guard", ".gitignore"]
+DIST_FILES = ["kanban.sh", "kanban-setup.sh", "dispatcher_tui.py", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
 
 
 def _copy_dist(dest):
@@ -140,9 +140,6 @@ class DashboardModuleTests(unittest.TestCase):
             self.dashboard.STATE_INSTALLED,
             self.dashboard.STATE_NOT_INSTALLED,
             self.dashboard.STATE_UPDATE,
-            self.dashboard.STATE_RUNNING,
-            self.dashboard.STATE_STOPPED,
-            self.dashboard.STATE_OPTIONAL,
             self.dashboard.STATE_REGISTERED,
             self.dashboard.STATE_EMPTY,
             self.dashboard.STATE_NEEDS_CHECK,
@@ -171,12 +168,10 @@ class DashboardModuleTests(unittest.TestCase):
         titles = [t for t, *_ in self.dashboard.GUIDE_FLOWS]
         for expected in (
             "初回 install", "update", "uninstall", "project で init",
-            "秘書として開始", "projects add/list/remove",
-            "send による別 project への投函", "monitor 一時起動", "monitor 常駐化",
+            "秘書として開始", "秘書のboard管理", "projects add/list/remove",
+            "send による別 project への投函",
         ):
             self.assertIn(expected, titles)
-        monitor_flow = next(flow for flow in self.dashboard.GUIDE_FLOWS if flow[0] == "monitor 一時起動")
-        self.assertIn("kanban-monitor.sh", monitor_flow[2])
 
 
 def _fake_status():
@@ -185,11 +180,12 @@ def _fake_status():
         "local_version": "1.0.0",
         "cli": {"state": "未導入", "link": "/tmp/home/.local/bin/kanban", "target": None},
         "skills": {
-            "Claude Code": {"installed": False, "version": None, "repo": None, "state": "未導入"},
-            "Codex": {"installed": False, "version": None, "repo": None, "state": "未導入"},
+            "Claude Code / kanban-dispatch": {"installed": False, "version": None, "repo": None, "state": "未導入"},
+            "Claude Code / kanban-report": {"installed": False, "version": None, "repo": None, "state": "未導入"},
+            "Codex / kanban-dispatch": {"installed": False, "version": None, "repo": None, "state": "未導入"},
+            "Codex / kanban-report": {"installed": False, "version": None, "repo": None, "state": "未導入"},
         },
         "version": {"current": "1.0.0", "latest": "1.0.0", "state": "up-to-date", "error": None, "badge_state": "導入済み"},
-        "monitor": {"installed": False, "running": False, "state": "任意・未設定", "plist": "/tmp/x.plist", "url": "http://127.0.0.1:8787/"},
         "registry": {"state": "登録なし", "path": "/tmp/home/.config/mornkanban/projects.json", "count": 0, "error": None},
         "project": {"state": "未導入", "root": None},
         "deps": {"herdr": False, "claude": False, "codex": False},
@@ -199,8 +195,8 @@ def _fake_status():
 
 class CollectStatusFixtureTests(unittest.TestCase):
     """Exercises dashboard.collect_status() against a fixture HOME/config,
-    covering: all-uninstalled, installed, update-available, monitor
-    running/stopped, in/out of a project, broken CLI symlink, and an
+    covering: all-uninstalled, installed, update-available, in/out of a
+    project, broken CLI symlink, and an
     unreachable latest-version source."""
 
     def setUp(self):
@@ -214,7 +210,7 @@ class CollectStatusFixtureTests(unittest.TestCase):
             os.environ,
             {
                 "HOME": str(self.home),
-                "KANBAN_MONITOR_CONFIG_DIR": str(self.home / "cfg"),
+                "KANBAN_CONFIG_DIR": str(self.home / "cfg"),
                 "KANBAN_VERSION_URL": "file://%s" % (REPO / "VERSION"),
             },
         )
@@ -242,14 +238,7 @@ class CollectStatusFixtureTests(unittest.TestCase):
         self.kanban_link_patch.start()
         self.claude_settings_patch.start()
         self.skill_targets_patch.start()
-        self.plist_patch = mock.patch.object(
-            self.dashboard.launchagent, "plist_path",
-            lambda: str(self.home / "Library" / "LaunchAgents" / "dev.mornkanban.monitor.plist"),
-        )
-        self.plist_patch.start()
-
     def tearDown(self):
-        self.plist_patch.stop()
         self.skill_targets_patch.stop()
         self.claude_settings_patch.stop()
         self.kanban_link_patch.stop()
@@ -257,11 +246,10 @@ class CollectStatusFixtureTests(unittest.TestCase):
         self.env_patch.stop()
         self.temp.cleanup()
 
-    def test_optional_monitor_and_empty_registry_are_not_uninstalled(self):
+    def test_empty_registry_is_not_reported_as_uninstalled(self):
         status = self.dashboard.collect_status(cwd=str(self.root))
         self.assertEqual(status["cli"]["state"], self.dashboard.STATE_NOT_INSTALLED)
         self.assertEqual(status["skills"]["Claude Code"]["state"], self.dashboard.STATE_NOT_INSTALLED)
-        self.assertEqual(status["monitor"]["state"], self.dashboard.STATE_OPTIONAL)
         self.assertEqual(status["registry"]["state"], self.dashboard.STATE_EMPTY)
         self.assertEqual(status["project"]["state"], self.dashboard.STATE_NOT_INSTALLED)
 
@@ -300,25 +288,6 @@ class CollectStatusFixtureTests(unittest.TestCase):
         )
         status = self.dashboard.collect_status(cwd=str(self.root))
         self.assertEqual(status["skills"]["Claude Code"]["state"], self.dashboard.STATE_INSTALLED)
-
-    def test_monitor_installed_not_running(self):
-        plist = self.home / "Library" / "LaunchAgents" / "dev.mornkanban.monitor.plist"
-        plist.parent.mkdir(parents=True)
-        plist.write_text("fake", encoding="utf-8")
-        with mock.patch.object(
-            self.dashboard.launchagent, "status",
-            return_value={"installed": True, "running": False, "detail": ""},
-        ):
-            status = self.dashboard.collect_status(cwd=str(self.root))
-        self.assertEqual(status["monitor"]["state"], self.dashboard.STATE_STOPPED)
-
-    def test_monitor_running(self):
-        with mock.patch.object(
-            self.dashboard.launchagent, "status",
-            return_value={"installed": True, "running": True, "detail": "state = running"},
-        ):
-            status = self.dashboard.collect_status(cwd=str(self.root))
-        self.assertEqual(status["monitor"]["state"], self.dashboard.STATE_RUNNING)
 
     def test_project_detected_when_inside_kanban_project(self):
         project = self.root / "proj"

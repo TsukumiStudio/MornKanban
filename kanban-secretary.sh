@@ -22,21 +22,6 @@ json_value() {
   python3 -c 'import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"
 }
 
-split_direction() {
-  herdr pane layout --current | python3 -c '
-import json, os, sys
-layout = json.load(sys.stdin)["result"]["layout"]
-pane_id = os.environ["HERDR_PANE_ID"]
-for pane in layout["panes"]:
-    if pane["pane_id"] == pane_id:
-        rect = pane["rect"]
-        print("right" if rect["width"] > 2 * rect["height"] else "down")
-        break
-else:
-    raise SystemExit("current pane was absent from Herdr layout")
-'
-}
-
 shell_quote() {
   python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"
 }
@@ -148,8 +133,33 @@ marker.clear_marker(sys.argv[2])
   echo "secretary marker cleared: project=$root"
 }
 
+run_dispatcher_pane() {
+  local once=false target=$PWD root log status notify_error
+  local -a dispatcher_cmd
+  if [[ ${1:-} == --once ]]; then once=true; shift; fi
+  if [[ $# -gt 0 ]]; then target=$1; shift; fi
+  [[ $# -eq 0 ]] || die "internal dispatcher runner received unexpected arguments"
+  root=$(kanban_project_root "$target") || die "no .kanban directory found"
+  log=$root/.kanban/wt/dispatcher.log
+  mkdir -p "$(dirname "$log")"
+
+  dispatcher_cmd=("$KANBAN_BIN" run)
+  $once && dispatcher_cmd+=(--once)
+  set +e
+  python3 "$REPO/dispatcher_tui.py" --root "$root" --log "$log" -- "${dispatcher_cmd[@]}"
+  status=$?
+  set -e
+  if [[ $status -ne 0 ]]; then
+    printf 'kanban-secretary: dispatcher exited with status %s\n' "$status" | tee -a "$log" >&2
+    if ! notify_error=$("$REPO/herdr-notify-secretary.sh" dispatcher_failed "$log" "$status" 2>&1); then
+      printf 'kanban-secretary: secretary notification failed: %s\n' "${notify_error:-no detail}" | tee -a "$log" >&2
+    fi
+  fi
+  return "$status"
+}
+
 dispatch() {
-  local once=false target=$PWD root lock direction pane command
+  local once=false target=$PWD root lock pane command
   if [[ ${1:-} == --once ]]; then once=true; shift; fi
   if [[ $# -gt 0 ]]; then target=$1; shift; fi
   [[ $# -eq 0 ]] || die "usage: $0 dispatch [--once] [project-dir]"
@@ -164,31 +174,35 @@ dispatch() {
     return 0
   fi
 
-  direction=$(split_direction)
-  pane=$(herdr pane split --current --direction "$direction" --cwd "$root" --no-focus |
+  pane=$(herdr pane split --current --direction down --cwd "$root" --no-focus |
     json_value 'd["result"]["pane"]["pane_id"]')
   herdr pane rename "$pane" "kanban dispatcher" >/dev/null 2>&1 || true
 
-  command="env KANBAN_WORKER_CMD=$(shell_quote "$REPO/herdr-agent-worker.sh")"
+  command="env KANBAN_BIN=$(shell_quote "$KANBAN_BIN")"
+  command="$command KANBAN_WORKER_CMD=$(shell_quote "$REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_REVIEW_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=reviewer $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_RESOLVE_CMD=$(shell_quote "env KANBAN_HERDR_ROLE=resolver $REPO/herdr-agent-worker.sh")"
   command="$command KANBAN_NOTIFY_CMD=$(shell_quote "$REPO/herdr-notify-secretary.sh")"
   command="$command KANBAN_ACTIVITY_LOG=$(shell_quote "$root/.kanban/activity.jsonl")"
   command="$command KANBAN_HERDR_SECRETARY=$(shell_quote "$SECRETARY_NAME")"
-  command="$command $(shell_quote "$KANBAN_BIN") run"
+  command="$command KANBAN_HERDR_SECRETARY_PANE=$(shell_quote "$HERDR_PANE_ID")"
+  command="$command KANBAN_HERDR_DISPATCHER_PANE=$(shell_quote "$pane")"
+  command="$command $(shell_quote "$REPO/kanban-secretary.sh") __run-dispatcher-pane"
   if $once; then command="$command --once"; fi
+  command="$command $(shell_quote "$root")"
   command="$command; exit"
 
   if ! herdr pane run "$pane" "$command" >/dev/null; then
     herdr pane close "$pane" >/dev/null 2>&1 || true
     die "failed to start the dispatcher pane"
   fi
-  echo "dispatcher started: pane=$pane secretary=$SECRETARY_NAME"
+  echo "dispatcher pane started: pane=$pane secretary=$SECRETARY_NAME"
 }
 
 case ${1:-} in
   bootstrap) shift; bootstrap "$@" ;;
   dispatch) shift; dispatch "$@" ;;
   end) shift; end "$@" ;;
+  __run-dispatcher-pane) shift; run_dispatcher_pane "$@" ;;
   *) die "usage: $0 <bootstrap [project-dir] | dispatch [--once] [project-dir] | end [project-dir]>" ;;
 esac

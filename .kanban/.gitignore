@@ -3,3 +3,4 @@ wt/
 .merge.lock
 activity.jsonl
 activity.jsonl.lock
+.secretary-guard/

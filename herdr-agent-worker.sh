@@ -35,8 +35,14 @@ log_activity() { # log_activity <event> <status>
   python3 "$(cd "$(dirname "$0")" && pwd)/activity_log.py" "$activity_log" \
     --event "$1" --status "${2:-}" --card-id "${card_id:-unknown}" \
     --role "$role" --attempt "${attempt:-0}" --backend "${backend:-}" \
-    --model "${model:-}" --agent-name "$name" --pane-id "${pane:-}" \
+    --model "${model:-}" --effort "${effort:-}" --agent-name "$name" --pane-id "${pane:-}" \
     --duration-secs "$(($(date +%s) - started_epoch))" >/dev/null 2>&1 || true
+}
+
+infra_error() {
+  log_activity infra_error "$1"
+  printf 'KANBAN_INFRA_ERROR: %s: %s\n' "$1" "$2" >&2
+  exit 1
 }
 
 resolve_auto_backend() { # echo first installed backend from KANBAN_BACKEND_ORDER
@@ -82,13 +88,28 @@ effort=${KANBAN_CARD_EFFORT:-}
 
 tmp=$(mktemp -d)
 pane=""
+pane_lock="${activity_log:-/tmp/mornkanban-${HERDR_TAB_ID:-tab}}.pane-layout.lock"
+pane_lock_owned=false
 cleanup() {
+  if $pane_lock_owned; then rm -f "$pane_lock"; fi
   if [[ -n $pane ]]; then herdr pane close "$pane" >/dev/null 2>&1 || true; fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
 
 cat >"$tmp/prompt.md"
+
+if [[ $role == reviewer ]]; then
+  cat >>"$tmp/prompt.md" <<'EOF'
+
+無人実行契約: AskUserQuestion等で対話式の選択肢を表示しないこと。判断材料が不足する場合も質問せず、score 0 と不足情報をfeedbackへ書いた所定のJSONだけを返すこと。
+EOF
+else
+  cat >>"$tmp/prompt.md" <<'EOF'
+
+無人実行契約: AskUserQuestion等で対話式の選択肢を表示しないこと。タスクがworktree境界・project policy・必要なユーザー判断と衝突する場合は勝手に選択せず、作業を止め、最終回答本文の先頭行を `BLOCKED: <必要な判断と理由>` にすること。
+EOF
+fi
 
 # Claude Code and Codex both render on the terminal's alternate screen, so a
 # finished response cannot be recovered from pane scrollback. Have the agent
@@ -107,28 +128,48 @@ printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェク�
 
 jget() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"; }
 
-# Split along the longer visual axis (terminal cells are ~2:1 tall, so a
-# pane is "wide" when width exceeds twice its row count). Stacking every
-# worker downward makes rows unusably short.
-dir=$(herdr pane layout --current | python3 -c '
-import json, os, sys
-lay = json.load(sys.stdin)["result"]["layout"]
-me = os.environ.get("HERDR_PANE_ID", "")
-for p in lay["panes"]:
-    if p["pane_id"] == me:
-        r = p["rect"]
-        print("right" if r["width"] > 2 * r["height"] else "down")
-        break
+for _ in {1..200}; do
+  if shlock -p $$ -f "$pane_lock"; then pane_lock_owned=true; break; fi
+  sleep 0.05
+done
+$pane_lock_owned || infra_error pane_layout_failed "timed out waiting for the shared pane-layout lock"
+
+layout_json=$(herdr pane layout --pane "${KANBAN_HERDR_DISPATCHER_PANE:-$HERDR_PANE_ID}") ||
+  infra_error pane_layout_failed "could not read the Herdr pane layout"
+panes_json=$(herdr pane list --workspace "${HERDR_WORKSPACE_ID}") ||
+  infra_error pane_layout_failed "could not list Herdr panes"
+plan=$(LAYOUT_JSON="$layout_json" PANES_JSON="$panes_json" python3 -c '
+import json, os
+layout = json.loads(os.environ["LAYOUT_JSON"])["result"]["layout"]
+panes = json.loads(os.environ["PANES_JSON"]).get("result", {}).get("panes", [])
+rects = {p["pane_id"]: p["rect"] for p in layout["panes"]}
+secretary = os.environ.get("KANBAN_HERDR_SECRETARY_PANE", "")
+dispatcher = os.environ.get("KANBAN_HERDR_DISPATCHER_PANE", os.environ["HERDR_PANE_ID"])
+agents = [p for p in panes if p.get("label", "").startswith("kanban AI") and p.get("pane_id") in rects]
+if not secretary or not agents:
+    print(secretary or dispatcher, "right")
+elif len(agents) == 1:
+    agent_rect = rects[agents[0]["pane_id"]]
+    print(dispatcher if agent_rect["y"] < rects[dispatcher]["y"] else secretary, "right")
 else:
-    print("down")')
-pane=$(herdr pane split --current --direction "$dir" --cwd "$PWD" --no-focus |
-  jget 'd["result"]["pane"]["pane_id"]')
+    target = max(agents, key=lambda p: (rects[p["pane_id"]]["height"], rects[p["pane_id"]]["width"]))
+    print(target["pane_id"], "down")
+') || infra_error pane_layout_failed "could not choose an AI pane position"
+read -r target dir <<<"$plan"
+if ! pane_json=$(herdr pane split --pane "$target" --direction "$dir" --cwd "$PWD" --no-focus); then
+  infra_error pane_layout_failed "could not create an AI pane"
+fi
+pane=$(jget 'd["result"]["pane"]["pane_id"]' <<<"$pane_json") ||
+  infra_error pane_layout_failed "could not read the new AI pane id"
 
 # Label the pane so the user can tell WHO is doing WHAT at a glance. All
 # roles run full-trust by default (see .kanban/KANBAN.md's worker/reviewer
 # 権限ポリシー section) so the pane title says so plainly, not just via color.
-label="${role} (${backend}/UNRESTRICTED): ${KANBAN_CARD_TITLE:-?}"
-herdr pane rename "$pane" "$(echo "$label" | cut -c1-48)" >/dev/null 2>&1 || true
+label="kanban AI ${role} UNRESTRICTED ${backend}/${model:-unknown}/${effort:-unknown}: ${KANBAN_CARD_TITLE:-?}"
+herdr pane rename "$pane" "$(echo "$label" | cut -c1-48)" >/dev/null 2>&1 ||
+  infra_error pane_layout_failed "could not label the new AI pane"
+rm -f "$pane_lock"
+pane_lock_owned=false
 
 # Start the interactive agent. A brand-new worktree triggers a folder-trust
 # dialog, which surfaces as agent_not_ready; the worktree is our own
@@ -155,6 +196,7 @@ if [[ $backend == claude ]]; then
   fi
   [[ -n $model ]] && kind_args+=(--model "$model")
   [[ -n $effort ]] && kind_args+=(--effort "$effort")
+  kind_args+=(--disallowedTools AskUserQuestion)
   if [[ -n ${KANBAN_ALLOWED_TOOLS:-} ]]; then kind_args+=(--allowedTools "$KANBAN_ALLOWED_TOOLS"); fi
 else # codex
   if [[ ${KANBAN_CODEX_FULL_BYPASS:-true} == true ]]; then
@@ -171,13 +213,8 @@ fi
 # sentinel to tell a broken pane/agent/wrapper from a genuine low review
 # score or a genuinely empty worker diff, so it must be the first line of
 # stdout and nothing else score-shaped should follow it.
-infra_error() {
-  log_activity infra_error "$1"
-  printf 'KANBAN_INFRA_ERROR: %s: %s\n' "$1" "$2" >&2
-  exit 1
-}
-
-if ! herdr agent start "$name" --kind "$backend" --pane "$pane" --timeout 45000 -- "${kind_args[@]}" >/dev/null 2>&1; then
+start_error=""
+if ! start_error=$(herdr agent start "$name" --kind "$backend" --pane "$pane" --timeout 45000 -- "${kind_args[@]}" 2>&1 >/dev/null); then
   local_started=false
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     ui=$(herdr agent read "$name" --source visible --lines 30 2>/dev/null || true)
@@ -190,16 +227,22 @@ if ! herdr agent start "$name" --kind "$backend" --pane "$pane" --timeout 45000 
     sleep 2
   done
   if ! $local_started; then
-    infra_error agent_not_found "role=$role backend=$backend: herdr agent start failed and no trust dialog was seen"
+    infra_error agent_start_failed "role=$role backend=$backend: ${start_error:-herdr agent start failed and no trust dialog was seen}"
   fi
-  if ! herdr agent wait "$name" --timeout 60000 >/dev/null 2>&1; then
-    infra_error agent_not_found "role=$role backend=$backend: agent never became ready after start"
+  if ! wait_error=$(herdr agent wait "$name" --until idle --until done --timeout 60000 2>&1 >/dev/null); then
+    infra_error agent_not_found "role=$role backend=$backend: agent never became ready after trust confirmation (${wait_error:-no detail})"
   fi
 fi
 
-log_activity agent_started running
+prompt_agent() {
+  local prompt_error
+  if ! prompt_error=$(herdr agent prompt "$name" "$1" 2>&1 >/dev/null); then
+    infra_error prompt_failed "role=$role card=$card_id: ${prompt_error:-herdr agent prompt failed}"
+  fi
+}
 
-herdr agent prompt "$name" "$(cat "$tmp/prompt.md")" --wait --timeout 1500000 >/dev/null 2>&1 || true
+prompt_agent "$(cat "$tmp/prompt.md")"
+log_activity agent_started running
 
 # A blocked status is only a real permission/question dialog when the visible
 # pane actually shows one; a long-running shell command (e.g. the worker's
@@ -208,6 +251,10 @@ herdr agent prompt "$name" "$(cat "$tmp/prompt.md")" --wait --timeout 1500000 >/
 # Permission denied"). Never send keys into a pane on a guess.
 looks_like_permission_prompt() {
   grep -qE '(Do you want to (proceed|continue)\?|Allow (this|the) (action|command|tool)\?|\(y/n\)|\[y/N\]|Press enter to (confirm|continue)|don.t ask again)' <<<"$1"
+}
+
+looks_like_agent_question() {
+  grep -qE '(Enter to select.*Esc to cancel|Type something|AskUserQuestion)' <<<"$1"
 }
 
 # idle/done is Herdr's *pane* status, not proof the agent finished writing
@@ -232,12 +279,17 @@ POLL_INTERVAL=${KANBAN_HERDR_POLL_INTERVAL:-3}
 SETTLE_CHECKS=${KANBAN_HERDR_SETTLE_CHECKS:-2}
 STABLE_SLEEP=${KANBAN_HERDR_STABLE_SLEEP:-2}
 MAX_WAIT_SECS=${KANBAN_HERDR_ANSWER_WAIT_SECS:-${KANBAN_CARD_TIMEBOX_SECS:-1500}}
+MISSING_ANSWER_GRACE_SECS=${KANBAN_HERDR_MISSING_ANSWER_GRACE_SECS:-60}
 max_iters=$(python3 -c 'import math,sys; print(max(1, math.ceil(float(sys.argv[1]) / float(sys.argv[2]))))' "$MAX_WAIT_SECS" "$POLL_INTERVAL") ||
   infra_error wrapper_error "invalid poll/timeout settings: interval=$POLL_INTERVAL timeout=$MAX_WAIT_SECS"
+missing_answer_grace_iters=$(python3 -c 'import math,sys; print(max(1, math.ceil(float(sys.argv[1]) / float(sys.argv[2]))))' "$MISSING_ANSWER_GRACE_SECS" "$POLL_INTERVAL") ||
+  infra_error wrapper_error "invalid missing-answer grace: interval=$POLL_INTERVAL grace=$MISSING_ANSWER_GRACE_SECS"
 
 settle_count=0
 lost=0
 answer_ready=0
+answer_reprompted=0
+answer_reprompt_iter=0
 i=0
 while ((i < max_iters)); do
   i=$((i + 1))
@@ -260,6 +312,8 @@ while ((i < max_iters)); do
       ui=$(herdr agent read "$name" --source visible --lines 40 2>/dev/null || true)
       if looks_like_permission_prompt "$ui"; then
         herdr agent send-keys "$name" enter >/dev/null 2>&1 || true
+      elif looks_like_agent_question "$ui"; then
+        infra_error agent_question "role=$role card=$card_id: agent opened an interactive choice instead of returning a non-interactive result"
       fi
       ;;
     gone | dead | missing | error)
@@ -271,9 +325,22 @@ while ((i < max_iters)); do
   esac
   [[ $lost -eq 1 ]] && break
 
-  if ((settle_count >= SETTLE_CHECKS)) && [[ -f $ans ]] && answer_stable "$ans"; then
-    answer_ready=1
-    break
+  if ((settle_count >= SETTLE_CHECKS)); then
+    if [[ -f $ans ]] && answer_stable "$ans"; then
+      answer_ready=1
+      break
+    fi
+    if [[ ! -s $ans ]]; then
+      if [[ $answer_reprompted -eq 0 ]]; then
+        prompt_agent "作業本体は再実行せず、先ほどの最終回答ファイルの欠落だけを修復してください。$ans の1行目へ次の識別行をそのまま書き、2行目以降へ先ほどの最終回答（reviewerならJSONオブジェクトのみ）を書いてください: $ident_line"
+        log_activity answer_reprompted running
+        answer_reprompted=1
+        answer_reprompt_iter=$i
+        settle_count=0
+      elif ((i - answer_reprompt_iter >= missing_answer_grace_iters)); then
+        infra_error missing_answer "role=$role card=$card_id: agent settled twice without writing $ans, including after one focused recovery prompt"
+      fi
+    fi
   fi
 
   sleep "$POLL_INTERVAL"
@@ -284,6 +351,9 @@ if [[ $lost -eq 1 ]]; then
 fi
 
 if [[ $answer_ready -ne 1 ]]; then
+  if [[ $answer_reprompted -eq 1 ]]; then
+    infra_error missing_answer "role=$role card=$card_id: recovery prompt did not produce a stable $ans within ${MISSING_ANSWER_GRACE_SECS}s"
+  fi
   if [[ ${KANBAN_CARD_KIND:-implementation} == diagnose ]]; then
     infra_error scope_timebox "role=$role card=$card_id: diagnosis hit its ${MAX_WAIT_SECS}s hard maximum before writing a stable answer"
   fi

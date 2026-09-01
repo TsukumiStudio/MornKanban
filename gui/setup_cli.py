@@ -95,7 +95,7 @@ def status_summary():
         "秘書ガード (直接実装/検証/Git変更/外部公開/in-process delegation の拒否): claude=%s, codex=%s"
         % (guard["claude"], guard["codex"])
     )
-    lines.append("導入後はプロジェクトのペインで『$kanban-dispatch 秘書として開始』")
+    lines.append("導入後は『$kanban-dispatch 秘書として開始』または『$kanban-report 今日』")
     return "\n".join(lines)
 
 

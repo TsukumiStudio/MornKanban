@@ -24,15 +24,11 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 import setup_core  # noqa: E402
-from monitor import launchagent, server  # noqa: E402
 from registry import store as registry_store  # noqa: E402
 
 STATE_INSTALLED = "導入済み"
 STATE_NOT_INSTALLED = "未導入"
 STATE_UPDATE = "更新あり"
-STATE_RUNNING = "稼働中"
-STATE_STOPPED = "停止中"
-STATE_OPTIONAL = "任意・未設定"
 STATE_REGISTERED = "登録あり"
 STATE_EMPTY = "登録なし"
 STATE_NEEDS_CHECK = "要確認"
@@ -43,9 +39,6 @@ _STATE_STYLE = {
     STATE_INSTALLED: ("green", "[OK]", "✔"),
     STATE_NOT_INSTALLED: ("gray", "[--]", "○"),
     STATE_UPDATE: ("yellow", "[UP]", "▲"),
-    STATE_RUNNING: ("green", "[ON]", "●"),
-    STATE_STOPPED: ("gray", "[OFF]", "○"),
-    STATE_OPTIONAL: ("gray", "[--]", "○"),
     STATE_REGISTERED: ("green", "[OK]", "✔"),
     STATE_EMPTY: ("gray", "[--]", "○"),
     STATE_NEEDS_CHECK: ("red", "[!!]", "⚠"),
@@ -249,23 +242,6 @@ def _version_detail():
     return report
 
 
-def _monitor_detail():
-    st = launchagent.status()
-    if not st["installed"]:
-        state = STATE_OPTIONAL
-    elif st["running"]:
-        state = STATE_RUNNING
-    else:
-        state = STATE_STOPPED
-    return {
-        "installed": st["installed"],
-        "running": st["running"],
-        "state": state,
-        "plist": sanitize(launchagent.plist_path()),
-        "url": "http://%s:%d/" % (server.DEFAULT_HOST, server.DEFAULT_PORT),
-    }
-
-
 def _registry_detail():
     try:
         projects = registry_store.list_all()
@@ -313,7 +289,6 @@ def collect_status(cwd=None):
             for name, directory in setup_core.SKILL_TARGETS.items()
         },
         "version": _version_detail(),
-        "monitor": _monitor_detail(),
         "registry": _registry_detail(),
         "project": _project_detail(cwd),
         "deps": setup_core.check_deps(),
@@ -378,15 +353,7 @@ def render_status(status, caps):
         if detail["installed"]:
             sk_body.append("導入バージョン: %s" % (detail["version"] or "不明"))
             sk_body.append("参照 checkout: %s" % (detail["repo"] or "不明"))
-        lines.append(_box(caps, "%s スキル (kanban-dispatch)" % name, sk_body))
-
-    mon = status["monitor"]
-    mon_body = [
-        "状態: %s" % state_badge(caps, mon["state"]),
-        "URL: %s" % mon["url"],
-        "plist: %s" % mon["plist"],
-    ]
-    lines.append(_box(caps, "monitor (常駐監視)", mon_body))
+        lines.append(_box(caps, "%s スキル" % name, sk_body))
 
     reg = status["registry"]
     reg_body = ["状態: %s" % state_badge(caps, reg["state"])]
@@ -409,9 +376,9 @@ GUIDE_FLOWS = [
         "初回 install",
         "どこからでも (git clone 後)",
         "kanban-setup.sh install",
-        "CLI、Claude Code/Codex の kanban-dispatch スキル、Claude秘書ガードを作成/修復",
+        "CLI、Claude Code/Codex の kanban-dispatch / kanban-report スキル、Claude秘書ガードを作成/修復",
         "~/.local/bin/kanban, Claude/Codexのskill、~/.claude/settings.jsonの管理対象hook",
-        "リポジトリ本体、既存の project board、registry、monitor 設定",
+        "リポジトリ本体、既存の project board、registry",
     ),
     (
         "update",
@@ -419,7 +386,7 @@ GUIDE_FLOWS = [
         "kanban update / kanban-setup.sh update",
         "現在の MornKanban checkout からCLI、スキル、Claude秘書ガードを再導入 (Git操作なし)",
         "~/.local/bin/kanban、Claude/Codexのskill、~/.claude/settings.jsonの管理対象hook",
-        "MornKanban checkout、project board、registry、monitor 設定",
+        "MornKanban checkout、project board、registry",
     ),
     (
         "uninstall",
@@ -427,7 +394,7 @@ GUIDE_FLOWS = [
         "kanban uninstall / kanban-setup.sh uninstall",
         "このインストーラが作成した CLI、スキル、Claude秘書ガードだけを削除",
         "~/.local/bin/kanban, Claude/Codexのskill、~/.claude/settings.jsonの管理対象hook",
-        "リポジトリ本体、project board (.kanban/)、registry、monitor 設定 (すべて削除されない)",
+        "リポジトリ本体、project board (.kanban/)、registry (すべて削除されない)",
     ),
     (
         "project で init",
@@ -446,6 +413,14 @@ GUIDE_FLOWS = [
         "他 project、CLI/スキルの導入状態",
     ),
     (
+        "秘書のboard管理",
+        "対象 project の root",
+        "kanban remove <todo-id> / kanban config set <key> <value>",
+        "未着手todoの回収、またはjobsとAI/model既定値の安全な変更",
+        "対象 project の .kanban/ 内だけ",
+        "projectファイル、Git、実行中/完了カードの履歴",
+    ),
+    (
         "projects add/list/remove",
         "どこからでも",
         "kanban projects add|list|remove <alias> [<path>]",
@@ -460,22 +435,6 @@ GUIDE_FLOWS = [
         "registry に登録済みの alias 先 project の .kanban/todo/ にカードを1件作成",
         "送信先 project の .kanban/todo/ に新規カード1件",
         "送信元 project、registry、他のカード",
-    ),
-    (
-        "monitor 一時起動",
-        "MornKanban checkout (kanban monitor はどこからでも)",
-        "./kanban-monitor.sh (kanban monitor と同じ)",
-        "読み取り専用の監視サーバをフォアグラウンドで起動し、http://127.0.0.1:8787/ で閲覧可能にする (Ctrl+C で停止)",
-        "何も変更しない (読み取り専用)",
-        "すべての project board、registry、CLI/スキルの導入状態",
-    ),
-    (
-        "monitor 常駐化",
-        "どこからでも",
-        "kanban monitor daemon install / start / status / stop / uninstall",
-        "macOS LaunchAgent として monitor を常駐/起動/状態確認/停止/削除",
-        "~/Library/LaunchAgents/dev.mornkanban.monitor.plist, ~/Library/Logs/MornKanban/ 以下のログ",
-        "project board、registry、CLI/スキルの導入状態",
     ),
 ]
 
@@ -502,7 +461,7 @@ def build_install_preview(status):
     for name, directory in setup_core.SKILL_TARGETS.items():
         lines.append("作成/更新: %s/SKILL.md (バージョン %s を埋め込み)" % (sanitize(directory), status["local_version"]))
     lines.append("作成/更新: %s の MornKanban 管理対象hook" % sanitize(setup_core.CLAUDE_SETTINGS_PATH))
-    lines.append("変更しない: project board、registry、monitor 設定、リポジトリ本体")
+    lines.append("変更しない: project board、registry、リポジトリ本体")
     return lines
 
 
@@ -514,7 +473,7 @@ def build_update_preview(status):
     for name, directory in setup_core.SKILL_TARGETS.items():
         lines.append("更新: %s/SKILL.md (バージョン %s へ再導入)" % (sanitize(directory), status["local_version"]))
     lines.append("更新: %s の MornKanban 管理対象hook" % sanitize(setup_core.CLAUDE_SETTINGS_PATH))
-    lines.append("変更しない: MornKanban checkout、project board、registry、monitor 設定")
+    lines.append("変更しない: MornKanban checkout、project board、registry")
     return lines
 
 
@@ -533,7 +492,7 @@ def build_uninstall_preview(status):
             lines.append("削除対象なし: %s/ (未導入)" % sanitize(directory))
     lines.append("削除: %s の MornKanban 管理対象hookのみ (存在する場合)" % sanitize(setup_core.CLAUDE_SETTINGS_PATH))
     lines.append("削除しない: リポジトリ本体 (%s)" % status["repo"])
-    lines.append("削除しない: project board (.kanban/ 配下)、registry、monitor 設定")
+    lines.append("削除しない: project board (.kanban/ 配下)、registry")
     return lines
 
 

@@ -1,20 +1,19 @@
 # セットアップ検証
 
 `setup_core.py` は CLI シンボリックリンクと Claude Code / Codex の
-`kanban-dispatch` スキルを導入する。スキルの正本は
-`skills/kanban-dispatch/` で、インストール時に MornKanban checkout の絶対パスと
+`kanban-dispatch` / `kanban-report` スキルを導入する。スキルの正本は
+`skills/<skill-name>/` で、インストール時に MornKanban checkout の絶対パスと
 `VERSION` の内容を埋め込む。バージョン表示・比較は `setup_core.py` の
 `local_version()` / `fetch_latest_version()` / `compare_versions()` が担う。
 `run_update()` は現在のcheckoutから導入物だけを更新する。
-Codex版は公式のユーザースキル置き場 `~/.agents/skills/kanban-dispatch` へ導入し、
+Codex版は公式のユーザースキル置き場 `~/.agents/skills/<skill-name>` へ導入し、
 旧 `~/.codex/skills/kanban-dispatch` の管理対象コピーはinstall/update時に削除する。
 
 `dashboard.py` はそのロジックを読み取り専用で使い、引数なしの
 `kanban-setup.sh` に枠付きの状態カードを描画し、`h`入力時だけ操作ガイドを開く。TTYでは色とUnicode、
 非TTY・`NO_COLOR`・`TERM=dumb`ではASCII・色なしへ切り替え、現在の`VERSION`を
 常に明記する。`y`/`s`/`u` は変更プレビューと再確認後にだけ実行される。
-本体セットアップ対象外のmonitorは`任意・未設定`、registryは件数に応じて
-`登録なし`/`登録あり`と表示し、本体の`未導入`と混同しない。
+registryは件数に応じて`登録なし`/`登録あり`と表示し、本体の`未導入`と混同しない。
 
 ## バージョンポリシー
 
@@ -34,7 +33,7 @@ Codex版は公式のユーザースキル置き場 `~/.agents/skills/kanban-disp
 # 反復中: 変更機能だけ (名前は複数指定可、上限60秒)
 python3 tests/run.py targeted tests.test_setup_dashboard
 
-# 一区切り: 軽い契約・pure logic・monitor/registry/guard (各stepに上限あり)
+# 一区切り: 軽い契約・pure logic・dispatcher TUI/registry/guard (各stepに上限あり)
 python3 tests/run.py fast
 
 # mainへ統合する直前に1回だけ: 全Python + worker lifecycle + frontend + skill
@@ -48,7 +47,7 @@ process groupで起動し、上限超過時は子・孫processも含めてTERM�
 ### テストの段階 (targeted / fast / full)
 
 - **targeted**: 編集した機能のtest名だけ。通常の実装iterationはここを使う。
-- **fast**: monitor / registry / guard / activity log と秘書contractの軽い集合。
+- **fast**: dispatcher TUI / registry / guard / activity log と秘書contractの軽い集合。
   dispatcherの実worktree E2E、permission matrix、review toggle matrixは含めない。
 - **full**: `unittest discover` で全Python testを漏れなく収集し、worker lifecycle、
   frontend、skill validationも実行する。**main統合直前の最終gateとして1回だけ。**
@@ -67,6 +66,7 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
 
 - 秘書 bootstrap が `.kanban/KANBAN.md` を初期化し、current Herdr agent を `secretary` として登録する
 - visible dispatcher が worker / reviewer / notify を一組で別 Herdr pane に渡す
+- visible worker がprompt拒否を即時失敗として記録し、folder trust後はidle/doneまで待ち、回答ファイル忘れを同じsessionへの一度の再要求で回収する
 - Herdr 外では秘書を開始せず、Herdr必須として失敗する
 - 同じスキルが Claude Code と Codex の両方へ導入され、checkout の実パスとバージョンが埋め込まれる
 - セマンティックバージョン比較 (`1.9.0` < `1.10.0` など、辞書順にならない)
@@ -79,7 +79,8 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
 - セットアップダッシュボードが枠と現在VERSIONだけを起動表示し、`h`入力後にだけ
   操作ガイドを表示してメニューへ戻る。TTY/非TTY・色・狭幅のfallback、導入状態、
   変更プレビュー、確認拒否時の無変更も維持する
-- 任意monitorの未設定と空registryを、本体セットアップ失敗の`未導入`として表示しない
+- 空registryを、本体セットアップ失敗の`未導入`として表示しない
+- dispatcher TUIが狭いpane内で固定ヘッダーを保ち、active表示件数、状態遷移、ログ、終了コードを正しく扱う
 
 セットアップ画面の非TTY経路は次で確認する。ASCII枠付きダッシュボードと
 `VERSION:`を表示後、変更せず終了する。

@@ -3,12 +3,7 @@
 Lets `kanban send <alias> "title"` file a card into a registered project's
 `.kanban/todo/` from any directory, any session, regardless of cwd.
 
-Config lives under the same directory the (in-progress) `monitor` feature
-uses (`KANBAN_MONITOR_CONFIG_DIR` / XDG `mornkanban` dir), as a sibling file
-next to `monitor.json`, so the two features share one config root instead of
-inventing a second one. When `monitor`'s discovery.py merges, its project
-list should additionally overlay entries from this registry (keyed by
-alias) so `kanban monitor` and `kanban send <alias>` agree on names.
+Config lives under `KANBAN_CONFIG_DIR` or the XDG `mornkanban` directory.
 
 python3 standard library only.
 """
@@ -25,7 +20,7 @@ class RegistryError(Exception):
 
 
 def config_dir():
-    override = os.environ.get("KANBAN_CONFIG_DIR") or os.environ.get("KANBAN_MONITOR_CONFIG_DIR")
+    override = os.environ.get("KANBAN_CONFIG_DIR")
     if override:
         return override
     xdg = os.environ.get("XDG_CONFIG_HOME")

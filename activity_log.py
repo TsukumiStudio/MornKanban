@@ -26,7 +26,7 @@ def append_event(path, values, max_events=MAX_EVENTS):
         "at": datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec="seconds"),
     }
     for key in (
-        "event", "card_id", "role", "attempt", "backend", "model",
+        "event", "card_id", "role", "attempt", "backend", "model", "effort",
         "agent_name", "pane_id", "status",
     ):
         event[key] = _clean(values.get(key))
@@ -62,7 +62,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="append one MornKanban agent activity event")
     parser.add_argument("path")
     for name in (
-        "event", "card-id", "role", "attempt", "backend", "model",
+        "event", "card-id", "role", "attempt", "backend", "model", "effort",
         "agent-name", "pane-id", "status", "duration-secs",
     ):
         parser.add_argument("--" + name, default="")

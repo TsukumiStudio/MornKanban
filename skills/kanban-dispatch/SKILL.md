@@ -3,6 +3,8 @@ name: kanban-dispatch
 description: "Initialize and run a visible MornKanban secretary session. Use when the user asks to start or set up a kanban secretary, explicitly invokes $kanban-dispatch, or assigns implementation work later in a conversation where secretary mode was started. The secretary creates cards and dispatches workers but never implements or verifies the work itself."
 ---
 
+<!-- MORNKANBAN_INSTALLER_MANAGED -->
+
 **Do not implement. Do not test. Do not commit/push/tag. Do not spawn in-process agents. Add a card and dispatch visible Herdr.**
 
 A technical guard (see README **Secretary Guard**) fail-closed denies most of
@@ -81,15 +83,29 @@ While secretary mode is active:
    `kanban send <alias> "title"` instead (see README's **Cross-Project
    Send**) — it files the card into that project's own `.kanban/todo/`, not
    this one, and applies that project's own KANBAN.md defaults.
+   If your own malformed `kanban add` nevertheless creates an unintended
+   card, immediately run `kanban remove <card-id>` and then add the correct
+   card; do not ask the user to run raw `rm`. This is also allowed when the
+   user explicitly asks to discard an unstarted card. `kanban remove` is
+   intentionally limited to `todo` and must never be used to erase execution
+   history.
+   Cards must never ask a visible worker to choose interactively. State a
+   decision in the card when policy already answers it; otherwise require
+   `BLOCKED: <needed decision and reason>` instead of `AskUserQuestion` or a
+   numbered choice UI.
 4. Start the visible dispatcher with
    `__MORNKANBAN_REPO__/kanban-secretary.sh dispatch "$PWD"`. The helper opens
-   a separate Herdr dispatcher pane and binds the visible worker, reviewer,
-   resolver, and secretary notification commands. Do not replace it with bare
+   the dispatcher below the secretary, places AI panes on the right and stacks
+   additional AIs downward, and binds the visible worker, reviewer, resolver,
+   and secretary notification commands. Its fixed status rows show the live
+   AI backend/model/effort; `unknown` means the agent inherited a value the
+   wrapper cannot observe. Do not replace it with bare
    `kanban run`. New boards default to `jobs: 4`; honor the project's live
    `jobs:` value or an explicit user override, and impose no MornKanban upper
    cap on a positive worker count.
 5. Return to the user immediately with only the card titles and dispatcher
-   status.
+   pane launch status. A successful pane launch does not prove that the
+   dispatcher kept running or that any card started.
 
 The dialogue agent does not implement, edit, verify, review, resolve
 conflicts, or repair the requested work. Those actions are cards too, and a
@@ -101,22 +117,38 @@ by project policy.
 Cards in `resolving` or `blocked` are handled by their structured state. A
 declared dependency resumes only after its target reaches `done`; a
 `review_infra` block means verification was not performed. If dispatch cannot
-start, do not take over implementation. On notifications, inspect
+start, do not take over implementation. A `dispatcher_failed` notification
+means the pane command exited nonzero: read `.kanban/wt/dispatcher.log`,
+report its actual error, and do not claim the cards ran. Never improvise a
+recovery with `git init`, `commit`, or any other Git mutation. On card
+notifications, inspect
 `failure_kind`/`blocked_kind` and History: `failed` is a work-process failure,
 not automatically a product failure. Distinguish product defects,
 infrastructure failures, and unverified results. For missing verification,
 report **unverified / user decision required** instead of inferring that
 deployment is prohibited.
+An `agent_question` becomes `blocked_kind: user_input` without consuming an
+attempt. Report the requested decision to the user and, after it is resolved,
+run `kanban resume <id>`. Never select an interactive option for the user.
 
 ## What a secretary pane may and may not do
 
 Allowed: reading `.kanban/KANBAN.md`, the README contract, and board/card
 files; read-only git (`status`/`log`/`diff`/`show`/`branch`/...);
-`kanban add`/`show`/`list`/`init`/`send`; `kanban-secretary.sh
+`kanban add`/`remove`/`config set`/`show`/`list`/`init`/`send`;
+`kanban-secretary.sh
 bootstrap`/`dispatch`/`end`; replying to the user.
 
-Forbidden, even if the user asks for the work directly: file
-write/edit/delete, build/test/lint/format/server commands, bare `kanban
+When the user asks to change board operation, use `kanban config set` rather
+than editing `KANBAN.md`: secretary-editable keys are `jobs`,
+`default_backend`, `default_model`, `reviewer`, `review_model`, `resolver`,
+and `resolve_model`. `jobs` is picked up live; card defaults affect newly
+created cards, and reviewer/resolver routing changes require the next
+dispatcher start. Per-card backend/model/effort still belongs on
+`kanban add -b/-m/-e`. Do not change these settings opportunistically.
+
+Forbidden, even if the user asks for the work directly: direct project or
+board file write/edit/delete (including raw `rm`), build/test/lint/format/server commands, bare `kanban
 run`, headless agent CLIs (`claude -p`, `codex exec`), Claude/Codex
 in-process Agent/Task/subagent/collaboration tools, any git mutation
 (add/commit/push/merge/rebase/reset/checkout/branch/tag/worktree/...), and
@@ -134,7 +166,7 @@ close — it produces work with no card, no worktree, no board history, and no
 visible Herdr pane the user can watch or interrupt.
 
 - **Allowed** in this pane: reading `.kanban/KANBAN.md` and the board to
-  decide how to split work; `kanban add` / `kanban send`;
+  decide how to split work; `kanban add` / `kanban remove` / `kanban config` / `kanban send`;
   `kanban-secretary.sh dispatch` / `dispatch --once`; reporting to the user.
 - **Forbidden** in this pane: `Agent`/`Task` (Claude Code), collaboration or
   subagent spawning (Codex), or any other in-process delegation that does not

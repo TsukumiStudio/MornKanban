@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # herdr-notify-secretary.sh - KANBAN_NOTIFY_CMD hook for Herdr environments.
-# Called by the dispatcher as: <this> <done|failed|blocked> <card title>.
+# Called by the dispatcher as: <this> <done|failed|blocked> <card title>, or
+# <this> dispatcher_failed <log path> <exit status>.
 # Prompts the secretary agent so it reports card results itself instead of
 # sitting idle after cutting cards. Never fails the dispatcher.
 set -euo pipefail
-state=${1:-?} title=${2:-?}
+state=${1:-?} title=${2:-?} detail=${3:-?}
 REPO="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=kanban-root.sh
 source "$REPO/kanban-root.sh"
@@ -24,6 +25,9 @@ if [[ -z $sec ]]; then
 fi
 # NOTE: ${title} 必須 — 直後の全角文字が変数名として解釈される (set -u で落ちる)
 case $state in
+  dispatcher_failed)
+    msg="dispatcher が終了コード ${detail} で停止した。カードを実行できたと思い込まず、ログ ${title} を読んで実際の終了理由をユーザーへ報告して。復旧のために git init・commit などのGit変更を勝手に行ってはならない。"
+    ;;
   failed)
     msg="カード「${title}」が failed になった。failed は作業プロセスの失敗であり、製品の検証不合格とは限らない。kanban show で failure_kind と History を確認し、製品不具合・インフラ障害・未検証を区別してユーザーへ報告して。"
     ;;

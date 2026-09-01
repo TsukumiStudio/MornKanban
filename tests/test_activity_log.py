@@ -20,6 +20,7 @@ class ActivityLogTests(unittest.TestCase):
                         "attempt": "1",
                         "backend": "codex",
                         "model": "gpt-test",
+                        "effort": "high",
                         "agent_name": "worker-1",
                         "pane_id": "w1:p2",
                         "status": "running",
@@ -34,6 +35,7 @@ class ActivityLogTests(unittest.TestCase):
             self.assertEqual([row["card_id"] for row in rows], ["card-2", "card-3", "card-4"])
             self.assertNotIn("prompt", rows[0])
             self.assertNotIn("answer", rows[0])
+            self.assertEqual(rows[-1]["effort"], "high")
             self.assertEqual(rows[-1]["duration_secs"], 4)
 
 

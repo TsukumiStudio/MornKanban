@@ -11,8 +11,8 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 FAST_TESTS = [
     "tests.test_activity_log",
+    "tests.test_dispatcher_tui",
     "tests.test_dependencies",
-    "tests.test_monitor",
     "tests.test_registry",
     "tests.test_secretary_guard",
     "tests.test_setup_dashboard",
@@ -62,17 +62,20 @@ def main(argv=None):
     if tier == "fast":
         steps = [
             ("fast python", [sys.executable, "-m", "unittest", "-q"] + FAST_TESTS, 45),
-            ("frontend state", ["node", "--test", "tests/test_monitor_state.js"], 20),
         ]
     elif tier == "full":
         steps = [
             ("full python", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], 180),
             ("visible worker lifecycle", ["bash", "tests/test_herdr_agent_worker.sh"], 30),
-            ("frontend state", ["node", "--test", "tests/test_monitor_state.js"], 20),
             ("skill validation", [
                 sys.executable,
                 os.path.expanduser("~/.codex/skills/.system/skill-creator/scripts/quick_validate.py"),
                 "skills/kanban-dispatch",
+            ], 20),
+            ("report skill validation", [
+                sys.executable,
+                os.path.expanduser("~/.codex/skills/.system/skill-creator/scripts/quick_validate.py"),
+                "skills/kanban-report",
             ], 20),
         ]
     else:

@@ -14,10 +14,11 @@ REPO = os.path.dirname(HERE)
 KANBAN_SH = os.path.join(REPO, "kanban.sh")
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
 KANBAN_LINK = os.path.join(LOCAL_BIN, "kanban")
-SKILL_SOURCE_DIR = os.path.join(REPO, "skills", "kanban-dispatch")
 SKILL_TARGETS = {
-    "Claude Code": os.path.expanduser("~/.claude/skills/kanban-dispatch"),
-    "Codex": os.path.expanduser("~/.agents/skills/kanban-dispatch"),
+    "Claude Code / kanban-dispatch": os.path.expanduser("~/.claude/skills/kanban-dispatch"),
+    "Claude Code / kanban-report": os.path.expanduser("~/.claude/skills/kanban-report"),
+    "Codex / kanban-dispatch": os.path.expanduser("~/.agents/skills/kanban-dispatch"),
+    "Codex / kanban-report": os.path.expanduser("~/.agents/skills/kanban-report"),
 }
 LEGACY_SKILL_TARGETS = {
     "Codex": os.path.expanduser("~/.codex/skills/kanban-dispatch"),
@@ -171,9 +172,10 @@ def install_skills(force=False):
         return ["refusing to install from a kanban worktree; run from the real checkout"]
 
     messages = _remove_legacy_skills()
-    source_skill = os.path.join(SKILL_SOURCE_DIR, "SKILL.md")
-    source_openai = os.path.join(SKILL_SOURCE_DIR, "agents", "openai.yaml")
     for name, directory in SKILL_TARGETS.items():
+        source_dir = os.path.join(REPO, "skills", os.path.basename(directory))
+        source_skill = os.path.join(source_dir, "SKILL.md")
+        source_openai = os.path.join(source_dir, "agents", "openai.yaml")
         skill_path = os.path.join(directory, "SKILL.md")
         if os.path.isfile(skill_path) and not force:
             messages.append("%s skill: already installed" % name)
@@ -345,7 +347,7 @@ def _uninstall_skill(name, directory):
             return "%s スキル: 未導入" % name
         with open(skill_path, "r", encoding="utf-8") as fh:
             content = fh.read()
-        if "MornKanban secretary" in content:
+        if "MORNKANBAN_INSTALLER_MANAGED" in content or "MornKanban secretary" in content:
             shutil.rmtree(directory)
             return "%s スキル: 削除しました" % name
         return "%s スキル: 別管理のため残しました" % name

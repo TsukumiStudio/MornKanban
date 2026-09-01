@@ -21,7 +21,7 @@ KANBAN_SETUP_SH = REPO / "kanban-setup.sh"
 # Distribution files copied to build a standalone repo outside this worktree
 # (setup_core.install_cli/install_skills/run_update all refuse to run from a
 # .kanban/wt/<id> worktree by design).
-DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "VERSION", "gui", "skills", "registry", "monitor", "guard", ".gitignore"]
+DIST_FILES = ["kanban.sh", "kanban-secretary.sh", "kanban-setup.sh", "dispatcher_tui.py", "VERSION", "gui", "skills", "registry", "guard", ".gitignore"]
 
 # `KANBAN_TEST_TIER=fast` skips the handful of tests that drive a real
 # `kanban.sh run --once` end to end (real git worktree/branch/merge
@@ -273,7 +273,7 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("secretary=secretary-project", result.stdout)
         self.assertNotIn("execution=", result.stdout)
         log = self.log.read_text(encoding="utf-8")
-        self.assertIn("pane split --current --direction right", log)
+        self.assertIn("pane split --current --direction down", log)
         self.assertIn("KANBAN_WORKER_CMD=", log)
         self.assertIn("herdr-agent-worker.sh", log)
         self.assertIn("KANBAN_REVIEW_CMD=", log)
@@ -282,9 +282,36 @@ class SecretaryScriptTests(unittest.TestCase):
         self.assertIn("KANBAN_NOTIFY_CMD=", log)
         self.assertIn("herdr-notify-secretary.sh", log)
         self.assertIn("KANBAN_HERDR_SECRETARY=secretary-project", log)
-        self.assertIn("kanban.sh run; exit", log)
+        self.assertIn("kanban-secretary.sh __run-dispatcher-pane", log)
+        self.assertIn("dispatcher_tui.py", (REPO / "kanban-secretary.sh").read_text(encoding="utf-8"))
         self.assertIn("agent get w1:p1", log)
         self.assertIn("agent rename w1:p1 secretary-project", log)
+
+    def test_dispatcher_runtime_failure_is_logged_and_notifies_secretary(self):
+        bootstrap = self.run_secretary("bootstrap", self.project)
+        self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
+        failing_kanban = self.root / "failing-kanban.sh"
+        failing_kanban.write_text(
+            "#!/usr/bin/env bash\necho 'parallel mode requires a git repository (worktrees)' >&2\nexit 42\n",
+            encoding="utf-8",
+        )
+        failing_kanban.chmod(0o755)
+        self.log.write_text("", encoding="utf-8")
+        env = self.env.copy()
+        env["KANBAN_BIN"] = str(failing_kanban)
+        env["KANBAN_HERDR_SECRETARY"] = "secretary-project"
+
+        result = self.run_secretary("__run-dispatcher-pane", self.project, env=env)
+
+        self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+        dispatcher_log = self.project / ".kanban" / "wt" / "dispatcher.log"
+        logged = dispatcher_log.read_text(encoding="utf-8")
+        self.assertIn("parallel mode requires", logged)
+        self.assertIn("dispatcher exited with status 42", logged)
+        notification = self.log.read_text(encoding="utf-8")
+        self.assertIn("agent prompt secretary-project", notification)
+        self.assertIn("dispatcher が終了コード 42", notification)
+        self.assertIn(str(dispatcher_log), notification)
 
     def test_dispatch_refuses_to_steal_secretary_name_owned_by_another_pane(self):
         self.run_secretary("bootstrap", self.project)
@@ -738,6 +765,14 @@ class InstallUninstallTests(unittest.TestCase):
         self.assertIn(str(self.dist), content)
         self.assertIn((self.dist / "VERSION").read_text(encoding="utf-8").strip(), content)
 
+        report_skill = self.home / ".claude" / "skills" / "kanban-report" / "SKILL.md"
+        report_content = report_skill.read_text(encoding="utf-8")
+        self.assertIn("name: kanban-report", report_content)
+        self.assertIn(str(self.dist), report_content)
+        self.assertIn((self.dist / "VERSION").read_text(encoding="utf-8").strip(), report_content)
+        codex_report = self.home / ".agents" / "skills" / "kanban-report" / "SKILL.md"
+        self.assertIn("name: kanban-report", codex_report.read_text(encoding="utf-8"))
+
     def test_install_is_idempotent_repair(self):
         first = self._run("install")
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -753,7 +788,9 @@ class InstallUninstallTests(unittest.TestCase):
 
         self.assertFalse((self.home / ".local" / "bin" / "kanban").exists())
         self.assertFalse((self.home / ".claude" / "skills" / "kanban-dispatch").exists())
+        self.assertFalse((self.home / ".claude" / "skills" / "kanban-report").exists())
         self.assertFalse((self.home / ".agents" / "skills" / "kanban-dispatch").exists())
+        self.assertFalse((self.home / ".agents" / "skills" / "kanban-report").exists())
         # the repository checkout itself is untouched by uninstall
         self.assertTrue((self.dist / "kanban.sh").exists())
 
@@ -868,6 +905,210 @@ class CardEffortTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid effort", result.stderr)
         self.assertEqual(list((self.project / ".kanban" / "todo").glob("*.md")), [])
+
+
+class CardAddArgumentTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name) / "project"
+        self.project.mkdir()
+        subprocess.run(
+            [str(KANBAN_SH), "init"], cwd=self.project,
+            check=True, capture_output=True, text=True,
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _run(self, *args):
+        return subprocess.run(
+            [str(KANBAN_SH), "add", *args], cwd=self.project,
+            input="task", text=True, capture_output=True, check=False,
+        )
+
+    def test_help_and_invalid_arguments_never_create_cards(self):
+        for args, expected_status, message in (
+            (("--help",), 0, "usage: kanban add"),
+            (("--bogus",), 1, "unknown option"),
+            (("-e",), 1, "requires a value"),
+            (("real title", "garbage"), 1, "unexpected argument"),
+        ):
+            with self.subTest(args=args):
+                result = self._run(*args)
+                self.assertEqual(result.returncode, expected_status)
+                self.assertIn(message, result.stdout + result.stderr)
+                self.assertEqual(
+                    list((self.project / ".kanban" / "todo").glob("*.md")), []
+                )
+
+        outside = subprocess.run(
+            [str(KANBAN_SH), "add", "--help"], cwd=self.temp.name,
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(outside.returncode, 0)
+        self.assertIn("usage: kanban add", outside.stdout)
+
+
+class SecretaryBoardAdminTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name) / "project"
+        self.project.mkdir()
+        subprocess.run(
+            [str(KANBAN_SH), "init"], cwd=self.project,
+            check=True, capture_output=True, text=True,
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _run(self, *args, input_text=None):
+        return subprocess.run(
+            [str(KANBAN_SH), *args], cwd=self.project, input=input_text,
+            text=True, capture_output=True, check=False,
+        )
+
+    def test_remove_deletes_only_one_pending_todo_card(self):
+        added = self._run("add", "--", "--help", input_text="accidental")
+        self.assertEqual(added.returncode, 0, added.stderr)
+        card = Path(added.stdout.strip())
+        card_id = next(
+            line.split(":", 1)[1].strip()
+            for line in card.read_text(encoding="utf-8").splitlines()
+            if line.startswith("id:")
+        )
+
+        removed = self._run("remove", card_id)
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIn(card_id, removed.stdout)
+        self.assertFalse(card.exists())
+
+        protected = Path(self._run("add", "real card", input_text="task").stdout.strip())
+        protected_id = next(
+            line.split(":", 1)[1].strip()
+            for line in protected.read_text(encoding="utf-8").splitlines()
+            if line.startswith("id:")
+        )
+        blocked = self.project / ".kanban" / "blocked" / protected.name
+        protected.rename(blocked)
+        refused = self._run("remove", protected_id)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("only todo cards", refused.stderr)
+        self.assertTrue(blocked.exists())
+
+    def test_config_set_updates_only_allowlisted_operational_keys(self):
+        config = self.project / ".kanban" / "KANBAN.md"
+        for key, value in (
+            ("jobs", "12"),
+            ("default_backend", "codex"),
+            ("default_model", "gpt-5.6-sol"),
+            ("reviewer", "claude"),
+            ("review_model", "sonnet"),
+        ):
+            result = self._run("config", "set", key, value)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("%s: %s" % (key, value), config.read_text(encoding="utf-8"))
+
+        before = config.read_text(encoding="utf-8")
+        for key, value in (("jobs", "0"), ("claude_perms", "acceptEdits")):
+            result = self._run("config", "set", key, value)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(config.read_text(encoding="utf-8"), before)
+
+
+class WorkerQuestionBoundaryTests(unittest.TestCase):
+    def test_wrapper_diagnostic_before_blocked_line_still_parks_without_attempt(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            subprocess.run(
+                [str(KANBAN_SH), "init"], cwd=project,
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
+                [str(KANBAN_SH), "config", "set", "jobs", "1"], cwd=project,
+                check=True, capture_output=True, text=True,
+            )
+            config = project / ".kanban" / "KANBAN.md"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "review_enabled: true", "review_enabled: false"
+                ),
+                encoding="utf-8",
+            )
+            worker = Path(td) / "worker.sh"
+            worker.write_text(
+                "#!/usr/bin/env bash\ncat >/dev/null\n"
+                "echo 'herdr-agent-worker: role=worker'\n"
+                "echo 'BLOCKED: user decision required'\n",
+                encoding="utf-8",
+            )
+            worker.chmod(0o755)
+            subprocess.run(
+                [str(KANBAN_SH), "add", "question card"], cwd=project,
+                input="task", text=True, check=True, capture_output=True,
+            )
+
+            result = subprocess.run(
+                [str(KANBAN_SH), "run", "--once"], cwd=project,
+                env={**os.environ, "KANBAN_WORKER_CMD": str(worker), "KANBAN_JOBS": "1"},
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            cards = list((project / ".kanban" / "blocked").glob("*.md"))
+            self.assertEqual(len(cards), 1, result.stdout + result.stderr)
+            text = cards[0].read_text(encoding="utf-8")
+            self.assertIn("attempts: 0", text)
+            self.assertIn("blocked_kind: ordering", text)
+
+    def test_agent_question_parks_as_resumable_user_input_without_retry(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            subprocess.run(
+                [str(KANBAN_SH), "init"], cwd=project,
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
+                [str(KANBAN_SH), "config", "set", "jobs", "1"], cwd=project,
+                check=True, capture_output=True, text=True,
+            )
+            worker = Path(td) / "worker.sh"
+            worker.write_text(
+                "#!/usr/bin/env bash\ncat >/dev/null\n"
+                "echo 'KANBAN_INFRA_ERROR: agent_question: interactive choice' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            worker.chmod(0o755)
+            added = subprocess.run(
+                [str(KANBAN_SH), "add", "question card", "--no-review"], cwd=project,
+                input="task", text=True, check=True, capture_output=True,
+            )
+            card_id = re.search(
+                r"^id: (\S+)$", Path(added.stdout.strip()).read_text(encoding="utf-8"), re.M
+            ).group(1)
+
+            result = subprocess.run(
+                [str(KANBAN_SH), "run", "--once"], cwd=project,
+                env={**os.environ, "KANBAN_WORKER_CMD": str(worker), "KANBAN_JOBS": "1"},
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            card = next((project / ".kanban" / "blocked").glob("*.md"))
+            text = card.read_text(encoding="utf-8")
+            self.assertIn("blocked_kind: user_input", text)
+            self.assertIn("attempts: 0", text)
+            self.assertNotIn("worker infrastructure retry", text)
+            resumed = subprocess.run(
+                [str(KANBAN_SH), "resume", card_id], cwd=project,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(len(list((project / ".kanban" / "todo").glob("*.md"))), 1)
 
 
 class PromptProjectionTests(unittest.TestCase):
@@ -1965,6 +2206,38 @@ class SecretaryDoesNotHoldCardsBackContractTests(unittest.TestCase):
         text = (REPO / "kanban.sh").read_text(encoding="utf-8")
         self.assertIn("秘書はファイル重複・依存順序・実行中カードとの競合を理由に起票を保留しない", text)
         self.assertIn("resolve_max_attempts", text)
+
+
+class SecretaryBoardAdminContractTests(unittest.TestCase):
+    def test_board_admin_boundary_is_consistent_across_contracts(self):
+        for path in (
+            REPO / "README.md",
+            REPO / "skills" / "kanban-dispatch" / "SKILL.md",
+            REPO / "kanban.sh",
+        ):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("kanban remove", text, str(path))
+            self.assertIn("kanban config", text, str(path))
+        self.assertIn(
+            "todo以外を拒否", (REPO / "kanban.sh").read_text(encoding="utf-8")
+        )
+        skill = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("including raw `rm`", skill)
+
+
+class WorkerQuestionContractTests(unittest.TestCase):
+    def test_unattended_question_contract_is_propagated(self):
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        skill = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+        report = (REPO / "skills" / "kanban-report" / "SKILL.md").read_text(encoding="utf-8")
+        policy = (REPO / "kanban.sh").read_text(encoding="utf-8")
+        wrapper = (REPO / "herdr-agent-worker.sh").read_text(encoding="utf-8")
+
+        self.assertIn("AskUserQuestion", readme)
+        self.assertIn("agent_question", skill)
+        self.assertIn("blocked_kind: user_input", report)
+        self.assertIn("kanban resume", policy)
+        self.assertIn("--disallowedTools AskUserQuestion", wrapper)
 
 
 class DiagnosisCardContractTests(unittest.TestCase):
