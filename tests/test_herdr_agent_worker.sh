@@ -421,6 +421,31 @@ test_agent_lost_mid_run() {
   rm -rf "$SCEN"
 }
 
+# --- scenario 8b: hostile answer content must pass through unharmed -------
+# Regression for a reported class of bug: worker/reviewer/resolver answer
+# text is long-form agent output (parentheses, "done", quotes, newlines,
+# Japanese). herdr-agent-worker.sh must only ever copy that text byte-for-
+# byte to stdout (see the final `printf '%s\n' "$body"`) -- it must never be
+# re-parsed as shell, no matter what it contains.
+test_hostile_answer_content_passes_through_unharmed() {
+  note "scenario: answer body contains parens/done/quotes/newlines/Japanese"
+  new_scenario
+  printf 'idle\nidle\nidle\nidle\n' >"$SCEN/statuses"
+  payload=$'実行結果 (確認済み): $(rm -rf /tmp/should-not-run-marker)\nバッククォート `echo pwned` テスト\nwhile true; do echo x; done\n括弧だけの行 (\n長い日本語のフィードバックです。改行や"引用符"やparen)を含みます。'
+  printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\n%s\n' "$payload" >"$SCEN/answer_payload"
+  cat >"$SCEN/on_call_1" <<EOF
+cp "$SCEN/answer_payload" "$WT/.kanban-answer.md"
+EOF
+  MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT"
+  assert_eq "worker exits cleanly on hostile answer content" "$RC" "0"
+  assert_contains "unbalanced \$( text is passed through verbatim, never executed" "$OUT" '$(rm -rf /tmp/should-not-run-marker)'
+  assert_contains "backtick text is passed through verbatim, never executed" "$OUT" '`echo pwned`'
+  assert_contains "a stray done is passed through verbatim" "$OUT" "while true; do echo x; done"
+  assert_contains "bare parens are passed through verbatim" "$OUT" '括弧だけの行 ('
+  [[ ! -e /tmp/should-not-run-marker ]] || bad "hostile \$(...) in answer content WAS executed -- injection succeeded"
+  rm -rf "$SCEN"
+}
+
 # --- scenario 9: answer written non-atomically must not be read mid-write --
 test_answer_completes_atomically() {
   note "scenario: answer file is written in two chunks; must not be read half-done"
@@ -556,6 +581,7 @@ test_missing_answer_is_reprompted_once
 test_trust_recovery_waits_for_idle
 test_agent_lost_mid_run
 test_answer_completes_atomically
+test_hostile_answer_content_passes_through_unharmed
 test_role_backend_matrix
 test_wrong_identity_is_rejected
 test_diagnosis_timeout_is_scope_block_not_infra_retry
