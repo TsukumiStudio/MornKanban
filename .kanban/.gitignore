@@ -1,4 +1,7 @@
 wt/
+briefs/
+reports/
+reviews/
 .lock
 .merge.lock
 activity.jsonl

@@ -1002,6 +1002,35 @@ class CardAddArgumentTests(unittest.TestCase):
             self.assertIn("threshold", result.stderr)
         self.assertEqual(list((self.project / ".kanban" / "todo").glob("*.md")), [])
 
+    def test_structured_card_waits_in_backlog_until_definition_of_ready_passes(self):
+        incomplete = self._run("incomplete", "--type", "feature")
+        self.assertEqual(incomplete.returncode, 0, incomplete.stderr)
+        incomplete_card = Path(incomplete.stdout.strip())
+        self.assertEqual(incomplete_card.parent.name, "backlog")
+        incomplete_id = re.search(
+            r"(?m)^id: (.+)$", incomplete_card.read_text(encoding="utf-8")
+        ).group(1)
+
+        rejected = subprocess.run(
+            [str(KANBAN_SH), "ready", "--check", incomplete_id],
+            cwd=self.project, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("missing: size", rejected.stdout)
+        self.assertIn("missing: Acceptance Criteria", rejected.stdout)
+
+        complete = self._run(
+            "complete", "--type", "feature", "--size", "small",
+            "--goal", "observable result", "--ac", "result is visible",
+            "--scope", "CLI only", "--verify", "python3 -m unittest", "--ready",
+        )
+        self.assertEqual(complete.returncode, 0, complete.stderr)
+        complete_card = Path(complete.stdout.strip())
+        self.assertEqual(complete_card.parent.name, "todo")
+        text = complete_card.read_text(encoding="utf-8")
+        self.assertIn("card_schema: structured", text)
+        self.assertIn("## Acceptance Criteria\n\n- result is visible", text)
+
 
 class SecretaryBoardAdminTests(unittest.TestCase):
     def setUp(self):
@@ -1166,7 +1195,7 @@ class WorkerQuestionBoundaryTests(unittest.TestCase):
 
 
 class PromptProjectionTests(unittest.TestCase):
-    def test_roles_receive_task_view_without_accumulated_history(self):
+    def test_roles_receive_task_plus_current_report_without_accumulated_history(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             project = root / "project"
@@ -1221,7 +1250,7 @@ class PromptProjectionTests(unittest.TestCase):
             self.assertNotIn("WORKER_OUTPUT_SENTINEL", worker2)
             for prompt in (reviewer1, reviewer2):
                 self.assertIn("TASK_SENTINEL", prompt)
-                self.assertNotIn("WORKER_OUTPUT_SENTINEL", prompt)
+                self.assertIn("WORKER_OUTPUT_SENTINEL", prompt)
                 self.assertNotIn("FEEDBACK_SENTINEL", prompt)
 
 
@@ -1590,6 +1619,139 @@ class DispatcherWorkflowTests(unittest.TestCase):
         printf '{"score": 95, "feedback": "ok"}\\n'
         """
     )
+
+    def _add_structured_card(self, title="structured card"):
+        result = subprocess.run(
+            [
+                str(KANBAN_SH), "add", title, "--type", "feature", "--size", "small",
+                "--goal", "deliver the requested result", "--ac", "result exists",
+                "--scope", "new_file.txt", "--verify", "test -f new_file.txt", "--ready",
+            ],
+            input="implement the result", cwd=self.project, env=self.env,
+            check=True, capture_output=True, text=True,
+        )
+        return Path(result.stdout.strip())
+
+    @FULL_ONLY
+    def test_structured_card_persists_brief_report_review_and_accept_merge_facts(self):
+        review_prompt = Path(self.temp.name) / "review-prompt.txt"
+        worker = self._write_script(
+            "structured-worker.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'done\\n' > new_file.txt
+                cat <<'EOF'
+                ## Summary
+                implemented
+                ## Acceptance Criteria & Evidence
+                result exists: new_file.txt
+                ## Verification
+                test -f new_file.txt: passed
+                ## Changes
+                new_file.txt
+                ## Deviations & Decisions
+                none
+                ## Follow-ups
+                none
+                EOF
+                """
+            ),
+        )
+        reviewer = self._write_script(
+            "typed-reviewer.sh",
+            '#!/usr/bin/env bash\ncat > "$REVIEW_PROMPT"\nprintf \'{"outcome":"accept","score":60,"feedback":"evidence verified"}\\n\'\n',
+        )
+        card = self._add_structured_card()
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_CMD": str(reviewer),
+                "KANBAN_JOBS": "1", "REVIEW_PROMPT": str(review_prompt),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = self.project / ".kanban" / "done" / card.name
+        self.assertTrue(done.exists(), result.stdout + result.stderr)
+        text = done.read_text(encoding="utf-8")
+        self.assertIn("review_outcome: accept", text)
+        self.assertRegex(text, r"(?m)^accepted_at: .+")
+        self.assertRegex(text, r"(?m)^merged_at: .+")
+        card_id = re.search(r"(?m)^id: (.+)$", text).group(1)
+        base = self.project / ".kanban"
+        self.assertIn("## Goal", (base / "briefs" / f"{card_id}-r1.md").read_text(encoding="utf-8"))
+        self.assertIn("## Verification", (base / "reports" / f"{card_id}-r1.md").read_text(encoding="utf-8"))
+        self.assertIn('"outcome":"accept"', (base / "reviews" / f"{card_id}-r1.md").read_text(encoding="utf-8"))
+        self.assertIn("## Worker report", review_prompt.read_text(encoding="utf-8"))
+
+    @FULL_ONLY
+    def test_incomplete_structured_report_becomes_needs_info_without_reviewer(self):
+        reviewer_called = Path(self.temp.name) / "reviewer-called"
+        worker = self._write_script("short-worker.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'done\\n'\n")
+        reviewer = self._write_script(
+            "must-not-run-reviewer.sh",
+            '#!/usr/bin/env bash\ntouch "$REVIEWER_CALLED"\nprintf \'{"outcome":"accept","score":100,"feedback":"wrong"}\\n\'\n',
+        )
+        card = self._add_structured_card("missing report")
+        card.write_text(
+            card.read_text(encoding="utf-8").replace("max_attempts: 3", "max_attempts: 1"),
+            encoding="utf-8",
+        )
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_CMD": str(reviewer),
+                "KANBAN_JOBS": "1", "REVIEWER_CALLED": str(reviewer_called),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(reviewer_called.exists())
+        failed = self.project / ".kanban" / "failed" / card.name
+        text = failed.read_text(encoding="utf-8")
+        self.assertIn("review_outcome: needs_info", text)
+        self.assertIn("worker report is incomplete", text)
+
+    @FULL_ONLY
+    def test_typed_spike_parks_review_decision_with_worktree_preserved(self):
+        worker = self._write_script("spike-worker.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'work\\n' > spike.txt\n")
+        reviewer = self._write_script(
+            "spike-reviewer.sh",
+            '#!/usr/bin/env bash\ncat >/dev/null\nprintf \'{"outcome":"spike","score":0,"feedback":"research API first"}\\n\'\n',
+        )
+        card = self._add_card("spike decision")
+        card_id = re.search(r"(?m)^id: (.+)$", card.read_text(encoding="utf-8")).group(1)
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_CMD": str(reviewer),
+                "KANBAN_JOBS": "1",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        blocked = self.project / ".kanban" / "blocked" / card.name
+        text = blocked.read_text(encoding="utf-8")
+        self.assertIn("blocked_kind: review_decision", text)
+        self.assertIn("review_outcome: spike", text)
+        self.assertTrue((self.project / ".kanban" / "wt" / card_id).is_dir())
+
+        restarted = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_CMD": str(reviewer),
+                "KANBAN_JOBS": "1",
+            },
+        )
+        self.assertEqual(restarted.returncode, 0, restarted.stderr)
+        self.assertTrue(blocked.exists())
+        self.assertTrue((self.project / ".kanban" / "wt" / card_id).is_dir())
 
     @FULL_ONLY
     def test_no_conflict_merge_still_works(self):
@@ -2784,7 +2946,7 @@ class SecretaryBoardAdminContractTests(unittest.TestCase):
             self.assertIn("kanban config", text, str(path))
             self.assertIn("--operate", text, str(path))
         self.assertIn(
-            "todo以外を拒否", (REPO / "kanban.sh").read_text(encoding="utf-8")
+            "backlog/Ready以外を拒否", (REPO / "kanban.sh").read_text(encoding="utf-8")
         )
         skill = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("including raw `rm`", skill)
@@ -2892,6 +3054,9 @@ class TestTierContractTests(unittest.TestCase):
         "test_restart_resumes_merge_checkpoint_without_worker_or_review",
         "test_noop_resolver_cannot_hide_binary_conflict",
         "test_branch_change_while_waiting_for_merge_lock_never_merges_wrong_branch",
+        "test_structured_card_persists_brief_report_review_and_accept_merge_facts",
+        "test_incomplete_structured_report_becomes_needs_info_without_reviewer",
+        "test_typed_spike_parks_review_decision_with_worktree_preserved",
     }
 
     def test_full_only_membership_is_exactly_the_documented_set(self):

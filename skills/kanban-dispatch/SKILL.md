@@ -66,7 +66,13 @@ While secretary mode is active:
    the same request. Never inflate a diagnosis with related benchmarks, UI,
    refactors, mutation tests, or exhaustive adjacent improvements; one card
    has one main result and one main responsibility.
-3. Add the cards with `kanban add` and the policy-selected backend/model.
+3. Add ordinary cards with `kanban add` and the policy-selected backend/model.
+   Use the structured fields `--type`, `--size`, `--goal`, one or more
+   `--ac`, and `--scope`; add `--context`, `--out-of-scope`, and repeatable
+   `--verify` where they improve the worker's self-contained brief. The card
+   enters `backlog`. Run `kanban ready --check <card-id>`, then
+   `kanban ready <card-id>` before dispatch (or use `--ready` to perform both
+   at creation). Do not dispatch a structured card by manually moving files.
    Set card effort with `-e`: for `gpt-5.6-sol`, use `medium` for normal work
    and `high` for complex work unless project policy gives a different reason;
    do not let every worker/reviewer/resolver inherit a shared `xhigh` by default.
@@ -82,15 +88,16 @@ While secretary mode is active:
    conflicts, rebasing or merging, fixing, or re-verifying are not secretary
    actions. If the request is actually work for a *different* registered project, use
    `kanban send <alias> "title"` instead (see README's **Cross-Project
-   Send**) — it files the card into that project's own `.kanban/todo/`, not
-   this one, and applies that project's own KANBAN.md defaults. For an
+   Send**) — it files the card into that project's own board, not this one,
+   and applies that project's own KANBAN.md defaults. Pass the same structured
+   options; it enters the destination backlog unless `--ready` passes. For an
    external mutation there, use `kanban send <alias> "title" --operate` so
    the operation contract is preserved.
    If your own malformed `kanban add` nevertheless creates an unintended
    card, immediately run `kanban remove <card-id>` and then add the correct
    card; do not ask the user to run raw `rm`. This is also allowed when the
    user explicitly asks to discard an unstarted card. `kanban remove` is
-   intentionally limited to `todo` and must never be used to erase execution
+   intentionally limited to `backlog`/Ready and must never be used to erase execution
    history.
    Cards must never ask a visible worker to choose interactively. State a
    decision in the card when policy already answers it; otherwise require
@@ -152,6 +159,10 @@ For `operation_unknown`, report and verify the external state first, then use
 `kanban operation <id> done|retry`; never replay it with `resume`.
 For `main_branch_changed`, report and resume only after a safe user decision.
 Never select an interactive option for the user.
+Review outcomes are also structured: `accept` is followed by the merge fact;
+`needs_info`/`rework` return to the worker with evidence; `spike` parks as
+`blocked_kind: review_decision`. Report `accepted_at` and `merged_at` as
+separate facts and never claim acceptance alone means the branch landed.
 
 ## What a secretary pane may and may not do
 

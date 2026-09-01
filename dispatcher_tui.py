@@ -17,12 +17,13 @@ import time
 import unicodedata
 
 
-STATES = ("todo", "doing", "review", "resolving", "blocked", "done", "failed")
+STATES = ("backlog", "todo", "doing", "review", "resolving", "blocked", "done", "failed")
 ACTIVE_STATES = ("doing", "review", "resolving")
 STATE_ORDER = {state: index for index, state in enumerate(STATES)}
 STATE_LABEL = {
     "new": "NEW",
-    "todo": "TODO",
+    "backlog": "BACKLOG",
+    "todo": "READY",
     "doing": "DOING",
     "review": "REVIEW",
     "resolving": "RESOLVE",
@@ -212,7 +213,7 @@ def render_header(snapshot, transitions, width, max_lines=10, status="RUNNING", 
     lines = [
         "MornKanban dispatcher  ● %-9s %s" % (status, now.strftime("%H:%M:%S")),
         (
-            "○ TODO:%d  ▶ RUN:%d  ◇ REV:%d  ↻ FIX:%d  ‖ HOLD:%d  "
+            "○ BACK:%d  ◉ READY:%d  ▶ RUN:%d  ◇ REV:%d  ↻ FIX:%d  ‖ HOLD:%d  "
             "✓ DONE:%d  ! FAIL:%d"
         ) % tuple(counts[state] for state in STATES),
         "ACTIVE %d/%d" % (len(visible_active), len(active)),

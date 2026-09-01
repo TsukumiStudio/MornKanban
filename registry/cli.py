@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """`kanban projects` (PC-wide project registry) and `kanban send` (file a
-card into a registered project's `.kanban/todo/` from anywhere).
+card into a registered project's board from anywhere).
 
 Invoked by kanban.sh as:
   python3 registry/cli.py projects add <alias> <path> [--force]
@@ -33,7 +33,7 @@ from registry import secretary, store  # noqa: E402
 
 BACKENDS = ("auto", "claude", "codex")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-CARD_STATES = ("todo", "doing", "review", "resolving", "blocked", "done", "failed")
+CARD_STATES = ("backlog", "todo", "doing", "review", "resolving", "blocked", "done", "failed")
 DEFAULTS = {
     "default_backend": "auto",
     "default_model": "",
@@ -182,22 +182,32 @@ def _card_state_by_id(kanban_dir, card_id):
     return None
 
 
-def _write_card_atomic(todo_dir, title, body, backend, model, effort, depends_on,
+def _write_card_atomic(card_dir, title, body, backend, model, effort, depends_on,
                         threshold, max_attempts,
                         source_alias, source_path, task_kind="implementation",
-                        diagnosis_target_minutes="5", diagnosis_max_minutes="10"):
+                        diagnosis_target_minutes="5", diagnosis_max_minutes="10",
+                        card_type="", priority="", size="", goal="", acceptance=None,
+                        scope="", out_of_scope="", context="", verification=None):
+    acceptance = acceptance or []
+    verification = verification or []
+    structured = bool(card_type or priority or size or goal or acceptance or scope or
+                      out_of_scope or context or verification)
     slug = _slugify(title)
     for _ in range(50):
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         card_id = "%s-%s" % (stamp, secrets.token_hex(4))
         filename = "%s-%s.md" % (card_id, slug)
-        dest = os.path.join(todo_dir, filename)
-        tmp = os.path.join(todo_dir, ".tmp-%d-%s.md" % (os.getpid(), secrets.token_hex(4)))
+        dest = os.path.join(card_dir, filename)
+        tmp = os.path.join(card_dir, ".tmp-%d-%s.md" % (os.getpid(), secrets.token_hex(4)))
         created = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         content = (
             "---\n"
             "id: %s\n"
             "title: %s\n"
+            "card_schema: %s\n"
+            "type: %s\n"
+            "priority: %s\n"
+            "size: %s\n"
             "backend: %s\n"
             "model: %s\n"
             "effort: %s\n"
@@ -218,15 +228,26 @@ def _write_card_atomic(todo_dir, title, body, backend, model, effort, depends_on
             "source_path: %s\n"
             "dispatched_via: send\n"
             "---\n\n"
-            "## Task\n\n%s\n\n## History\n"
         ) % (
-            card_id, title, backend, model, effort, depends_on, threshold, max_attempts,
+            card_id, title, "structured" if structured else "legacy",
+            card_type, priority, size, backend, model, effort, depends_on, threshold, max_attempts,
             "false" if task_kind != "implementation" else "auto",
             task_kind if task_kind != "implementation" else "auto",
             task_kind,
             diagnosis_target_minutes, diagnosis_max_minutes, created,
-            source_alias or "", source_path, body,
+            source_alias or "", source_path,
         )
+        if structured:
+            content += (
+                "## Goal\n\n%s\n\n## Acceptance Criteria\n\n%s\n\n"
+                "## Scope\n\n%s\n\n## Out of Scope\n\n%s\n\n"
+                "## Context\n\n%s\n\n## Verification\n\n%s\n\n"
+            ) % (
+                goal, "\n".join("- " + item for item in acceptance), scope,
+                out_of_scope, context,
+                "\n".join("- `%s`" % item for item in verification),
+            )
+        content += "## Task\n\n%s\n\n## History\n" % body
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(content)
         try:
@@ -278,16 +299,36 @@ def cmd_send(args):
 
     body = args.title if sys.stdin.isatty() else (sys.stdin.read() or args.title)
     task_kind = "diagnose" if args.diagnose else "operation" if args.operate else "implementation"
+    structured = any((args.card_type, args.priority, args.size, args.goal, args.acceptance,
+                      args.scope, args.out_of_scope, args.context, args.verification, args.ready))
+    if args.ready:
+        missing = [name for name, value in (
+            ("type", args.card_type), ("size", args.size), ("Goal", args.goal),
+            ("Acceptance Criteria", args.acceptance), ("Scope", args.scope),
+        ) if not value]
+        if missing:
+            print("kanban send: Definition of Ready missing: %s" % ", ".join(missing), file=sys.stderr)
+            return 1
+    card_dir = todo_dir
+    if structured and not args.ready:
+        card_dir = os.path.join(kanban_dir, "backlog")
+        if not os.path.isdir(card_dir):
+            print("kanban send: destination board has no backlog directory; run kanban init there", file=sys.stderr)
+            return 1
 
     source_alias, source_path = _resolve_source(args.__dict__.get("from_path"))
 
     try:
         dest = _write_card_atomic(
-            todo_dir, args.title, body, backend, model, effort, depends_on,
+            card_dir, args.title, body, backend, model, effort, depends_on,
             threshold, max_attempts,
             source_alias, source_path, task_kind=task_kind,
             diagnosis_target_minutes=defaults["diagnosis_target_minutes"],
             diagnosis_max_minutes=defaults["diagnosis_max_minutes"],
+            card_type=args.card_type or "", priority=args.priority or "", size=args.size or "",
+            goal=args.goal or "", acceptance=args.acceptance, scope=args.scope or "",
+            out_of_scope=args.out_of_scope or "", context=args.context or "",
+            verification=args.verification,
         )
     except OSError as e:
         print("kanban send: failed to write card: %s" % e, file=sys.stderr)
@@ -355,6 +396,16 @@ def build_parser():
     send_p.add_argument("-e", "--effort", default=None)
     send_p.add_argument("--depends-on", default=None, metavar="CARD_ID")
     send_p.add_argument("-t", "--threshold", default=None)
+    send_p.add_argument("--type", dest="card_type")
+    send_p.add_argument("--priority")
+    send_p.add_argument("--size")
+    send_p.add_argument("--goal")
+    send_p.add_argument("--ac", dest="acceptance", action="append", default=[])
+    send_p.add_argument("--scope")
+    send_p.add_argument("--out-of-scope")
+    send_p.add_argument("--context")
+    send_p.add_argument("--verify", dest="verification", action="append", default=[])
+    send_p.add_argument("--ready", action="store_true")
     kind = send_p.add_mutually_exclusive_group()
     kind.add_argument("--diagnose", action="store_true",
                       help="file a read-only 5/10-minute diagnosis card")

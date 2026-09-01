@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kanban.sh - file-based kanban dispatcher for agent workers.
-# Cards live in <project>/.kanban/{todo,doing,review,done,failed}/ as Markdown
+# Cards live in <project>/.kanban/{backlog,todo,doing,review,resolving,blocked,done,failed}/ as Markdown
 # with YAML frontmatter. `kanban run` executes cards via a worker backend
 # (claude / codex, or a visible Herdr wrapper), then scores the result with a
 # review agent and loops until the score passes the threshold or attempts run out.
@@ -10,7 +10,7 @@
 # See README.md for the workflow contract.
 set -euo pipefail
 
-STATES=(todo doing review resolving blocked done failed)
+STATES=(backlog todo doing review resolving blocked done failed)
 DEFAULT_THRESHOLD=80
 DEFAULT_MAX_ATTEMPTS=3
 DEFAULT_RESOLVE_MAX_ATTEMPTS=2
@@ -219,7 +219,28 @@ fm_set() { # fm_set <file> <key> <value>
 }
 
 card_task() { # only the stable task specification, never accumulated History
-  awk '/^## Task$/{task=1; next} /^## History$/{if(task) exit} task{print}' "$1"
+  awk '/^## (Goal|Task)$/{task=1} /^## History$/{if(task) exit} task{print}' "$1"
+}
+
+section_body() { # section_body <card> <heading>
+  awk -v heading="$2" '
+$0 == "## " heading {inside=1; next}
+inside && /^## / {exit}
+inside {print}
+' "$1"
+}
+
+card_ready_errors() { # card_ready_errors <card>; prints missing Definition-of-Ready fields
+  local file=$1 missing=0
+  if [[ $(fm_get "$file" card_schema legacy) != structured ]]; then return 0; fi
+  if [[ -z $(fm_get "$file" type "") ]]; then echo "missing: type"; missing=1; fi
+  if [[ -z $(fm_get "$file" size "") ]]; then echo "missing: size"; missing=1; fi
+  if [[ -z $(section_body "$file" Goal | awk 'NF{print; exit}') ]]; then echo "missing: Goal"; missing=1; fi
+  if [[ -z $(section_body "$file" "Acceptance Criteria" | awk '$0 ~ /^- / && length($0)>2{print; exit}') ]]; then
+    echo "missing: Acceptance Criteria"; missing=1
+  fi
+  if [[ -z $(section_body "$file" Scope | awk 'NF{print; exit}') ]]; then echo "missing: Scope"; missing=1; fi
+  return "$missing"
 }
 
 latest_rework_feedback() { # body of the newest rework-instruction History entry
@@ -240,6 +261,30 @@ append_history() { # append_history <file> <heading> ; body from stdin
     echo ""
     iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || cat
   } >>"$1"
+}
+
+write_artifact() { # write_artifact <path>; content from stdin, atomically
+  local dest=$1 dir tmp
+  dir=$(dirname "$dest")
+  mkdir -p "$dir"
+  tmp=$(mktemp "$dir/.artifact.XXXXXX")
+  chmod 644 "$tmp"
+  cat >"$tmp"
+  mv "$tmp" "$dest"
+}
+
+artifact_path() { # artifact_path <briefs|reports|reviews> <card> <attempt-label>
+  printf '%s/%s/%s-r%s.md\n' "$KB" "$1" "$(fm_get "$2" id unknown)" "$3"
+}
+
+report_missing_sections() { # report_missing_sections <report>; empty means valid
+  local heading missing=""
+  for heading in "Summary" "Acceptance Criteria & Evidence" "Verification" "Changes" "Deviations & Decisions" "Follow-ups"; do
+    if [[ -z $(section_body "$1" "$heading" | awk 'NF{print; exit}') ]]; then
+      missing="${missing}${missing:+, }$heading"
+    fi
+  done
+  printf '%s' "$missing"
 }
 
 move_card() { # move_card <file> <state> -> echoes new path
@@ -316,9 +361,10 @@ cmd_init() {
   local base=${1:-$PWD}/.kanban
   for s in "${STATES[@]}"; do mkdir -p "$base/$s"; done
   for s in "${STATES[@]}"; do touch "$base/$s/.gitkeep"; done
+  mkdir -p "$base/briefs" "$base/reports" "$base/reviews"
   touch "$base/.gitignore"
   local ignored
-  for ignored in wt/ .lock .dispatcher.lock .dispatcher.owner.* .merge.lock activity.jsonl activity.jsonl.lock .secretary-guard/; do
+  for ignored in wt/ briefs/ reports/ reviews/ .lock .dispatcher.lock .dispatcher.owner.* .merge.lock activity.jsonl activity.jsonl.lock .secretary-guard/; do
     grep -qxF "$ignored" "$base/.gitignore" || printf '%s\n' "$ignored" >>"$base/.gitignore"
   done
   if [[ ! -f $base/KANBAN.md ]]; then
@@ -422,6 +468,9 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 
 ## カードの切り方
 
+- 通常カードは `--type` / `--size` / `--goal` / 1個以上の `--ac` / `--scope` で構造化し、
+  `kanban ready --check <id>` 後に `kanban ready <id>` でbacklogからReadyへ移す。
+- `--context` / `--out-of-scope` / 複数の `--verify` も必要に応じて明記する。会話文脈だけに完了条件を残さない
 - (例) ファイル境界で分割し、同一ファイルを触るカードは同時に投入する (競合は
   resolver が処理する。秘書は分割の目安に使うだけで、投入を止める理由にしない)
 - (例) 完了条件と検証コマンドを必ずカード本文に書く
@@ -441,7 +490,7 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 - worker並列数は既定4。`jobs:` / `KANBAN_JOBS` / `-j` は正の整数ならMornKanban側の上限なし（実機・API・Herdrの容量だけが制約）
 - 秘書はユーザー指示による運用変更を `kanban config set jobs|default_backend|default_model|reviewer|review_model|resolver|resolve_model <value>` で行ってよい。project/boardファイルを直接編集しない
 - 秘書は `kanban` のboard管理コマンドを実行してよい。`kanban run` だけは使わずvisible dispatchを使う。push/deploy等の直接実行はせず、`--operate` カードへ渡す
-- 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはtodo以外を拒否する
+- 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはbacklog/Ready以外を拒否する
 - Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
 - `dispatcher pane started` はペインへの起動要求が通っただけ。`dispatcher_failed` 通知時は `.kanban/wt/dispatcher.log` を読み、実際の終了理由を報告する。復旧目的でも `git init` / `commit` 等を勝手に行わない
 - failed は秘書が即報告する。`blocked_kind: dependency` は自動再開、`user_input` / `scope_timebox` /
@@ -484,7 +533,7 @@ EOF
 }
 
 add_usage() {
-  echo 'usage: kanban add "title" [-b claude|codex|auto] [-m model] [-e effort] [--depends-on card-id] [-t threshold] [--review|--no-review] [--diagnose|--operate] < description'
+  echo 'usage: kanban add "title" [-b claude|codex|auto] [-m model] [-e effort] [--depends-on card-id] [-t threshold] [--review|--no-review] [--diagnose|--operate] [--type TYPE --size SIZE --goal TEXT --ac TEXT --scope TEXT [--priority P] [--out-of-scope TEXT] [--context TEXT] [--verify CMD] [--ready]] < description'
 }
 
 cmd_add() {
@@ -496,6 +545,10 @@ cmd_add() {
   require_root
   local title="" backend=$DEFAULT_BACKEND model=$DEFAULT_MODEL effort="" depends_on="" threshold=$DEFAULT_THRESHOLD
   local review_enabled=auto review_source=auto task_kind=implementation
+  local card_type="" priority="" size="" goal="" scope="" out_of_scope="" context=""
+  local structured=false ready_now=false
+  # bash 3.2 + nounset treats an empty array as unset; index 0 is a sentinel.
+  local -a acceptance=("") verification=("")
   while [[ $# -gt 0 ]]; do
     case $1 in
       -b|--backend) [[ $# -ge 2 ]] || die "$1 requires a value"; backend=$2; shift 2 ;;
@@ -507,6 +560,16 @@ cmd_add() {
       --no-review) review_enabled=false; review_source=card; shift ;;
       --diagnose) [[ $task_kind == implementation ]] || die "only one task kind may be selected"; task_kind=diagnose; shift ;;
       --operate) [[ $task_kind == implementation ]] || die "only one task kind may be selected"; task_kind=operation; shift ;;
+      --type) [[ $# -ge 2 ]] || die "$1 requires a value"; card_type=$2; structured=true; shift 2 ;;
+      --priority) [[ $# -ge 2 ]] || die "$1 requires a value"; priority=$2; structured=true; shift 2 ;;
+      --size) [[ $# -ge 2 ]] || die "$1 requires a value"; size=$2; structured=true; shift 2 ;;
+      --goal) [[ $# -ge 2 ]] || die "$1 requires a value"; goal=$2; structured=true; shift 2 ;;
+      --ac) [[ $# -ge 2 ]] || die "$1 requires a value"; acceptance[${#acceptance[@]}]=$2; structured=true; shift 2 ;;
+      --scope) [[ $# -ge 2 ]] || die "$1 requires a value"; scope=$2; structured=true; shift 2 ;;
+      --out-of-scope) [[ $# -ge 2 ]] || die "$1 requires a value"; out_of_scope=$2; structured=true; shift 2 ;;
+      --context) [[ $# -ge 2 ]] || die "$1 requires a value"; context=$2; structured=true; shift 2 ;;
+      --verify) [[ $# -ge 2 ]] || die "$1 requires a value"; verification[${#verification[@]}]=$2; structured=true; shift 2 ;;
+      --ready) ready_now=true; structured=true; shift ;;
       --) shift; [[ $# -eq 1 && -z $title ]] || die "expected exactly one title after --"; title=$1; shift ;;
       -*) die "unknown option for kanban add: $1" ;;
       *) [[ -z $title ]] || die "unexpected argument: $1 (title is already set)"; title=$1; shift ;;
@@ -535,16 +598,22 @@ cmd_add() {
   fi
   local desc
   if [[ ! -t 0 ]]; then desc=$(cat); [[ -n $desc ]] || desc=$title; else desc=$title; fi
-  local id slug file tmp
+  local id slug file tmp state=todo
+  $structured && state=backlog
   id=$(date +%Y%m%d-%H%M%S)-$RANDOM
   slug=$(echo "$title" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-40 | sed 's/-$//')
-  file=$KB/todo/$id-${slug:-task}.md
-  tmp=$(mktemp "$KB/todo/.card.XXXXXX")
+  file=$KB/$state/$id-${slug:-task}.md
+  tmp=$(mktemp "$KB/$state/.card.XXXXXX")
   chmod 644 "$tmp"
-  cat >"$tmp" <<EOF
+  {
+  cat <<EOF
 ---
 id: $id
 title: $title
+card_schema: $($structured && echo structured || echo legacy)
+type: $card_type
+priority: $priority
+size: $size
 backend: $backend
 model: $model
 effort: $effort
@@ -565,21 +634,100 @@ resolve_attempts: 0
 created: $(date '+%Y-%m-%dT%H:%M:%S')
 ---
 
+EOF
+  if $structured; then
+    cat <<EOF
+## Goal
+
+$goal
+
+## Acceptance Criteria
+
+EOF
+    local item
+    for item in "${acceptance[@]}"; do [[ -n $item ]] && printf -- '- %s\n' "$item"; done
+    cat <<EOF
+
+## Scope
+
+$scope
+
+## Out of Scope
+
+$out_of_scope
+
+## Context
+
+$context
+
+## Verification
+
+EOF
+    for item in "${verification[@]}"; do [[ -n $item ]] && printf -- '- `%s`\n' "$item"; done
+    cat <<EOF
+
 ## Task
 
 $desc
 
 ## History
 EOF
+  else
+    cat <<EOF
+## Task
+
+$desc
+
+## History
+EOF
+  fi
+  } >"$tmp"
   if ! ln "$tmp" "$file" 2>/dev/null; then
     rm -f "$tmp"
     die "card id collision; retry add"
   fi
   rm -f "$tmp"
+  if $ready_now; then
+    if card_ready_errors "$file" >&2; then
+      file=$(move_card "$file" todo)
+    else
+      echo "$file"
+      return 1
+    fi
+  fi
   echo "$file"
 }
 
-remove_usage() { echo 'usage: kanban remove <todo-card-id>'; }
+ready_usage() { echo 'usage: kanban ready [--check] <backlog-card-id>'; }
+
+cmd_ready() {
+  if [[ ${1:-} == -h || ${1:-} == --help ]]; then ready_usage; return 0; fi
+  require_root
+  local check=false
+  if [[ ${1:-} == --check ]]; then check=true; shift; fi
+  [[ $# -eq 1 ]] || { ready_usage >&2; return 1; }
+  local wanted=$1 file state id
+  local -a hits=()
+  [[ $wanted =~ ^[A-Za-z0-9-]+$ ]] || die "invalid card id: $wanted"
+  for state in backlog todo; do
+    for file in "$KB/$state"/*.md; do
+      [[ -e $file ]] || continue
+      id=$(fm_get "$file" id "")
+      [[ $id == *"$wanted"* ]] && hits+=("$file")
+    done
+  done
+  [[ ${#hits[@]} -gt 0 ]] || die "no backlog/ready card matching '$wanted'"
+  [[ ${#hits[@]} -eq 1 ]] || die "'$wanted' matches multiple cards; use the full id"
+  file=${hits[0]}
+  if ! card_ready_errors "$file"; then return 1; fi
+  if $check; then echo "ready check passed: $(fm_get "$file" id "?")"; return; fi
+  [[ $file == "$KB/backlog/"* ]] || die "card is already ready"
+  file=$(move_card "$file" todo)
+  printf 'Definition of Ready passed.\n' | append_history "$file" "ready"
+  echo "$file"
+}
+
+remove_usage() { echo 'usage: kanban remove <backlog-or-todo-card-id>'; }
 
 cmd_remove() {
   if [[ ${1:-} == -h || ${1:-} == --help ]]; then remove_usage; return 0; fi
@@ -599,11 +747,11 @@ cmd_remove() {
   [[ ${#hits[@]} -eq 1 ]] || die "'$wanted' matches multiple cards; use the full id"
   file=${hits[0]}
   state=$(basename "$(dirname "$file")")
-  [[ $state == todo ]] || die "only todo cards can be removed (card is $state)"
+  [[ $state == backlog || $state == todo ]] || die "only todo cards or backlog cards can be removed (card is $state)"
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "?")
   rm "$file"
-  echo "removed todo card: $id  $title"
+  echo "removed $state card: $id  $title"
 }
 
 config_usage() {
@@ -687,8 +835,13 @@ cmd_list() {
 
 cmd_show() {
   require_root
-  local hits=("$KB"/*/*"$1"*.md)
-  [[ -e ${hits[0]} ]] || die "no card matching '$1'"
+  local state file
+  local -a hits=()
+  for state in "${STATES[@]}"; do
+    for file in "$KB/$state"/*"$1"*.md; do [[ -e $file ]] && hits+=("$file"); done
+  done
+  [[ ${#hits[@]} -gt 0 ]] || die "no card matching '$1'"
+  [[ ${#hits[@]} -eq 1 ]] || die "'$1' matches multiple cards; use the full id"
   local review_value
   review_value=$(effective_review_enabled "${hits[0]}")
   if [[ $review_value == false ]]; then echo "Review: OFF (fast iteration)"; else echo "Review: ON"; fi
@@ -813,7 +966,7 @@ operation_confirmed() { # operation_confirmed <worker-output>
   [[ $first_line == OPERATION_OK:* ]]
 }
 
-parse_score() { # stdin: reviewer output -> "score<TAB>feedback" (empty on failure)
+parse_score() { # stdin: reviewer output -> "outcome<TAB>score<TAB>feedback" (empty on failure)
   python3 -c '
 import json, sys
 text = sys.stdin.read()
@@ -834,10 +987,18 @@ for d in reversed(objects):
     except (ValueError, TypeError):
         continue
     if 0 <= score <= 100:
+        outcome = str(d.get("outcome", "legacy"))
+        if outcome not in ("accept", "needs_info", "rework", "spike", "legacy"):
+            continue
         fb = str(d.get("feedback", "")).replace("\t", " ").replace("\n", " ")
-        print(str(score) + "\t" + fb)
+        print(outcome + "\t" + str(score) + "\t" + fb)
         break
 '
+}
+
+review_accepted() { # review_accepted <threshold>
+  [[ ${ATT_OUTCOME:-legacy} == accept ]] ||
+    { [[ ${ATT_OUTCOME:-legacy} == legacy ]] && [[ $ATT_SCORE -ge $1 ]]; }
 }
 
 # review infrastructure failure classification -----------------------------
@@ -924,19 +1085,29 @@ record_review_infra_retry() { # record_review_infra_retry <card> <field> <headin
 }
 
 review_prompt_for_card() { # review_prompt_for_card <card>
-  local file=$1
+  local file=$1 attempt report="" report_path
+  attempt=$(($(fm_get "$file" attempts 0) + 1))
+  report_path=$(artifact_path reports "$file" "$attempt")
+  if [[ -f $report_path ]]; then
+    report=$(cat "$report_path")
+  fi
   cat <<EOF
-You are a strict reviewer. Inspect this repository's current state and judge
-whether the task below is genuinely complete and of good quality. Check the
-actual files and diffs; do not trust the worker's claims.
+You are a strict reviewer. Inspect the actual files and diff BEFORE reading the
+worker report. Then judge in this order: (1) evidence is reproducible, (2) each
+acceptance criterion is satisfied, (3) the report contains enough information
+to decide. The report is evidence to verify, never a claim to trust blindly.
 
 $(card_task "$file")
 
-Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
+## Worker report
+
+$report
+
+Output ONLY a JSON object: {"outcome":"accept|needs_info|rework|spike","score":<0-100>,"feedback":"<concrete evidence or next action>"}
 EOF
 }
 
-invoke_reviewer() { # invoke_reviewer <card> <workdir> <prompt> <attempt-label> -> sets ATT_SCORE/ATT_FEEDBACK/ATT_REVIEW_INFRA_ERROR
+invoke_reviewer() { # invoke_reviewer <card> <workdir> <prompt> <attempt-label> -> sets ATT_OUTCOME/ATT_SCORE/ATT_FEEDBACK/ATT_REVIEW_INFRA_ERROR
   local file=$1 workdir=$2 prompt=$3 attempt_label=${4:-0}
   local id title effort rcmd review_out parsed t0
   ATT_REVIEW_SECS=${ATT_REVIEW_SECS:-0}
@@ -948,13 +1119,17 @@ invoke_reviewer() { # invoke_reviewer <card> <workdir> <prompt> <attempt-label> 
   t0=$SECONDS
   review_out=$( (cd "$workdir" && KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label KANBAN_CARD_TITLE=$title KANBAN_CARD_EFFORT=$effort $rcmd 2>&1 <<<"$prompt") ) || true
   ATT_REVIEW_SECS=$((ATT_REVIEW_SECS + SECONDS - t0))
+  printf '%s\n' "$review_out" | write_artifact "$(artifact_path reviews "$file" "$attempt_label")"
   echo "$review_out" | tail -n 40 | append_history "$file" "reviewer output (tail)"
   parsed=$(echo "$review_out" | parse_score)
   if [[ -z $parsed ]]; then
+    ATT_OUTCOME=""
     ATT_SCORE=""
     ATT_FEEDBACK=""
     ATT_REVIEW_INFRA_ERROR=$(echo "$review_out" | classify_review_infra_error)
   else
+    ATT_OUTCOME=${parsed%%$'\t'*}
+    parsed=${parsed#*$'\t'}
     ATT_SCORE=${parsed%%$'\t'*}
     ATT_FEEDBACK=${parsed#*$'\t'}
     ATT_REVIEW_INFRA_ERROR=""
@@ -969,6 +1144,15 @@ review_with_infra_retry() { # review_with_infra_retry <card> <workdir> <infra-ma
   # the same worktree/commit without touching `attempts`.
   local file=$1 workdir=$2 infra_max=$3 prompt=$4 attempt_label=${5:-0}
   ATT_REVIEW_INFRA_BLOCKED=false
+  if [[ -n ${ATT_REPORT_ERROR:-} ]]; then
+    ATT_OUTCOME=needs_info
+    ATT_SCORE=0
+    ATT_FEEDBACK=$ATT_REPORT_ERROR
+    ATT_REVIEW_INFRA_ERROR=""
+    printf '{"outcome":"needs_info","score":0,"feedback":"%s"}\n' "$ATT_REPORT_ERROR" |
+      write_artifact "$(artifact_path reviews "$file" "$attempt_label")"
+    return
+  fi
   local retries
   retries=$(fm_get "$file" review_infra_retries 0)
   while true; do
@@ -992,12 +1176,13 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   # retried here too, bounded and without consuming a worker attempt --
   # same principle as the reviewer side, applied symmetrically.
   local file=$1 workdir=$2 infra_max=${3:-$DEFAULT_REVIEW_INFRA_MAX_RETRIES}
-  local id backend model effort wcmd out title infra_cat retries t0 attempt_label task_kind timebox_secs
+  local id backend model effort wcmd out title infra_cat retries t0 attempt_label task_kind timebox_secs prompt report_file missing
   ATT_BLOCKED_REASON=""
   ATT_BLOCKED_KIND=""
   ATT_WORKER_STATUS=0
   ATT_WORKER_SECS=0
   ATT_REVIEW_SECS=0
+  ATT_REPORT_ERROR=""
   id=$(fm_get "$file" id "?")
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
@@ -1012,6 +1197,9 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   fi
   retries=$(fm_get "$file" worker_infra_retries 0)
   attempt_label=$(($(fm_get "$file" attempts 0) + 1))
+  prompt=$(worker_prompt_for_card "$file")
+  printf '%s\n' "$prompt" | write_artifact "$(artifact_path briefs "$file" "$attempt_label")"
+  report_file=$(artifact_path reports "$file" "$attempt_label")
   timebox_secs=""
   if [[ $task_kind == diagnose ]]; then
     timebox_secs=$(($(fm_get "$file" diagnosis_max_minutes "$DEFAULT_DIAGNOSIS_MAX_MINUTES") * 60))
@@ -1021,12 +1209,13 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
     # via env, since the override bypasses worker_cmd's model handling.
     t0=$SECONDS
     ATT_WORKER_STATUS=0
-    out=$( (cd "$workdir" && worker_prompt_for_card "$file" |
+    out=$( (cd "$workdir" && printf '%s\n' "$prompt" |
       KANBAN_CARD_ID=$id KANBAN_CARD_ATTEMPT=$attempt_label \
       KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} \
       KANBAN_CARD_KIND=$task_kind KANBAN_CARD_TIMEBOX_SECS=$timebox_secs \
       KANBAN_CARD_MODEL=$model KANBAN_CARD_EFFORT=$effort KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || ATT_WORKER_STATUS=$?
     ATT_WORKER_SECS=$((ATT_WORKER_SECS + SECONDS - t0))
+    printf '%s\n' "$out" | write_artifact "$report_file"
     echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
     if [[ $task_kind == operation ]] && { [[ $ATT_WORKER_STATUS -ne 0 ]] || ! operation_confirmed "$out"; }; then
       ATT_WORKER_INFRA_BLOCKED=false
@@ -1082,23 +1271,37 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
     ATT_SCORE=0
     ATT_FEEDBACK=""
   fi
+  if [[ $(fm_get "$file" card_schema legacy) == structured && $task_kind == implementation &&
+        $ATT_WORKER_STATUS -eq 0 && -z $ATT_BLOCKED_REASON ]]; then
+    missing=$(report_missing_sections "$report_file")
+    if [[ -n $missing ]]; then
+      ATT_REPORT_ERROR="worker report is incomplete; missing sections: $missing"
+    fi
+  fi
 }
 
 record_attempt() { # record_attempt <card> <threshold> [checkpoint] -> increments attempts
-  local file=$1 threshold=$2 checkpoint=${3:-} attempts timings
+  local file=$1 threshold=$2 checkpoint=${3:-} attempts timings outcome=${ATT_OUTCOME:-legacy} accepted=false
   attempts=$(($(fm_get "$file" attempts 0) + 1))
   timings="worker=${ATT_WORKER_SECS}s review=${ATT_REVIEW_SECS}s"
   if [[ $checkpoint == checkpoint ]]; then
-    if [[ $ATT_SCORE -ge $threshold ]]; then
-      fm_update "$file" attempts "$attempts" last_timings "$timings" review_pending "" merge_pending 1 pass_result "$ATT_SCORE"
+    if review_accepted "$threshold"; then
+      fm_update "$file" attempts "$attempts" last_timings "$timings" review_pending "" merge_pending 1 pass_result "$ATT_SCORE" review_outcome accept accepted_at "$(date '+%Y-%m-%dT%H:%M:%S')"
+      accepted=true
     else
-      fm_update "$file" attempts "$attempts" last_timings "$timings" review_pending ""
+      fm_update "$file" attempts "$attempts" last_timings "$timings" review_pending "" review_outcome "$outcome"
     fi
   else
-    fm_update "$file" attempts "$attempts" last_timings "$timings"
+    if review_accepted "$threshold"; then
+      fm_update "$file" attempts "$attempts" last_timings "$timings" review_outcome accept accepted_at "$(date '+%Y-%m-%dT%H:%M:%S')"
+      accepted=true
+    else
+      fm_update "$file" attempts "$attempts" last_timings "$timings" review_outcome "$outcome"
+    fi
   fi
-  printf 'score: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
+  printf 'outcome: %s\nscore: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$outcome" "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
     append_history "$file" "review"
+  if $accepted; then printf 'outcome: accept\nscore: %s\n' "$ATT_SCORE" | append_history "$file" "accepted"; fi
 }
 
 notify_result() { # notify_result <done|failed|blocked> <title> ; optional hook, never fatal
@@ -1136,7 +1339,7 @@ complete.
 
 $(card_task "$file")
 
-Output ONLY a JSON object: {"score": <0-100>, "feedback": "<what is missing or wrong, concretely>"}
+Output ONLY a JSON object: {"outcome":"accept|needs_info|rework|spike","score":<0-100>,"feedback":"<concrete evidence or next action>"}
 EOF
 }
 
@@ -1199,16 +1402,18 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
 }
 
 record_resolve_attempt() { # record_resolve_attempt <card> <threshold> -> increments resolve_attempts
-  local file=$1 threshold=$2 attempts timings
+  local file=$1 threshold=$2 attempts timings outcome=${ATT_OUTCOME:-legacy} accepted=false
   attempts=$(($(fm_get "$file" resolve_attempts 0) + 1))
   timings="resolver=${ATT_RESOLVE_SECS}s review=${ATT_REVIEW_SECS}s"
-  if [[ $ATT_SCORE -ge $threshold ]]; then
-    fm_update "$file" resolve_attempts "$attempts" last_timings "$timings" resolve_review_pending "" resolve_merge_pending 1 pass_result "$ATT_SCORE"
+  if review_accepted "$threshold"; then
+    fm_update "$file" resolve_attempts "$attempts" last_timings "$timings" resolve_review_pending "" resolve_merge_pending 1 pass_result "$ATT_SCORE" review_outcome accept accepted_at "$(date '+%Y-%m-%dT%H:%M:%S')"
+    accepted=true
   else
-    fm_update "$file" resolve_attempts "$attempts" last_timings "$timings" resolve_review_pending ""
+    fm_update "$file" resolve_attempts "$attempts" last_timings "$timings" resolve_review_pending "" review_outcome "$outcome"
   fi
-  printf 'score: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
+  printf 'outcome: %s\nscore: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$outcome" "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
     append_history "$file" "resolve review"
+  if $accepted; then printf 'outcome: accept\nscore: %s\n' "$ATT_SCORE" | append_history "$file" "accepted (resolve)"; fi
 }
 
 process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <card_wt> <conflict_files>
@@ -1315,11 +1520,23 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     fi
     record_resolve_attempt "$file" "$threshold"
     resolve_attempts=$((resolve_attempts + 1))
-    if [[ $ATT_SCORE -ge $threshold ]]; then
+    if review_accepted "$threshold"; then
       resolved=true
       break
     fi
-    echo "$tag RESOLVE RETRY score=$ATT_SCORE"
+    if [[ ${ATT_OUTCOME:-} == spike ]]; then
+      fm_set "$file" blocked_kind review_decision
+      printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (spike decision required)"
+      move_card "$file" blocked >/dev/null
+      echo "$tag BLOCKED reviewer requested spike -> blocked (branches kept)"
+      notify_result blocked "$title"
+      return
+    fi
+    if [[ ${ATT_OUTCOME:-legacy} == legacy ]]; then
+      echo "$tag RESOLVE RETRY score=$ATT_SCORE"
+    else
+      echo "$tag RESOLVE RETRY outcome=$ATT_OUTCOME score=$ATT_SCORE"
+    fi
     printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
   done
 
@@ -1377,6 +1594,8 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     merge_lock release
     git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
     git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
+    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
+    echo "merge was already present on $base_branch" | append_history "$file" "merged"
     move_card "$file" done >/dev/null
     echo "$tag PASS resolve -> done (merge was already present on $base_branch)"
     notify_result done "$title"
@@ -1385,6 +1604,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title (conflict resolved)" "$resolve_branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
     merge_secs=$((SECONDS - merge_t0))
+    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
     echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
     git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
     git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
@@ -1458,7 +1678,7 @@ process_card_seq() { # in-place execution: non-git fallback and serialized opera
     return
   fi
 
-  if [[ $review_enabled != true ]]; then
+  if [[ $review_enabled != true && -z $ATT_REPORT_ERROR ]]; then
     attempts=$((attempts + 1))
     fm_set "$file" attempts "$attempts"
     echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "review"
@@ -1483,10 +1703,16 @@ process_card_seq() { # in-place execution: non-git fallback and serialized opera
   record_attempt "$file" "$threshold"
   attempts=$((attempts + 1))
 
-  if [[ $ATT_SCORE -ge $threshold ]]; then
+  if review_accepted "$threshold"; then
     move_card "$file" done >/dev/null
     echo "    PASS score=$ATT_SCORE -> done"
     notify_result done "$title"
+  elif [[ ${ATT_OUTCOME:-} == spike ]]; then
+    fm_set "$file" blocked_kind review_decision
+    printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (spike decision required)"
+    move_card "$file" blocked >/dev/null
+    echo "    BLOCKED reviewer requested spike -> blocked"
+    notify_result blocked "$title"
   elif [[ $attempts -ge $max_attempts ]]; then
     fail_card "$file" review >/dev/null
     echo "    FAIL score=$ATT_SCORE attempts exhausted -> failed (needs human)"
@@ -1587,7 +1813,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
       fi
       git -C "$wt" add -A
       git -C "$wt" commit -q --allow-empty -m "kanban: $title (attempt $((attempts + 1)))"
-      if [[ $review_enabled != true ]]; then
+      if [[ $review_enabled != true && -z $ATT_REPORT_ERROR ]]; then
         attempts=$((attempts + 1))
         fm_update "$file" attempts "$attempts" merge_pending 1 pass_result 0
         passed=true
@@ -1604,11 +1830,23 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     fi
     record_attempt "$file" "$threshold" checkpoint
     attempts=$((attempts + 1))
-    if [[ $ATT_SCORE -ge $threshold ]]; then
+    if review_accepted "$threshold"; then
       passed=true
       break
     fi
-    echo "$tag RETRY score=$ATT_SCORE"
+    if [[ ${ATT_OUTCOME:-} == spike ]]; then
+      fm_set "$file" blocked_kind review_decision
+      printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (spike decision required)"
+      move_card "$file" blocked >/dev/null
+      echo "$tag BLOCKED reviewer requested spike -> blocked (branch/worktree kept)"
+      notify_result blocked "$title"
+      return
+    fi
+    if [[ ${ATT_OUTCOME:-legacy} == legacy ]]; then
+      echo "$tag RETRY score=$ATT_SCORE"
+    else
+      echo "$tag RETRY outcome=$ATT_OUTCOME score=$ATT_SCORE"
+    fi
     printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
   done
 
@@ -1627,9 +1865,9 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   if ! $passed; then
     printf 'branch %s is kept for manual inspection.\n' "$branch" | append_history "$file" "gave up"
     git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
-    if [[ $review_enabled == true ]]; then
+    if [[ $review_enabled == true || -n ${ATT_REPORT_ERROR:-} ]]; then
       fail_card "$file" review >/dev/null
-      echo "$tag FAIL score=$ATT_SCORE attempts exhausted -> failed (branch $branch kept)"
+      echo "$tag FAIL outcome=${ATT_OUTCOME:-legacy} score=$ATT_SCORE attempts exhausted -> failed (branch $branch kept)"
     else
       fail_card "$file" worker >/dev/null
       echo "$tag FAIL worker exit=$ATT_WORKER_STATUS (review disabled) -> failed (branch $branch kept)"
@@ -1657,6 +1895,8 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
     git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
+    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
+    echo "merge was already present on $base_branch" | append_history "$file" "merged"
     move_card "$file" done >/dev/null
     echo "$tag PASS -> done (merge was already present on $base_branch)"
     notify_result done "$title"
@@ -1665,6 +1905,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title" "$branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
     merge_secs=$((SECONDS - merge_t0))
+    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
     echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
     git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
     git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
@@ -1828,7 +2069,7 @@ cmd_run() {
       # Review-infra worktree/branch/commits are the whole point of keeping them.
       # Worker-reported ordering blocks are still reclaimed on restart.
       case $(fm_get "$orphan" blocked_kind "") in
-        review_infra|dependency|user_input|scope_timebox|operation_unknown|main_branch_changed) continue ;;
+        review_infra|review_decision|dependency|user_input|scope_timebox|operation_unknown|main_branch_changed) continue ;;
       esac
       local bid
       bid=$(fm_get "$orphan" id "?")
@@ -1941,7 +2182,7 @@ cmd_resume() { # cmd_resume <id-substring> -> resume a supported parked card
   local file=${hits[0]} kind
   kind=$(fm_get "$file" blocked_kind "")
   case $kind in
-    review_infra|user_input|scope_timebox|main_branch_changed) ;;
+    review_infra|review_decision|user_input|scope_timebox|main_branch_changed) ;;
     operation_unknown) die "operation outcome is unknown; verify remote state, then use: kanban operation $pat done|retry" ;;
     *) die "card is blocked (kind: ${kind:-unknown}); this block kind is not manually resumable" ;;
   esac
@@ -1987,6 +2228,7 @@ cmd_operation() { # cmd_operation <id-substring> <done|retry>
 case ${1:-} in
   init) shift; cmd_init "$@" ;;
   add) shift; cmd_add "$@" ;;
+  ready) shift; cmd_ready "$@" ;;
   remove) shift; cmd_remove "$@" ;;
   config) shift; cmd_config "$@" ;;
   list|ls) cmd_list ;;
@@ -2002,5 +2244,5 @@ case ${1:-} in
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|add|remove <todo-id>|config set <key> <value>|list|show|inspect|run [--once] [-j N]|resume <id>|operation <id> {done|retry}|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|add|ready [--check] <id>|remove <backlog-or-todo-id>|config set <key> <value>|list|show|inspect|run [--once] [-j N]|resume <id>|operation <id> {done|retry}|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
 esac

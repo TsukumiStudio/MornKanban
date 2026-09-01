@@ -34,6 +34,9 @@ GUI は python3 標準ライブラリのみ (pip 不可)、フロントは素の
 
 ## カードの切り方
 
+- 通常カードは `--type` / `--size` / `--goal` / 1個以上の `--ac` / `--scope` で構造化し、
+  `kanban ready --check <id>` 後に `kanban ready <id>` でbacklogからReadyへ移す
+- 必要な文脈・対象外・検証コマンドは `--context` / `--out-of-scope` / `--verify` へ分離し、会話だけに残さない
 - 秘書はファイル競合や依存順序を判断せず、自己完結情報が揃ったカードを直ちに投入する
 - 同一ファイルを触るカードも投入を止めない。競合・順序はworker / resolverが実行時に解決する
 - 並列ワーカーは互いの成果物を見られない。API/DOM のインターフェース契約を
@@ -55,7 +58,7 @@ GUI は python3 標準ライブラリのみ (pip 不可)、フロントは素の
 
   /Users/matsufriends/git/MornKanban/kanban-secretary.sh dispatch "$PWD"
 
-- ヘルパーは別の Herdr dispatcher pane を作り、worker / reviewer / notify の3変数を必ず束ねる
+- ヘルパーは別の Herdr dispatcher pane を作り、worker / reviewer / resolver / operator / notify を必ず束ねる
 - ヘッドレスワーカー (claude -p / codex exec 直叩き) は禁止。bare `kanban run` へ置き換えない
 - current Herdr pane を確認できない場合は停止・報告する。ヘッドレスへ勝手にフォールバックしない
 - failed カードはユーザーへ即報告する

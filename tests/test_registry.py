@@ -197,6 +197,34 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("invalid effort", result.stderr)
         self.assertEqual(self._card_files(self.b), [])
 
+    def test_structured_send_targets_backlog_or_ready_after_check(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        fields = (
+            "--type", "feature", "--size", "small", "--goal", "ship it",
+            "--ac", "result exists", "--scope", "CLI", "--verify", "true",
+        )
+        backlog = Path(self._run(
+            "send", "project-b", "structured", *fields, input_text="details"
+        ).stdout.strip())
+        self.assertEqual(backlog.parent, (self.b / ".kanban" / "backlog").resolve())
+        self.assertIn("card_schema: structured", backlog.read_text(encoding="utf-8"))
+
+        ready = Path(self._run(
+            "send", "project-b", "ready", *fields, "--ready", input_text="details"
+        ).stdout.strip())
+        self.assertEqual(ready.parent, (self.b / ".kanban" / "todo").resolve())
+
+    def test_structured_send_ready_rejects_missing_definition_without_card(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        result = self._run(
+            "send", "project-b", "incomplete", "--type", "feature", "--ready",
+            input_text="details", check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Definition of Ready missing", result.stderr)
+        self.assertEqual(self._card_files(self.b, "backlog"), [])
+        self.assertEqual(self._card_files(self.b, "todo"), [])
+
     def test_send_records_only_existing_destination_dependency(self):
         self._run("projects", "add", "project-b", str(self.b))
         upstream = Path(self._run("send", "project-b", "upstream", input_text="u").stdout.strip())
