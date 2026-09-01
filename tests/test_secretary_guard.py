@@ -46,9 +46,9 @@ class TestCommandClassify(unittest.TestCase):
         allowed, reason = classify.classify(cmd)
         self.assertFalse(allowed, "expected deny for %r, got allow: %s" % (cmd, reason))
 
-    # The secretary may use the whole kanban CLI; restrictions still apply
-    # to every non-kanban command in the same shell invocation.
-    def test_allows_all_kanban_commands(self):
+    # The secretary may use board-control commands; only the visible
+    # dispatcher entrypoint may start workers.
+    def test_allows_kanban_control_commands(self):
         for cmd in [
             "kanban",
             'kanban add "title"',
@@ -61,49 +61,62 @@ class TestCommandClassify(unittest.TestCase):
             "kanban config set jobs 8",
             "kanban config set default_model gpt-5.6-sol",
             "kanban resume 20260901-200631-30037",
-            "kanban run --once",
+            "kanban operation 20260901-200631-30037 done",
             "kanban install",
             "kanban update",
             "kanban uninstall",
-            "kanban future-command --future-option",
             "./kanban.sh resume 20260901-200631-30037",
         ]:
             self.allow(cmd)
 
+    def test_denies_bare_run_unknown_commands_and_env_override(self):
+        self.deny("kanban run --once")
+        self.deny("kanban future-command --future-option")
+        self.deny("env KANBAN_WORKER_CMD=/tmp/payload kanban run --once")
+
+    def test_denies_fake_kanban_executables(self):
+        self.deny("/tmp/kanban run")
+        self.deny("/tmp/kanban.sh future-command")
+        self.deny("/tmp/kanban-secretary.sh dispatch")
+
     def test_allows_secretary_dispatcher_commands(self):
         for cmd in [
-            "kanban-secretary.sh bootstrap",
-            "kanban-secretary.sh dispatch",
-            "kanban-secretary.sh dispatch --once",
-            "kanban-secretary.sh end",
             "~/git/MornKanban/kanban-secretary.sh dispatch",
+            os.path.join(REPO, "kanban-secretary.sh") + " bootstrap",
+            os.path.join(REPO, "kanban-secretary.sh") + " dispatch --once",
+            os.path.join(REPO, "kanban-secretary.sh") + " end",
         ]:
             self.allow(cmd)
 
-    def test_allows_readonly_git_and_inspection(self):
+    def test_allows_managed_git_and_plain_inspection(self):
         for cmd in [
-            "git status",
-            "git log --oneline -5",
-            "git diff",
-            "git show HEAD",
-            "git branch",
-            "git branch -a",
+            "kanban inspect status",
+            "kanban inspect log 5",
+            "kanban inspect diff",
+            "kanban inspect show HEAD",
+            "kanban inspect branch",
             "cat .kanban/KANBAN.md",
             "ls -la .kanban",
             "grep -rn foo .",
             "pwd",
             "find . -name '*.md'",
+            'kanban add "build; deploy"',
         ]:
             self.allow(cmd)
 
     def test_allows_chained_readonly_commands(self):
-        self.allow("git status && git log -1")
+        self.allow("kanban inspect status && kanban inspect log 1")
         self.allow("cat a.md; cat b.md")
 
     # denied: implementation / verification / git mutation / external publish
     def test_denies_file_write_redirection(self):
         self.deny("echo hi > file.txt")
         self.deny("cat a > b")
+        self.deny("printf secret 1>/tmp/file")
+        self.deny("printf secret 2>/tmp/file")
+        self.allow("cat missing 2>/dev/null")
+        self.allow("cat missing 2>&1")
+        self.deny("printf secret 3<>/tmp/file >&3")
         self.deny("rm .kanban/todo/card.md")
 
     def test_denies_git_mutation(self):
@@ -123,8 +136,21 @@ class TestCommandClassify(unittest.TestCase):
             "git branch -D old",
             "git tag v1.0.0",
             "git worktree add ../x",
+            "git -c diff.external=/tmp/payload diff",
+            "git remote update",
+            "git reflog expire --all",
         ]:
             self.deny(cmd)
+
+    def test_denies_direct_git_even_for_apparent_reads(self):
+        for cmd in ["git status", "git diff", "git log -1", "git branch", "git remote -v"]:
+            self.deny(cmd)
+
+    def test_denies_read_utility_output_files(self):
+        self.deny("find . -fprint /tmp/files")
+        self.deny("tree -o /tmp/tree.txt")
+        self.deny("tree -o/tmp/tree.txt .")
+        self.deny("diff --output=/tmp/diff a b")
 
     def test_denies_headless_agent_cli(self):
         self.deny("claude -p 'do it'")
@@ -229,10 +255,14 @@ class TestGuardDecision(TempProjectMixin, unittest.TestCase):
         self.assertTrue(deny)
         self.assertEqual(category, "bash")
 
-    def test_allows_any_kanban_bash_in_secretary_pane(self):
-        for command in ('kanban add "t"', "kanban resume card", "kanban run --once"):
+    def test_allows_kanban_control_bash_in_secretary_pane(self):
+        for command in ('kanban add "t"', "kanban resume card", "kanban operation card done"):
             deny, _, _, _ = self.decide("Bash", {"command": command}, self.secretary_env)
             self.assertFalse(deny, command)
+
+    def test_denies_bare_dispatcher_in_secretary_pane(self):
+        deny, _, _, _ = self.decide("Bash", {"command": "kanban run --once"}, self.secretary_env)
+        self.assertTrue(deny)
 
     def test_allows_readonly_tools_untouched(self):
         for tool in ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite"]:
@@ -309,6 +339,12 @@ class TestSecretaryMarker(TempProjectMixin, unittest.TestCase):
 
     def test_project_root_from_walks_up(self):
         nested = os.path.join(self.root, "a", "b")
+        os.makedirs(nested)
+        self.assertEqual(marker.project_root_from(nested), os.path.realpath(self.root))
+
+    def test_project_root_from_card_worktree_uses_outer_project(self):
+        nested = os.path.join(self.root, ".kanban", "wt", "card-1", "src")
+        os.makedirs(os.path.join(self.root, ".kanban", "wt", "card-1", ".kanban"))
         os.makedirs(nested)
         self.assertEqual(marker.project_root_from(nested), os.path.realpath(self.root))
 
@@ -415,6 +451,22 @@ class TestGuardSetup(unittest.TestCase):
         self.assertEqual(setup_core.claude_guard_state(self.settings_path), "misconfigured")
         setup_core.install_claude_guard(self.settings_path)
         self.assertEqual(setup_core.claude_guard_state(self.settings_path), "enforced")
+
+    def test_fake_hook_containing_guard_path_is_not_enforced(self):
+        existing = {
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": setup_core.GUARD_MATCHER,
+                    "hooks": [{
+                        "type": "command",
+                        "command": "echo %s" % setup_core.GUARD_HOOK_SCRIPT,
+                    }],
+                }]
+            }
+        }
+        with open(self.settings_path, "w") as fh:
+            json.dump(existing, fh)
+        self.assertEqual(setup_core.claude_guard_state(self.settings_path), "not-installed")
 
 
 # --- kanban-secretary.sh bootstrap/end marker lifecycle (mock Herdr) --------

@@ -178,25 +178,44 @@ fm_get() { # fm_get <file> <key> <default>
   echo "${v:-$3}"
 }
 
-fm_set() { # fm_set <file> <key> <value>
-  python3 - "$1" "$2" "$3" <<'EOF'
-import sys
-path, key, value = sys.argv[1:4]
+fm_update() { # fm_update <file> <key> <value> [<key> <value> ...]
+  python3 - "$@" <<'EOF'
+import os, stat, sys, tempfile
+path, raw = sys.argv[1], sys.argv[2:]
+if len(raw) % 2:
+    raise SystemExit("frontmatter updates require key/value pairs")
+updates = dict(zip(raw[::2], raw[1::2]))
 lines = open(path, encoding="utf-8", errors="replace").read().split("\n")
-out, in_fm, done, seen = [], False, False, 0
+out, in_fm, seen = [], False, 0
 for line in lines:
     if line == "---" and seen < 2:
         seen += 1
         in_fm = seen == 1
-        if seen == 2 and not done:
-            out.append(f"{key}: {value}")
-            done = True
-    elif in_fm and line.startswith(key + ":") and not done:
-        line = f"{key}: {value}"
-        done = True
+        if seen == 2:
+            for key, value in updates.items():
+                out.append(f"{key}: {value}")
+            updates.clear()
+    elif in_fm:
+        key = line.partition(":")[0]
+        if key in updates:
+            line = f"{key}: {updates.pop(key)}"
     out.append(line)
-open(path, "w").write("\n".join(out))
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".card.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(out))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.remove(tmp)
 EOF
+}
+
+fm_set() { # fm_set <file> <key> <value>
+  fm_update "$@"
 }
 
 card_task() { # only the stable task specification, never accumulated History
@@ -296,18 +315,22 @@ fail_card() { # fail_card <card> <infrastructure|worker|review|resolve|merge|dis
 cmd_init() {
   local base=${1:-$PWD}/.kanban
   for s in "${STATES[@]}"; do mkdir -p "$base/$s"; done
-  touch "$base"/{todo,doing,review,done,failed}/.gitkeep
-  printf 'wt/\n.lock\n.merge.lock\nactivity.jsonl\nactivity.jsonl.lock\n' >"$base/.gitignore"
+  for s in "${STATES[@]}"; do touch "$base/$s/.gitkeep"; done
+  touch "$base/.gitignore"
+  local ignored
+  for ignored in wt/ .lock .dispatcher.lock .dispatcher.owner.* .merge.lock activity.jsonl activity.jsonl.lock .secretary-guard/; do
+    grep -qxF "$ignored" "$base/.gitignore" || printf '%s\n' "$ignored" >>"$base/.gitignore"
+  done
   if [[ ! -f $base/KANBAN.md ]]; then
     cat >"$base/KANBAN.md" <<'EOF'
 ---
 backend_order: claude codex
 default_backend: auto
-default_model: sonnet
+default_model:
 reviewer: auto
-review_model: sonnet
+review_model:
 resolver: auto
-resolve_model: sonnet
+resolve_model:
 threshold: 80
 max_attempts: 3
 resolve_max_attempts: 2
@@ -352,6 +375,7 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - ユーザーが明示したpush/deploy/publish等は `kanban add --operate` で起票する
 - operatorはworktreeではなく本体checkoutで1回だけ動き、mergeと直列化され、reviewer審査を行わない
 - operatorはカードに明記された外部操作だけを行う。実装変更や無関係なcommitへ広げない
+- operatorは実行後のremote/deploy状態を確認できた時だけ、回答の先頭行を `OPERATION_OK: <確認内容>` にする。失敗・未確認・判断待ちは `BLOCKED: <理由>` にする
 
 ## 秘書契約 (最重要)
 
@@ -376,7 +400,7 @@ frontmatter は kanban CLI が既定値として読む (環境変数が優先)�
 - 明示された依存だけ `kanban add --depends-on <card-id>` で構造化する。依存先がdoneになるまで後続はworker/reviewerを起動せず、attemptを消費しない
 - 実行中に真の依存が判明したworker/resolverは、失敗させず最初の行を `BLOCKED: <理由>` として終了する
 - worker/reviewer/resolverはAskUserQuestion等の対話式選択肢を表示しない。worktree境界・policy・ユーザー判断と衝突したworkerは勝手に選ばず `BLOCKED: <必要な判断と理由>` を返す
-- 質問UIを検出したdispatcherはattempt/reviewを消費せず `blocked_kind: user_input` に駐車し、秘書が判断を確認する。解決後だけ `kanban resume <id>` する
+- 質問UIを検出したdispatcherはattempt/reviewを消費せず `blocked_kind: user_input` に駐車し、秘書が判断を確認する。解決後に `kanban resume <id>` でtodoへ戻し、visible dispatchを再開する。resume自体はagentを起動しない
 - `failed` は作業プロセスの失敗であり、製品の検証不合格を意味しない。`failure_kind` とHistoryから製品不具合・インフラ障害・未検証を区別する
 - 依存で止めるのはpush/deploy等の不可逆な外部変更だけ。独立したtest/build/状態確認は止めず、別カードとして投入する
 - インフラ障害で検証未実施なら、デプロイ不可と推測せず「未検証・ユーザー判断が必要」と報告する
@@ -416,22 +440,24 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 - カード追加後は `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
 - worker並列数は既定4。`jobs:` / `KANBAN_JOBS` / `-j` は正の整数ならMornKanban側の上限なし（実機・API・Herdrの容量だけが制約）
 - 秘書はユーザー指示による運用変更を `kanban config set jobs|default_backend|default_model|reviewer|review_model|resolver|resolve_model <value>` で行ってよい。project/boardファイルを直接編集しない
-- 秘書は `kanban` CLI の全コマンドを実行してよい。push/deploy等の直接実行はせず、`--operate` カードへ渡す
+- 秘書は `kanban` のboard管理コマンドを実行してよい。`kanban run` だけは使わずvisible dispatchを使う。push/deploy等の直接実行はせず、`--operate` カードへ渡す
 - 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはtodo以外を拒否する
 - Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
 - `dispatcher pane started` はペインへの起動要求が通っただけ。`dispatcher_failed` 通知時は `.kanban/wt/dispatcher.log` を読み、実際の終了理由を報告する。復旧目的でも `git init` / `commit` 等を勝手に行わない
-- (例) failed カードは秘書がユーザーへ即報告する。resolving/blocked は実行側が
-  自律的に処理するので、秘書は failed に落ちた時だけ介入する
+- failed は秘書が即報告する。`blocked_kind: dependency` は自動再開、`user_input` / `scope_timebox` /
+  `review_infra` は判断・復旧後に `kanban resume <id>` してdispatchする。`operation_unknown` は外部状態を確認し、
+  成功済みなら `kanban operation <id> done`、安全に再試行できる時だけ `kanban operation <id> retry` を使う
 
 ## 秘書ペインの許可/禁止 (技術的ガード付き、詳細は MornKanban README の Secretary Guard)
 
 **実装しない。検証しない。commit/push/tag しない。in-process agent を起動しない。カードを起票して visible Herdr へ dispatch する。**
 
-- 許可: KANBAN.md/README/board の読み取り、read-only git (status/log/diff/show 等)、
-  `kanban` CLI の全コマンド、`kanban-secretary.sh bootstrap/dispatch/end`、ユーザーへの報告
+- 許可: KANBAN.md/README/board の読み取り、`kanban inspect status|log|diff|diff-cached|show|branch`、
+  `kanban` のboard管理コマンド、`kanban-secretary.sh bootstrap/dispatch/end`、ユーザーへの報告
 - 禁止: project/boardファイルの直接編集・作成・削除（raw rmを含む）、build/test/lint/formatter/server 起動、
   headless agent CLI (`claude -p`/`codex exec`)、Claude/Codex の in-process Agent/Task/subagent、
-  git の変更系全般 (add/commit/push/merge/rebase/reset/checkout/branch作成削除/tag/worktree等)、
+  直接のgit（読み取りも設定済みhelperを起動し得るため禁止）、gitの変更系全般
+  (add/commit/push/merge/rebase/reset/checkout/branch作成削除/tag/worktree等)、
   GitHub/GitLab 等の外部変更 (push/release/PR/issue/tag publish)、package publish、deploy
 - Claude Code では上記の多くが `PreToolUse` フックで実行前に技術的に拒否される
   (`kanban-setup.sh` の状態表示や `kanban-secretary.sh bootstrap` の一行応答に `claude=enforced` 等が出る)。
@@ -492,6 +518,7 @@ cmd_add() {
     *) die "unknown backend: $backend (auto|claude|codex)" ;;
   esac
   validate_effort "$effort"
+  [[ $threshold =~ ^[0-9]+$ && $threshold -le 100 ]] || die "threshold must be an integer from 0 to 100 (got: $threshold)"
   if [[ -n $depends_on ]] && ! card_state_by_id "$depends_on" >/dev/null; then
     die "dependency card not found: $depends_on"
   fi
@@ -507,12 +534,14 @@ cmd_add() {
     review_source=operation
   fi
   local desc
-  if [[ ! -t 0 ]]; then desc=$(cat); else desc=$title; fi
-  local id slug file
+  if [[ ! -t 0 ]]; then desc=$(cat); [[ -n $desc ]] || desc=$title; else desc=$title; fi
+  local id slug file tmp
   id=$(date +%Y%m%d-%H%M%S)-$RANDOM
   slug=$(echo "$title" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-40 | sed 's/-$//')
   file=$KB/todo/$id-${slug:-task}.md
-  cat >"$file" <<EOF
+  tmp=$(mktemp "$KB/todo/.card.XXXXXX")
+  chmod 644 "$tmp"
+  cat >"$tmp" <<EOF
 ---
 id: $id
 title: $title
@@ -542,6 +571,11 @@ $desc
 
 ## History
 EOF
+  if ! ln "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    die "card id collision; retry add"
+  fi
+  rm -f "$tmp"
   echo "$file"
 }
 
@@ -624,7 +658,8 @@ OPERATOR CONTRACT
 - You run in the project's main checkout, not a card worktree.
 - Perform only the Git, publish, deploy, or other external mutation explicitly authorized by this card.
 - Do not change implementation or create unrelated commits. Verify and report the actual remote/deploy result.
-- Never ask an interactive question. If authority or required state is missing, make the answer's first line: BLOCKED: <reason>
+- After verifying the real remote/deploy state, make the answer's first line: OPERATION_OK: <verified result>
+- Never ask an interactive question. On failure, uncertainty, or missing authority, make the answer's first line: BLOCKED: <reason>
 
 EOF
   fi
@@ -660,12 +695,68 @@ cmd_show() {
   cat "${hits[0]}"
 }
 
-resolve_backend() { # echo first installed backend from KANBAN_BACKEND_ORDER
-  local b
-  for b in ${KANBAN_BACKEND_ORDER:-$BACKENDS}; do
-    if command -v "$b" >/dev/null 2>&1; then echo "$b"; return 0; fi
-  done
-  return 1
+safe_git_inspect() { # isolated read-only Git metadata; repository config is never loaded
+  local gitdir common temp format filemode status=0 item
+  gitdir=$(command git -C "$ROOT" rev-parse --absolute-git-dir) || return
+  common=$(command git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir) || return
+  format=$(command git -C "$ROOT" rev-parse --show-object-format 2>/dev/null || echo sha1)
+  filemode=$(command git -C "$ROOT" config --bool core.filemode 2>/dev/null || echo false)
+  [[ $filemode == true || $filemode == false ]] || filemode=false
+  temp=$(mktemp -d "${TMPDIR:-/tmp}/mornkanban-inspect.XXXXXX") || return
+  mkdir -p "$temp/objects/info" "$temp/refs" "$temp/info"
+  cp "$gitdir/HEAD" "$temp/HEAD"
+  [[ -f $gitdir/index ]] && cp "$gitdir/index" "$temp/index"
+  [[ -d $common/refs ]] && cp -R "$common/refs/." "$temp/refs/"
+  for item in packed-refs shallow; do [[ -f $common/$item ]] && cp "$common/$item" "$temp/$item"; done
+  [[ -f $common/info/exclude ]] && cp "$common/info/exclude" "$temp/info/exclude"
+  printf '%s\n' "$common/objects" >"$temp/objects/info/alternates"
+  if [[ $format == sha256 ]]; then
+    printf '[core]\n\trepositoryformatversion = 1\n\tbare = false\n\tfilemode = %s\n[extensions]\n\tobjectFormat = sha256\n' "$filemode" >"$temp/config"
+  else
+    printf '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = %s\n' "$filemode" >"$temp/config"
+  fi
+  GIT_DIR=$temp GIT_WORK_TREE=$ROOT GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_COUNT=0 GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat GIT_EXTERNAL_DIFF= \
+    command git -c core.fsmonitor=false -c core.pager=cat "$@" || status=$?
+  rm -rf "$temp"
+  return "$status"
+}
+
+cmd_inspect() { # cmd_inspect <status|log|diff|diff-cached|show|branch>
+  require_root
+  local kind=${1:-} count ref
+  shift || true
+  case $kind in
+    status)
+      [[ $# -eq 0 ]] || die "usage: kanban inspect status"
+      echo "note: filter/LFS-managed paths are compared as raw files and may be conservatively reported modified" >&2
+      safe_git_inspect status --short --branch --untracked-files=all --ignore-submodules=all
+      ;;
+    log)
+      count=${1:-20}
+      [[ $# -le 1 && $count =~ ^[1-9][0-9]*$ && $count -le 200 ]] || die "usage: kanban inspect log [1-200]"
+      safe_git_inspect log --no-ext-diff --no-textconv --no-color --oneline -n "$count"
+      ;;
+    diff|diff-cached)
+      [[ $# -eq 0 ]] || die "usage: kanban inspect $kind"
+      if [[ $kind == diff-cached ]]; then
+        safe_git_inspect diff --cached --no-ext-diff --no-textconv --no-color --ignore-submodules=all --
+      else
+        echo "note: filter/LFS-managed paths are shown as raw files; configured filters are never executed" >&2
+        safe_git_inspect diff --no-ext-diff --no-textconv --no-color --ignore-submodules=all --
+      fi
+      ;;
+    show)
+      ref=${1:-HEAD}
+      [[ $# -le 1 && $ref != -* && $ref =~ ^[A-Za-z0-9._/~^{}-]+$ ]] || die "usage: kanban inspect show [ref]"
+      safe_git_inspect show --no-ext-diff --no-textconv --no-color --end-of-options "$ref"
+      ;;
+    branch)
+      [[ $# -eq 0 ]] || die "usage: kanban inspect branch"
+      safe_git_inspect branch --no-color --no-column --list
+      ;;
+    *) die "usage: kanban inspect {status|log [1-200]|diff|diff-cached|show [ref]|branch}" ;;
+  esac
 }
 
 claude_perm_flag() { # claude_perm_flag -> echoes the CLI flag(s) for KANBAN_CLAUDE_PERMS
@@ -686,38 +777,20 @@ codex_sandbox_flag() { # codex_sandbox_flag -> echoes the CLI flag(s) for KANBAN
 }
 
 worker_cmd() { # worker_cmd <backend> <model> <effort> (empty values inherit agent defaults)
-  if [[ -n ${KANBAN_WORKER_CMD:-} ]]; then echo "$KANBAN_WORKER_CMD"; return; fi
-  local b=$1 effort=${3:-}
-  if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
-  case $b in
-    claude) echo "claude -p${2:+ --model $2}${effort:+ --effort $effort} $(claude_perm_flag)" ;;
-    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${2:+ -m $2}${effort:+ -c model_reasoning_effort=$effort}" ;;
-    *) die "unknown backend: $b" ;;
-  esac
+  [[ -n ${KANBAN_WORKER_CMD:-} ]] || die "visible worker wrapper is required; run kanban-secretary.sh dispatch"
+  echo "$KANBAN_WORKER_CMD"
 }
 
 review_cmd() { # review_cmd <card-effort>
   if [[ -n ${KANBAN_REVIEW_CMD:-} ]]; then echo "$KANBAN_REVIEW_CMD"; return; fi
-  local b=${KANBAN_REVIEWER:-auto} m=${KANBAN_REVIEW_MODEL:-} effort=${1:-}
-  if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
-  case $b in
-    claude) echo "claude -p${m:+ --model $m}${effort:+ --effort $effort} $(claude_perm_flag)" ;;
-    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}${effort:+ -c model_reasoning_effort=$effort}" ;;
-    *) die "unknown reviewer backend: $b" ;;
-  esac
+  if [[ -n ${KANBAN_WORKER_CMD:-} ]]; then echo "env KANBAN_HERDR_ROLE=reviewer $KANBAN_WORKER_CMD"; return; fi
+  die "visible reviewer wrapper is required; run kanban-secretary.sh dispatch"
 }
 
 resolve_cmd() { # resolve_cmd <card-backend> <card-model> <card-effort> -> resolver invocation
   if [[ -n ${KANBAN_RESOLVE_CMD:-} ]]; then echo "$KANBAN_RESOLVE_CMD"; return; fi
-  local b=${KANBAN_RESOLVER:-auto} m=${KANBAN_RESOLVE_MODEL:-} effort=${3:-}
-  [[ $b == auto ]] && b=$1
-  [[ -n $m ]] || m=$2
-  if [[ $b == auto ]]; then b=$(resolve_backend) || die "no agent CLI found (order: ${KANBAN_BACKEND_ORDER:-$BACKENDS})"; fi
-  case $b in
-    claude) echo "claude -p${m:+ --model $m}${effort:+ --effort $effort} $(claude_perm_flag)" ;;
-    codex) echo "codex exec --skip-git-repo-check $(codex_sandbox_flag)${m:+ -m $m}${effort:+ -c model_reasoning_effort=$effort}" ;;
-    *) die "unknown resolver backend: $b" ;;
-  esac
+  if [[ -n ${KANBAN_WORKER_CMD:-} ]]; then echo "env KANBAN_HERDR_ROLE=resolver $KANBAN_WORKER_CMD"; return; fi
+  die "visible resolver wrapper is required; run kanban-secretary.sh dispatch"
 }
 
 operation_cmd() { # operation_cmd <card-backend> <card-model> <card-effort>
@@ -734,19 +807,36 @@ detect_blocked() { # detect_blocked <worker-output> -> sets BLOCKED_REASON (empt
   esac
 }
 
+operation_confirmed() { # operation_confirmed <worker-output>
+  local first_line
+  first_line=$(printf '%s\n' "$1" | awk 'NF && $0 !~ /^herdr-agent-worker:/ {print; exit}')
+  [[ $first_line == OPERATION_OK:* ]]
+}
+
 parse_score() { # stdin: reviewer output -> "score<TAB>feedback" (empty on failure)
   python3 -c '
-import json, re, sys
+import json, sys
 text = sys.stdin.read()
-for m in reversed(re.findall(r"\{[^{}]*\}", text, re.S)):
+decoder = json.JSONDecoder()
+objects = []
+for i, char in enumerate(text):
+    if char != "{":
+        continue
     try:
-        d = json.loads(m)
-        if "score" in d:
-            fb = str(d.get("feedback", "")).replace("\t", " ").replace("\n", " ")
-            print(str(int(d["score"])) + "\t" + fb)
-            sys.exit(0)
+        value, _ = decoder.raw_decode(text[i:])
+        if isinstance(value, dict) and "score" in value:
+            objects.append(value)
     except (ValueError, TypeError):
         continue
+for d in reversed(objects):
+    try:
+        score = int(d["score"])
+    except (ValueError, TypeError):
+        continue
+    if 0 <= score <= 100:
+        fb = str(d.get("feedback", "")).replace("\t", " ").replace("\n", " ")
+        print(str(score) + "\t" + fb)
+        break
 '
 }
 
@@ -938,6 +1028,14 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
       KANBAN_CARD_MODEL=$model KANBAN_CARD_EFFORT=$effort KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title $wcmd 2>&1) ) || ATT_WORKER_STATUS=$?
     ATT_WORKER_SECS=$((ATT_WORKER_SECS + SECONDS - t0))
     echo "$out" | tail -n 40 | append_history "$file" "worker output (tail)"
+    if [[ $task_kind == operation ]] && { [[ $ATT_WORKER_STATUS -ne 0 ]] || ! operation_confirmed "$out"; }; then
+      ATT_WORKER_INFRA_BLOCKED=false
+      ATT_BLOCKED_KIND=operation_unknown
+      ATT_BLOCKED_REASON=" external operation outcome is unknown; verify remote state, then use kanban operation <id> done|retry"
+      ATT_SCORE=0
+      ATT_FEEDBACK=""
+      return
+    fi
     infra_cat=$(echo "$out" | classify_worker_infra_error)
     if [[ $infra_cat == *scope_timebox* ]]; then
       ATT_WORKER_INFRA_BLOCKED=false
@@ -974,19 +1072,31 @@ run_attempt() { # run_attempt <card> <workdir> <worker-infra-max> -> sets ATT_SC
   # detect_blocked().
   detect_blocked "$out"
   ATT_BLOCKED_REASON=$BLOCKED_REASON
-  if [[ -n $ATT_BLOCKED_REASON ]]; then
+  if [[ $task_kind == operation ]] && ! operation_confirmed "$out"; then
+    ATT_BLOCKED_KIND=operation_unknown
+    ATT_BLOCKED_REASON=" external operation outcome is unknown; verify remote state, then use kanban operation <id> done|retry"
+    ATT_SCORE=0
+    ATT_FEEDBACK=""
+  elif [[ -n $ATT_BLOCKED_REASON ]]; then
     ATT_BLOCKED_KIND=ordering
     ATT_SCORE=0
     ATT_FEEDBACK=""
   fi
 }
 
-record_attempt() { # record_attempt <card> <threshold> -> increments attempts
-  local file=$1 threshold=$2 attempts timings
+record_attempt() { # record_attempt <card> <threshold> [checkpoint] -> increments attempts
+  local file=$1 threshold=$2 checkpoint=${3:-} attempts timings
   attempts=$(($(fm_get "$file" attempts 0) + 1))
-  fm_set "$file" attempts "$attempts"
   timings="worker=${ATT_WORKER_SECS}s review=${ATT_REVIEW_SECS}s"
-  fm_set "$file" last_timings "$timings"
+  if [[ $checkpoint == checkpoint ]]; then
+    if [[ $ATT_SCORE -ge $threshold ]]; then
+      fm_update "$file" attempts "$attempts" last_timings "$timings" review_pending "" merge_pending 1 pass_result "$ATT_SCORE"
+    else
+      fm_update "$file" attempts "$attempts" last_timings "$timings" review_pending ""
+    fi
+  else
+    fm_update "$file" attempts "$attempts" last_timings "$timings"
+  fi
   printf 'score: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
     append_history "$file" "review"
 }
@@ -1036,9 +1146,11 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   # review_with_infra_retry -- so an infra failure there never re-runs the
   # resolver.
   local file=$1 workdir=$2 conflict_files=$3 base_branch=$4 card_branch=$5
-  local id backend model effort wcmd out title prompt t0 attempt_label
+  local id backend model effort wcmd out title prompt t0 attempt_label status=0 infra_cat
   ATT_RESOLVE_SECS=0
   ATT_REVIEW_SECS=0
+  ATT_RESOLVE_BLOCKED_KIND=""
+  ATT_RESOLVE_BLOCKED_REASON=""
   id=$(fm_get "$file" id "?")
   backend=$(fm_get "$file" backend "$DEFAULT_BACKEND")
   model=$(fm_get "$file" model "")
@@ -1047,7 +1159,7 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
   title=$(fm_get "$file" title "")
   wcmd=$(resolve_cmd "$backend" "$model" "$effort")
   attempt_label="resolve-$(($(fm_get "$file" resolve_attempts 0) + 1))"
-  prompt=$(printf 'You are the conflict-resolution role for MornKanban. Card branch %s passed review but conflicts with the current base branch %s. Resolve the conflict in this worktree, preserving the intent of BOTH sides -- never simply discard one side. Run any tests the task requires, then leave the tree conflict-free.\n\nConflicted files:\n%s\n\nOriginal task:\n%s\n' \
+  prompt=$(printf 'You are the conflict-resolution role for MornKanban. Card branch %s passed review but conflicts with the current base branch %s. Resolve the conflict in this worktree, preserving the intent of BOTH sides -- never simply discard one side. Run any tests the task requires, then stage every resolved, created, or deleted file with git add/rm and leave the tree conflict-free.\n\nConflicted files:\n%s\n\nOriginal task:\n%s\n' \
     "$card_branch" "$base_branch" "$conflict_files" "$(card_task "$file")")
   t0=$SECONDS
   out=$( (cd "$workdir" && printf '%s' "$prompt" |
@@ -1055,24 +1167,46 @@ run_resolve_attempt() { # run_resolve_attempt <card> <resolve-workdir> <conflict
     KANBAN_ACTIVITY_LOG=${KANBAN_ACTIVITY_LOG:-$KB/activity.jsonl} \
     KANBAN_CARD_MODEL=$model KANBAN_CARD_EFFORT=$effort KANBAN_CARD_BACKEND=$backend KANBAN_CARD_TITLE=$title \
     KANBAN_CONFLICT_FILES=$conflict_files KANBAN_BASE_BRANCH=$base_branch KANBAN_CARD_BRANCH=$card_branch \
-    $wcmd 2>&1) ) || true
+    $wcmd 2>&1) ) || status=$?
   ATT_RESOLVE_SECS=$((SECONDS - t0))
   echo "$out" | tail -n 40 | append_history "$file" "resolver output (tail)"
-  git -C "$workdir" add -A
-  git -C "$workdir" commit -q --allow-empty -m "kanban: resolve conflict for $title"
-
   ATT_UNRESOLVED=false
-  if git -C "$workdir" diff --name-only --diff-filter=U | grep -q .; then
-    ATT_UNRESOLVED=true
+  infra_cat=$(echo "$out" | classify_worker_infra_error)
+  detect_blocked "$out"
+  if [[ -n $infra_cat || $status -ne 0 ]]; then
+    ATT_RESOLVE_BLOCKED_KIND=review_infra
+    ATT_RESOLVE_BLOCKED_REASON="resolver process failed before a safe commit (exit $status${infra_cat:+; $infra_cat})"
+    return
   fi
+  if [[ -n $BLOCKED_REASON ]]; then
+    ATT_RESOLVE_BLOCKED_KIND=user_input
+    ATT_RESOLVE_BLOCKED_REASON=$BLOCKED_REASON
+    return
+  fi
+  if git -C "$workdir" ls-files -u | grep -q . || ! git -C "$workdir" diff --check >/dev/null; then
+    ATT_UNRESOLVED=true
+    return
+  fi
+  if ! git -C "$workdir" diff --quiet || [[ -n $(git -C "$workdir" ls-files --others --exclude-standard) ]]; then
+    ATT_UNRESOLVED=true
+    return
+  fi
+  if ! git -C "$workdir" diff --cached --check >/dev/null; then
+    ATT_UNRESOLVED=true
+    return
+  fi
+  git -C "$workdir" commit -q --allow-empty -m "kanban: resolve conflict for $title"
 }
 
 record_resolve_attempt() { # record_resolve_attempt <card> <threshold> -> increments resolve_attempts
   local file=$1 threshold=$2 attempts timings
   attempts=$(($(fm_get "$file" resolve_attempts 0) + 1))
-  fm_set "$file" resolve_attempts "$attempts"
   timings="resolver=${ATT_RESOLVE_SECS}s review=${ATT_REVIEW_SECS}s"
-  fm_set "$file" last_timings "$timings"
+  if [[ $ATT_SCORE -ge $threshold ]]; then
+    fm_update "$file" resolve_attempts "$attempts" last_timings "$timings" resolve_review_pending "" resolve_merge_pending 1 pass_result "$ATT_SCORE"
+  else
+    fm_update "$file" resolve_attempts "$attempts" last_timings "$timings" resolve_review_pending ""
+  fi
   printf 'score: %s / threshold: %s\nphase durations: %s\n\n%s\n' "$ATT_SCORE" "$threshold" "$timings" "$ATT_FEEDBACK" |
     append_history "$file" "resolve review"
 }
@@ -1096,14 +1230,17 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   resolve_card_review "$file"
   review_enabled=$CARD_REVIEW_ENABLED
   review_source=$CARD_REVIEW_SOURCE
+  ATT_SCORE=0
 
   [[ $file == "$KB/resolving/"* ]] || move_card "$file" resolving >/dev/null
   file=$KB/resolving/$(basename "$file")
+  fm_set "$file" resume_phase ""
   [[ -n $card_wt ]] && git -C "$ROOT" worktree remove --force "$card_wt" 2>/dev/null || true
 
   # Resuming a review-infra-blocked resolve card (see cmd_resume): the
   # resolve worktree/branch already survived the block, reuse them instead
   # of failing on `worktree add`'s "branch already exists".
+  local initial_merge_error=false
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$resolve_branch" && [[ -d $resolve_wt ]]; then
     echo "$tag resuming existing resolve worktree/branch"
   elif ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
@@ -1114,14 +1251,46 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     notify_result failed "$title"
     return
   else
-    git -C "$resolve_wt" merge --no-ff -q -m "kanban: merge $card_branch for conflict resolution" "$card_branch" \
-      2>>"$KB/wt/$id.log" || true
+    if ! git -C "$resolve_wt" merge --no-ff -q -m "kanban: merge $card_branch for conflict resolution" "$card_branch" \
+      2>>"$KB/wt/$id.log"; then
+      git -C "$resolve_wt" ls-files -u | grep -q . || initial_merge_error=true
+    fi
   fi
 
-  local resolved=false blocked_infra=false
-  while [[ $resolve_attempts -lt $resolve_max_attempts ]]; do
+  if $initial_merge_error; then
+    echo "resolve merge failed without producing conflict entries; branches are kept" | append_history "$file" "error"
+    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    fail_card "$file" merge >/dev/null
+    echo "$tag FAIL resolve merge setup failed -> failed (branches kept)"
+    notify_result failed "$title"
+    return
+  fi
+  if [[ -z $conflict_files ]]; then
+    conflict_files=$(git -C "$resolve_wt" diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')
+  fi
+
+  local resolved=false blocked_infra=false blocked_resolver=false resolver_block_kind="" resolver_block_reason=""
+  if [[ $(fm_get "$file" resolve_merge_pending "") == 1 ]]; then
+    resolved=true
+    ATT_SCORE=$(fm_get "$file" pass_result 0)
+    echo "$tag resuming pending resolve merge"
+  fi
+  while ! $resolved && [[ $resolve_attempts -lt $resolve_max_attempts ]]; do
     echo "$tag resolve attempt $((resolve_attempts + 1))/$resolve_max_attempts (branch: $resolve_branch)"
-    run_resolve_attempt "$file" "$resolve_wt" "$conflict_files" "$base_branch" "$card_branch"
+    if [[ $(fm_get "$file" resolve_review_pending "") == 1 ]]; then
+      ATT_RESOLVE_SECS=0
+      ATT_REVIEW_SECS=0
+      ATT_UNRESOLVED=false
+      echo "$tag resuming pending resolve review"
+    else
+      run_resolve_attempt "$file" "$resolve_wt" "$conflict_files" "$base_branch" "$card_branch"
+      if [[ -n $ATT_RESOLVE_BLOCKED_KIND ]]; then
+        blocked_resolver=true
+        resolver_block_kind=$ATT_RESOLVE_BLOCKED_KIND
+        resolver_block_reason=$ATT_RESOLVE_BLOCKED_REASON
+        break
+      fi
+    fi
     if $ATT_UNRESOLVED; then
       resolve_attempts=$((resolve_attempts + 1))
       fm_set "$file" resolve_attempts "$resolve_attempts"
@@ -1131,11 +1300,12 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     fi
     if [[ $review_enabled != true ]]; then
       resolve_attempts=$((resolve_attempts + 1))
-      fm_set "$file" resolve_attempts "$resolve_attempts"
+      fm_update "$file" resolve_attempts "$resolve_attempts" resolve_merge_pending 1 pass_result 0
       echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "resolve review"
       resolved=true
       break
     fi
+    fm_set "$file" resolve_review_pending 1
     review_with_infra_retry "$file" "$resolve_wt" "$review_infra_max" \
       "$(review_prompt_for_resolve "$file" "$card_branch" "$base_branch")" \
       "resolve-$((resolve_attempts + 1))"
@@ -1145,10 +1315,24 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     fi
     record_resolve_attempt "$file" "$threshold"
     resolve_attempts=$((resolve_attempts + 1))
-    if [[ $ATT_SCORE -ge $threshold ]]; then resolved=true; break; fi
+    if [[ $ATT_SCORE -ge $threshold ]]; then
+      resolved=true
+      break
+    fi
     echo "$tag RESOLVE RETRY score=$ATT_SCORE"
     printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
   done
+
+  if $blocked_resolver; then
+    fm_set "$file" blocked_kind "$resolver_block_kind"
+    printf '%s\nbranches %s and %s, and the resolve worktree, are kept.\nrecovery: verify the cause, then kanban resume %s\n' \
+      "$resolver_block_reason" "$resolve_branch" "$card_branch" "$id" |
+      append_history "$file" "blocked (resolver)"
+    move_card "$file" blocked >/dev/null
+    echo "$tag BLOCKED resolver kind=$resolver_block_kind -> blocked"
+    notify_result blocked "$title"
+    return
+  fi
 
   if $blocked_infra; then
     fm_set "$file" blocked_kind review_infra
@@ -1176,7 +1360,28 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   fi
 
   local merge_t0=$SECONDS merge_secs
+  local current_branch
   merge_lock acquire
+  current_branch=$(git -C "$ROOT" symbolic-ref --short HEAD 2>/dev/null || true)
+  if [[ $current_branch != "$base_branch" ]]; then
+    merge_lock release
+    fm_set "$file" blocked_kind main_branch_changed
+    printf 'main checkout branch changed from %s to %s before resolve merge; no merge was attempted.\n' "$base_branch" "${current_branch:-detached}" |
+      append_history "$file" "blocked (main branch changed)"
+    move_card "$file" blocked >/dev/null
+    echo "$tag BLOCKED main branch changed -> blocked (resolve branch kept)"
+    notify_result blocked "$title"
+    return
+  fi
+  if git -C "$ROOT" merge-base --is-ancestor "$resolve_branch" HEAD 2>/dev/null; then
+    merge_lock release
+    git -C "$ROOT" worktree remove --force "$resolve_wt" 2>/dev/null || true
+    git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
+    move_card "$file" done >/dev/null
+    echo "$tag PASS resolve -> done (merge was already present on $base_branch)"
+    notify_result done "$title"
+    return
+  fi
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title (conflict resolved)" "$resolve_branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
     merge_secs=$((SECONDS - merge_t0))
@@ -1237,24 +1442,29 @@ process_card_seq() { # in-place execution: non-git fallback and serialized opera
       append_history "$file" "blocked"
     move_card "$file" blocked >/dev/null
     echo "    BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
-    if [[ $blocked_kind == user_input ]]; then notify_result blocked "$title"; fi
+    case $blocked_kind in
+      user_input|scope_timebox|operation_unknown|main_branch_changed) notify_result blocked "$title" ;;
+    esac
+    return
+  fi
+
+  if [[ $ATT_WORKER_STATUS -ne 0 ]]; then
+    attempts=$((attempts + 1))
+    fm_set "$file" attempts "$attempts"
+    echo "worker exited with status $ATT_WORKER_STATUS; reviewer was not run" | append_history "$file" "worker failure"
+    fail_card "$file" worker >/dev/null
+    echo "    FAIL worker exit=$ATT_WORKER_STATUS -> failed (review skipped)"
+    notify_result failed "$title"
     return
   fi
 
   if [[ $review_enabled != true ]]; then
     attempts=$((attempts + 1))
     fm_set "$file" attempts "$attempts"
-    if [[ $ATT_WORKER_STATUS -eq 0 ]]; then
-      echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "review"
-      move_card "$file" done >/dev/null
-      echo "    PASS (review disabled) -> done"
-      notify_result done "$title"
-    else
-      echo "worker exited with status $ATT_WORKER_STATUS" | append_history "$file" "worker failure"
-      fail_card "$file" worker >/dev/null
-      echo "    FAIL worker exit=$ATT_WORKER_STATUS (review disabled) -> failed (needs human)"
-      notify_result failed "$title"
-    fi
+    echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "review"
+    move_card "$file" done >/dev/null
+    echo "    PASS (review disabled) -> done"
+    notify_result done "$title"
     return
   fi
 
@@ -1321,7 +1531,12 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   fi
 
   local passed=false blocked_infra=false
-  while [[ $attempts -lt $max_attempts ]]; do
+  if [[ $(fm_get "$file" merge_pending "") == 1 ]]; then
+    passed=true
+    ATT_SCORE=$(fm_get "$file" pass_result 0)
+    echo "$tag resuming pending merge (branch: $branch)"
+  fi
+  while ! $passed && [[ $attempts -lt $max_attempts ]]; do
     if [[ $(fm_get "$file" review_pending "") == 1 ]]; then
       echo "$tag resuming pending review (branch: $branch)"
       ATT_WORKER_SECS=0
@@ -1342,7 +1557,9 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
         move_card "$file" blocked >/dev/null
         echo "$tag BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
-        if [[ $blocked_kind == user_input ]]; then notify_result blocked "$title"; fi
+        case $blocked_kind in
+          user_input|scope_timebox|operation_unknown|main_branch_changed) notify_result blocked "$title" ;;
+        esac
         return
       fi
       if [[ $task_kind == diagnose ]]; then
@@ -1356,17 +1573,25 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
           ATT_WORKER_STATUS=65
         fi
       fi
+      if [[ $ATT_WORKER_STATUS -ne 0 ]]; then
+        attempts=$((attempts + 1))
+        fm_set "$file" attempts "$attempts"
+        git -C "$wt" add -A
+        git -C "$wt" commit -q --allow-empty -m "kanban: $title (failed attempt $attempts)"
+        echo "worker exited with status $ATT_WORKER_STATUS; reviewer was not run" | append_history "$file" "worker failure"
+        git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+        fail_card "$file" worker >/dev/null
+        echo "$tag FAIL worker exit=$ATT_WORKER_STATUS -> failed (branch $branch kept; review skipped)"
+        notify_result failed "$title"
+        return
+      fi
       git -C "$wt" add -A
       git -C "$wt" commit -q --allow-empty -m "kanban: $title (attempt $((attempts + 1)))"
       if [[ $review_enabled != true ]]; then
         attempts=$((attempts + 1))
-        fm_set "$file" attempts "$attempts"
-        if [[ $ATT_WORKER_STATUS -eq 0 ]]; then
-          passed=true
-          echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "review"
-        else
-          echo "worker exited with status $ATT_WORKER_STATUS" | append_history "$file" "worker failure"
-        fi
+        fm_update "$file" attempts "$attempts" merge_pending 1 pass_result 0
+        passed=true
+        echo "review skipped: review_enabled=false (source: $review_source)" | append_history "$file" "review"
         break
       fi
       fm_set "$file" review_pending 1
@@ -1377,10 +1602,12 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
       blocked_infra=true
       break
     fi
-    fm_set "$file" review_pending ""
-    record_attempt "$file" "$threshold"
+    record_attempt "$file" "$threshold" checkpoint
     attempts=$((attempts + 1))
-    if [[ $ATT_SCORE -ge $threshold ]]; then passed=true; break; fi
+    if [[ $ATT_SCORE -ge $threshold ]]; then
+      passed=true
+      break
+    fi
     echo "$tag RETRY score=$ATT_SCORE"
     printf '%s\n' "$ATT_FEEDBACK" | append_history "$file" "rework instruction (fix these points)"
   done
@@ -1412,7 +1639,29 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   fi
 
   local merge_t0=$SECONDS merge_secs
+  local current_branch
   merge_lock acquire
+  current_branch=$(git -C "$ROOT" symbolic-ref --short HEAD 2>/dev/null || true)
+  if [[ $current_branch != "$base_branch" ]]; then
+    merge_lock release
+    fm_set "$file" blocked_kind main_branch_changed
+    printf 'main checkout branch changed from %s to %s before merge; no merge was attempted.\n' "$base_branch" "${current_branch:-detached}" |
+      append_history "$file" "blocked (main branch changed)"
+    move_card "$file" blocked >/dev/null
+    echo "$tag BLOCKED main branch changed -> blocked (branch $branch kept)"
+    notify_result blocked "$title"
+    return
+  fi
+  if git -C "$ROOT" merge-base --is-ancestor "$branch" HEAD 2>/dev/null; then
+    merge_lock release
+    git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+    git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
+    rm -f "$KB/wt/$id.log"
+    move_card "$file" done >/dev/null
+    echo "$tag PASS -> done (merge was already present on $base_branch)"
+    notify_result done "$title"
+    return
+  fi
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title" "$branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
     merge_secs=$((SECONDS - merge_t0))
@@ -1436,7 +1685,19 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     if [[ $review_enabled == true ]]; then pass_note="work passed review (score $ATT_SCORE)"; else pass_note="work completed (review disabled)"; fi
     printf '%s but merging %s into %s conflicted on: %s\nhanding off to the resolver role instead of failing immediately.\n' \
       "$pass_note" "$branch" "$base_branch" "$conflict_files" | append_history "$file" "merge conflict"
+    fm_update "$file" merge_pending "" resume_phase resolve
     process_resolve_wt "$file" "$base_branch" "$branch" "$wt" "$conflict_files"
+  fi
+}
+
+process_picked_wt() { # resume the durable phase recorded on a todo card
+  local file=$1 base_branch=$2 id
+  if [[ $(fm_get "$file" resume_phase "") == resolve ]]; then
+    id=$(fm_get "$file" id "?")
+    fm_set "$file" resume_phase ""
+    process_resolve_wt "$file" "$base_branch" "kanban/$id" "$KB/wt/$id" ""
+  else
+    process_card_wt "$file" "$base_branch"
   fi
 }
 
@@ -1464,12 +1725,41 @@ cmd_run() {
   [[ $jobs_max =~ ^[1-9][0-9]*$ ]] || die "jobs must be a positive integer (got: $jobs_max)"
   python3 -c 'import sys; assert float(sys.argv[1]) > 0' "$dispatch_poll_interval" 2>/dev/null ||
     die "KANBAN_DISPATCH_POLL_INTERVAL must be a positive number"
-  local lock=$KB/.lock
-  if [[ -f $lock ]] && kill -0 "$(cat "$lock")" 2>/dev/null; then
-    die "dispatcher already running (pid $(cat "$lock"))"
+  local lock=$KB/.lock lockfile=$KB/.dispatcher.lock lock_owner=$KB/.dispatcher.owner.$$ lock_pid=""
+  if [[ -f $lock ]]; then lock_pid=$(cat "$lock" 2>/dev/null || true); fi
+  if [[ -n $lock_pid ]] && kill -0 "$lock_pid" 2>/dev/null; then
+    die "dispatcher already running (pid $lock_pid)"
   fi
+  if [[ -d $lockfile ]]; then
+    lock_pid=$(cat "$lockfile/pid" 2>/dev/null || true)
+    if [[ -n $lock_pid ]] && kill -0 "$lock_pid" 2>/dev/null; then
+      die "dispatcher already running (pid $lock_pid)"
+    fi
+    [[ -n $lock_pid ]] || die "dispatcher lock is busy (legacy owner is unknown)"
+    rm -f "$lockfile/pid"
+    rmdir "$lockfile" 2>/dev/null || die "dispatcher lock is busy"
+  elif [[ -f $lockfile ]]; then
+    lock_pid=$(cat "$lockfile" 2>/dev/null || true)
+    if [[ -n $lock_pid ]] && kill -0 "$lock_pid" 2>/dev/null; then
+      die "dispatcher already running (pid $lock_pid)"
+    fi
+    [[ -n $lock_pid ]] || die "dispatcher lock is busy (owner is unknown)"
+    rm -f "$lockfile"
+  fi
+  printf '%s\n' $$ >"$lock_owner"
+  if ! ln "$lock_owner" "$lockfile" 2>/dev/null; then
+    lock_pid=$(cat "$lockfile" 2>/dev/null || true)
+    rm -f "$lock_owner"
+    if [[ -n $lock_pid ]] && kill -0 "$lock_pid" 2>/dev/null; then
+      die "dispatcher already running (pid $lock_pid)"
+    fi
+    die "dispatcher lock is busy"
+  fi
+  rm -f "$lock_owner"
   echo $$ >"$lock"
-  trap "rm -f '$lock'; rmdir '$KB/.merge.lock' 2>/dev/null || true" EXIT
+  trap "rm -f '$lock' '$lockfile' '$lock_owner'; rmdir '$KB/.merge.lock' 2>/dev/null || true" EXIT
+  rmdir "$KB/.merge.lock" 2>/dev/null || true
+  [[ -n ${KANBAN_WORKER_CMD:-} ]] || die "visible worker wrapper is required; run kanban-secretary.sh dispatch"
   # Fail fast if no backend CLI is available (dies with a message here instead
   # of silently inside a background job).
   worker_cmd "$DEFAULT_BACKEND" "" >/dev/null
@@ -1485,7 +1775,16 @@ cmd_run() {
   else
     echo "kanban: Review: OFF (fast iteration; project default; cards may opt in with --review)"
   fi
-  if $jobs_pinned; then
+  local is_git=false non_git_fallback=false
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 && is_git=true
+  if ! $is_git && [[ $jobs_max -gt 1 ]]; then
+    if $jobs_pinned; then die "parallel mode requires a git repository (worktrees)"; fi
+    jobs_max=1
+    non_git_fallback=true
+  fi
+  if $non_git_fallback; then
+    echo "kanban: Jobs: 1 (non-git sequential fallback; no git operation was performed)"
+  elif $jobs_pinned; then
     echo "kanban: Jobs: $jobs_max (pinned by -j or KANBAN_JOBS)"
   else
     echo "kanban: Jobs: $jobs_max (live from .kanban/KANBAN.md; edit jobs: to resize safely)"
@@ -1495,21 +1794,29 @@ cmd_run() {
   # resolving/blocked cards also fold back their leftover worktree/branch so
   # the card restarts clean on its next pickup instead of colliding with
   # `git worktree add -b` on a name that already exists.
-  local orphan is_git=false
-  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 && is_git=true
-  for orphan in "$KB"/doing/*.md "$KB"/review/*.md; do
+  local orphan
+  for orphan in "$KB"/doing/*.md; do
+    if [[ -e $orphan ]]; then
+      if [[ $(fm_get "$orphan" task_kind implementation) == operation ]]; then
+        local orphan_title
+        orphan_title=$(fm_get "$orphan" title "?")
+        fm_set "$orphan" blocked_kind operation_unknown
+        printf 'dispatcher stopped while an external operation was in flight; remote state may already have changed. Automatic replay is forbidden. Verify the external state before resume.\n' |
+          append_history "$orphan" "blocked (operation outcome unknown)"
+        move_card "$orphan" blocked >/dev/null
+        echo "[$orphan_title] BLOCKED operation outcome unknown after dispatcher restart"
+        notify_result blocked "$orphan_title"
+      else
+        move_card "$orphan" todo >/dev/null
+      fi
+    fi
+  done
+  for orphan in "$KB"/review/*.md; do
     if [[ -e $orphan ]]; then move_card "$orphan" todo >/dev/null; fi
   done
   for orphan in "$KB"/resolving/*.md; do
     if [[ -e $orphan ]]; then
-      local rid
-      rid=$(fm_get "$orphan" id "?")
-      if $is_git && [[ $rid != "?" ]]; then
-        git -C "$ROOT" worktree remove --force "$KB/wt/$rid-resolve" 2>/dev/null || true
-        git -C "$ROOT" branch -q -D "kanban-resolve/$rid" 2>/dev/null || true
-        git -C "$ROOT" worktree remove --force "$KB/wt/$rid" 2>/dev/null || true
-        git -C "$ROOT" branch -q -D "kanban/$rid" 2>/dev/null || true
-      fi
+      fm_set "$orphan" resume_phase resolve
       move_card "$orphan" todo >/dev/null
     fi
   done
@@ -1521,7 +1828,7 @@ cmd_run() {
       # Review-infra worktree/branch/commits are the whole point of keeping them.
       # Worker-reported ordering blocks are still reclaimed on restart.
       case $(fm_get "$orphan" blocked_kind "") in
-        review_infra|dependency|user_input|scope_timebox) continue ;;
+        review_infra|dependency|user_input|scope_timebox|operation_unknown|main_branch_changed) continue ;;
       esac
       local bid
       bid=$(fm_get "$orphan" id "?")
@@ -1533,8 +1840,7 @@ cmd_run() {
     fi
   done
 
-  if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    if [[ $jobs_max -gt 1 ]]; then die "parallel mode requires a git repository (worktrees)"; fi
+  if ! $is_git; then
     while :; do
       refresh_dependency_cards
       local cards=("$KB"/todo/*.md)
@@ -1577,9 +1883,25 @@ cmd_run() {
         if [[ $st -ne 0 ]]; then
           for f in "$KB/doing/$base" "$KB/resolving/$base"; do
             if [[ -f $f ]]; then
-              local t
+              local t task_kind
               t=$(fm_get "$f" title "?" 2>/dev/null || basename "$2")
-              echo "job crashed unexpectedly (exit $st); see dispatcher output" | append_history "$f"
+              task_kind=$(fm_get "$f" task_kind implementation 2>/dev/null || echo implementation)
+              if [[ $task_kind == operation ]]; then
+                fm_set "$f" blocked_kind operation_unknown
+                echo "dispatcher job stopped during an external operation (exit $st); remote state may already have changed. Automatic replay is forbidden." |
+                  append_history "$f" "blocked (operation outcome unknown)"
+                move_card "$f" blocked >/dev/null
+                echo "[$t] CRASH exit=$st -> blocked (operation outcome unknown)"
+                notify_result blocked "$t"
+                continue
+              fi
+              if [[ $(fm_get "$f" merge_pending "") == 1 || $(fm_get "$f" resolve_merge_pending "") == 1 || $f == "$KB/resolving/"* ]]; then
+                echo "dispatcher job stopped (exit $st); durable phase checkpoint is preserved for the next visible dispatch" |
+                  append_history "$f" "dispatcher crash"
+                echo "[$t] CRASH exit=$st -> checkpoint preserved"
+                continue
+              fi
+              echo "job crashed unexpectedly (exit $st); see dispatcher output" | append_history "$f" "dispatcher crash"
               fail_card "$f" dispatcher >/dev/null
               echo "[$t] CRASH exit=$st -> failed"
             fi
@@ -1593,10 +1915,10 @@ cmd_run() {
       elif [[ -n ${KANBAN_DEBUG:-} ]]; then
         ( exec 2>"$KB/wt/job.$(basename "$picked").trace"; set -x
           trap 'job_crash_net $? "$picked"; echo "JOB EXIT status=$?" >&2' EXIT
-          process_card_wt "$picked" "$base_branch" ) &
+          process_picked_wt "$picked" "$base_branch" ) &
       else
         ( trap 'job_crash_net $? "$picked"' EXIT
-          process_card_wt "$picked" "$base_branch" ) &
+          process_picked_wt "$picked" "$base_branch" ) &
       fi
       spawned=$((spawned + 1))
       continue
@@ -1619,14 +1941,9 @@ cmd_resume() { # cmd_resume <id-substring> -> resume a supported parked card
   local file=${hits[0]} kind
   kind=$(fm_get "$file" blocked_kind "")
   case $kind in
-    user_input|scope_timebox)
-      fm_set "$file" blocked_kind ""
-      move_card "$file" todo >/dev/null
-      echo "resumed $kind card to todo"
-      return
-      ;;
-    review_infra) ;;
-    *) die "card is blocked (kind: ${kind:-unknown}); only review_infra, user_input, and scope_timebox blocks can be resumed" ;;
+    review_infra|user_input|scope_timebox|main_branch_changed) ;;
+    operation_unknown) die "operation outcome is unknown; verify remote state, then use: kanban operation $pat done|retry" ;;
+    *) die "card is blocked (kind: ${kind:-unknown}); this block kind is not manually resumable" ;;
   esac
 
   fm_set "$file" review_infra_retries 0
@@ -1634,23 +1951,37 @@ cmd_resume() { # cmd_resume <id-substring> -> resume a supported parked card
   fm_set "$file" blocked_kind ""
   local id
   id=$(fm_get "$file" id "?")
-  local picked
-  picked=$(move_card "$file" doing)
-
-  if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    process_card_seq "$picked"
-    return
-  fi
-  local base_branch
-  base_branch=$(git -C "$ROOT" symbolic-ref --short HEAD) || die "detached HEAD; check out a branch first"
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/kanban-resolve/$id"; then
-    # was blocked mid conflict-resolve review: resume via the resolve
-    # worktree/branch, which process_resolve_wt now reuses instead of
-    # re-adding (see the resume check right before its worktree add).
-    process_resolve_wt "$picked" "$base_branch" "kanban/$id" "" ""
-    return
+    fm_set "$file" resume_phase resolve
   fi
-  process_card_wt "$picked" "$base_branch"
+  move_card "$file" todo >/dev/null
+  echo "resumed $kind card to todo; run kanban-secretary.sh dispatch"
+}
+
+cmd_operation() { # cmd_operation <id-substring> <done|retry>
+  require_root
+  [[ $# -ge 2 ]] || die "usage: kanban operation <id> {done|retry}"
+  local pat=$1 decision=$2
+  [[ $decision == done || $decision == retry ]] || die "operation decision must be done or retry (got: $decision)"
+  local hits=("$KB"/blocked/*"$pat"*.md)
+  [[ -e ${hits[0]} ]] || die "no blocked card matching '$pat'"
+  [[ ${#hits[@]} -eq 1 ]] || die "'$pat' matches multiple blocked cards; use the full id"
+  local file=${hits[0]} title
+  [[ $(fm_get "$file" blocked_kind "") == operation_unknown ]] || die "card is not blocked by an unknown operation outcome"
+  title=$(fm_get "$file" title "?")
+  if [[ $decision == done ]]; then
+    echo "external state verified: operation completed; the operation was not replayed" | append_history "$file" "operation resolved"
+    move_card "$file" done >/dev/null
+    file=$KB/done/$(basename "$file")
+    fm_set "$file" blocked_kind ""
+    notify_result done "$title"
+    echo "operation marked done without replay"
+  else
+    fm_set "$file" blocked_kind ""
+    echo "external state verified: operation may be retried explicitly" | append_history "$file" "operation resolved"
+    move_card "$file" todo >/dev/null
+    echo "operation queued for one explicit retry; run kanban-secretary.sh dispatch"
+  fi
 }
 
 case ${1:-} in
@@ -1660,8 +1991,10 @@ case ${1:-} in
   config) shift; cmd_config "$@" ;;
   list|ls) cmd_list ;;
   show) shift; cmd_show "${1:?usage: kanban show <id>}" ;;
+  inspect) shift; cmd_inspect "$@" ;;
   run) shift || true; cmd_run "$@" ;;
   resume) shift; cmd_resume "$@" ;;
+  operation) shift; cmd_operation "$@" ;;
   projects) shift; python3 "$REGISTRY_CLI" projects "$@" ;;
   send) shift; python3 "$REGISTRY_CLI" send "$@" ;;
   --version) cat "$VERSION_FILE" ;;
@@ -1669,5 +2002,5 @@ case ${1:-} in
   install) cmd_install ;;
   update) cmd_update ;;
   uninstall) cmd_uninstall ;;
-  *) die "usage: kanban {init|add|remove <todo-id>|config set <key> <value>|list|show|run [--once] [-j N]|resume <id>|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
+  *) die "usage: kanban {init|add|remove <todo-id>|config set <key> <value>|list|show|inspect|run [--once] [-j N]|resume <id>|operation <id> {done|retry}|projects {add|list|show|update|remove}|send <alias> \"title\"|install|update|uninstall|version|--version}" ;;
 esac

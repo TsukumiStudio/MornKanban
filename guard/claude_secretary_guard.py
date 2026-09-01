@@ -20,7 +20,7 @@ Per-tool policy inside a secretary pane:
     administration goes through the `kanban` CLI (Bash invocations), never
     through these tools.
   - Bash -> classified by guard/command_classify.py, an allowlist (not a
-    denylist) covering read-only git/inspection commands and the
+    denylist) covering managed inspection commands (`kanban inspect`) and the
     `kanban`/`kanban-secretary.sh` subcommands a secretary is allowed to
     run. Anything else - implementation, verification, git mutation,
     GitHub/GitLab mutation, headless agent CLIs, package publish/deploy,

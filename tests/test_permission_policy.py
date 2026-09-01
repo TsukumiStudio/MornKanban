@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Agent permission policy: unrestricted-by-default argv, and the override
 precedence (env > KANBAN.md > built-in default) for worker, reviewer, and
-resolver in the headless `kanban run` path and visible Herdr wrapper.
+resolver in custom/visible wrappers. Bare headless `kanban run` is refused.
 
 All backends are fakes (argv/stdin captured to files); no real Claude/Codex
 call is made, no real HOME/credentials/remote/tag/LaunchAgent is touched.
@@ -30,7 +30,7 @@ def _init_git_repo(path):
 
 
 class HeadlessPermissionPolicyTests(unittest.TestCase):
-    """kanban run --once -j1, fake claude/codex capture their argv+stdin."""
+    """Bare run refusal and policy projection into a supplied wrapper."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -83,6 +83,19 @@ class HeadlessPermissionPolicyTests(unittest.TestCase):
         files = sorted((self.calls).glob(f"{backend}.*.argv"))
         return [f.read_text(encoding="utf-8").splitlines() for f in files]
 
+    def _policy_probe(self):
+        probe = self.root / "bin" / "policy-probe"
+        probe.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'CLAUDE_PERMS=%s\\nCODEX_FULL_BYPASS=%s\\nCODEX_SANDBOX=%s\\nCODEX_APPROVAL=%s\\n' "
+            '"$KANBAN_CLAUDE_PERMS" "$KANBAN_CODEX_FULL_BYPASS" "$KANBAN_CODEX_SANDBOX" "$KANBAN_CODEX_APPROVAL" >"$POLICY_PROBE"\n'
+            "cat >/dev/null\n"
+            "printf '{\"score\":90,\"feedback\":\"ok\"}\\n'\n",
+            encoding="utf-8",
+        )
+        probe.chmod(0o755)
+        return probe
+
     def test_init_template_defaults_to_unrestricted(self):
         self._run_kanban("init")
         content = (self.project / ".kanban" / "KANBAN.md").read_text(encoding="utf-8")
@@ -91,37 +104,27 @@ class HeadlessPermissionPolicyTests(unittest.TestCase):
         self.assertIn("codex_full_bypass: true", content)
         self.assertIn("codex_approval: never", content)
 
-    def test_claude_worker_and_reviewer_default_unrestricted(self):
+    def test_bare_run_never_starts_headless_claude(self):
         self._run_kanban("init")
         env = self.env.copy()
         env["KANBAN_BACKEND_ORDER"] = "claude"
         env["KANBAN_REVIEWER"] = "claude"
         self._run_kanban("add", "task", "-b", "claude", env=env)
         result = self._run_kanban("run", "--once", env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("visible worker wrapper", result.stderr)
+        self.assertEqual(self._argv_lines("claude"), [])
 
-        argvs = self._argv_lines("claude")
-        self.assertEqual(len(argvs), 2, argvs)  # worker + reviewer
-        for argv in argvs:
-            self.assertIn("--dangerously-skip-permissions", argv)
-            self.assertNotIn("--permission-mode", argv)
-
-    def test_codex_worker_and_reviewer_default_unrestricted(self):
+    def test_bare_run_never_starts_headless_codex(self):
         self._run_kanban("init")
         env = self.env.copy()
         env["KANBAN_BACKEND_ORDER"] = "codex"
         env["KANBAN_REVIEWER"] = "codex"
         self._run_kanban("add", "task", "-b", "codex", env=env)
         result = self._run_kanban("run", "--once", env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        argvs = self._argv_lines("codex")
-        self.assertEqual(len(argvs), 2, argvs)  # worker + reviewer
-        for argv in argvs:
-            self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
-            self.assertNotIn("-s", argv)
-            self.assertNotIn("read-only", argv)
-            self.assertNotIn("workspace-write", argv)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("visible worker wrapper", result.stderr)
+        self.assertEqual(self._argv_lines("codex"), [])
 
     def test_kanban_md_can_dial_back_to_safe_mode(self):
         self._run_kanban("init")
@@ -134,23 +137,21 @@ class HeadlessPermissionPolicyTests(unittest.TestCase):
         kanban_md.write_text(content, encoding="utf-8")
 
         env = self.env.copy()
-        env["KANBAN_BACKEND_ORDER"] = "claude codex"
-        env["KANBAN_REVIEWER"] = "codex"
+        probe_file = self.calls / "safe-policy.env"
+        probe = self._policy_probe()
+        env.update({
+            "KANBAN_WORKER_CMD": str(probe),
+            "KANBAN_REVIEW_CMD": str(probe),
+            "POLICY_PROBE": str(probe_file),
+        })
         self._run_kanban("add", "task", "-b", "claude", env=env)
         result = self._run_kanban("run", "--once", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-
-        claude_argv = self._argv_lines("claude")[0]
-        self.assertNotIn("--dangerously-skip-permissions", claude_argv)
-        self.assertIn("--permission-mode", claude_argv)
-        self.assertIn("acceptEdits", claude_argv)
-
-        codex_argv = self._argv_lines("codex")[0]
-        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", codex_argv)
-        self.assertIn("-s", codex_argv)
-        self.assertIn("workspace-write", codex_argv)
-        self.assertIn("-a", codex_argv)
-        self.assertIn("on-request", codex_argv)
+        values = probe_file.read_text(encoding="utf-8")
+        self.assertIn("CLAUDE_PERMS=acceptEdits", values)
+        self.assertIn("CODEX_FULL_BYPASS=false", values)
+        self.assertIn("CODEX_SANDBOX=workspace-write", values)
+        self.assertIn("CODEX_APPROVAL=on-request", values)
 
     def test_env_override_beats_kanban_md(self):
         self._run_kanban("init")  # KANBAN.md defaults to bypassPermissions/full bypass
@@ -161,19 +162,21 @@ class HeadlessPermissionPolicyTests(unittest.TestCase):
         env["KANBAN_CODEX_FULL_BYPASS"] = "false"
         env["KANBAN_CODEX_SANDBOX"] = "read-only"
         env["KANBAN_CODEX_APPROVAL"] = "untrusted"
+        probe_file = self.calls / "override-policy.env"
+        probe = self._policy_probe()
+        env.update({
+            "KANBAN_WORKER_CMD": str(probe),
+            "KANBAN_REVIEW_CMD": str(probe),
+            "POLICY_PROBE": str(probe_file),
+        })
         self._run_kanban("add", "task", "-b", "claude", env=env)
         result = self._run_kanban("run", "--once", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-
-        claude_argv = self._argv_lines("claude")[0]
-        self.assertIn("--permission-mode", claude_argv)
-        self.assertIn("manual", claude_argv)
-        self.assertNotIn("--dangerously-skip-permissions", claude_argv)
-
-        codex_argv = self._argv_lines("codex")[0]
-        self.assertIn("read-only", codex_argv)
-        self.assertIn("untrusted", codex_argv)
-        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", codex_argv)
+        values = probe_file.read_text(encoding="utf-8")
+        self.assertIn("CLAUDE_PERMS=manual", values)
+        self.assertIn("CODEX_FULL_BYPASS=false", values)
+        self.assertIn("CODEX_SANDBOX=read-only", values)
+        self.assertIn("CODEX_APPROVAL=untrusted", values)
 
     def test_custom_worker_cmd_receives_resolved_policy_via_env(self):
         self._run_kanban("init")

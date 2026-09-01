@@ -124,6 +124,18 @@ class DashboardModuleTests(unittest.TestCase):
         self.assertIn("VERSION: 1.0.0", rendered)
         self.assertIn("秘書ガード: claude=enforced, codex=partial", rendered)
 
+    def test_local_ahead_version_has_its_own_truthful_label(self):
+        with mock.patch.object(
+            self.dashboard.setup_core,
+            "version_report",
+            return_value={
+                "current": "0.9.0", "latest": "0.8.3",
+                "state": "local-ahead", "error": None,
+            },
+        ):
+            detail = self.dashboard._version_detail()
+        self.assertEqual(detail["badge_state"], self.dashboard.STATE_LOCAL_AHEAD)
+
     def test_render_status_wraps_long_japanese_and_paths_without_overflow(self):
         stdout = mock.Mock(isatty=lambda: False)
         caps = self.dashboard.terminal_caps(env={}, stdout=stdout, columns_override=40)
@@ -473,6 +485,20 @@ class NonInteractiveCompatTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         link = Path(self.env["HOME"]) / ".local" / "bin" / "kanban"
         self.assertTrue(link.is_symlink())
+        settings = Path(self.env["HOME"]) / ".claude" / "settings.json"
+        self.assertTrue(settings.is_file())
+        self.assertIn("claude_secretary_guard.py", settings.read_text(encoding="utf-8"))
+
+    def test_install_subcommand_returns_nonzero_when_cli_target_is_unmanaged(self):
+        link = Path(self.env["HOME"]) / ".local" / "bin" / "kanban"
+        link.parent.mkdir(parents=True)
+        link.write_text("user file", encoding="utf-8")
+        result = subprocess.run(
+            ["python3", "gui/setup_cli.py", "install"], cwd=str(self.dist),
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(link.read_text(encoding="utf-8"), "user file")
 
 
 if __name__ == "__main__":

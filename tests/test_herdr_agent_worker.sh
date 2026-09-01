@@ -90,6 +90,9 @@ JSON
   "agent prompt")
     n=$(($(wc -l <"$scen/prompt_calls" 2>/dev/null || echo 0) + 1))
     echo "$n" >>"$scen/prompt_calls"
+    if [[ $n -eq 1 && ${4:-} == *"WORK_ORDER: "* ]]; then
+      cp "${4##*WORK_ORDER: }" "$scen/work-order.md"
+    fi
     if [[ -f "$scen/on_prompt_$n" ]]; then
       # shellcheck disable=SC1090
       source "$scen/on_prompt_$n"
@@ -122,6 +125,7 @@ JSON
       # shellcheck disable=SC1090
       source "$scen/on_call_$n"
     fi
+    [[ ! -f "$scen/get_delay" ]] || sleep "$(cat "$scen/get_delay")"
     total=$(wc -l <"$scen/statuses")
     idx=$n
     if ((idx > total)); then idx=$total; fi
@@ -156,6 +160,8 @@ run_worker() { # run_worker <scen-dir> <worktree-dir> [role] [backend] -> stdout
     KANBAN_HERDR_POLL_INTERVAL=0.1 KANBAN_HERDR_SETTLE_CHECKS=2 \
     KANBAN_HERDR_STABLE_SLEEP=0.05 KANBAN_HERDR_ANSWER_WAIT_SECS="${MOCK_MAX_WAIT:-3}" \
     KANBAN_HERDR_MISSING_ANSWER_GRACE_SECS="${MOCK_MISSING_ANSWER_GRACE:-0.4}" \
+    KANBAN_HERDR_ACK_GRACE_SECS="${MOCK_ACK_GRACE:-180}" \
+    KANBAN_HERDR_GET_TIMEOUT_SECS="${MOCK_GET_TIMEOUT:-10}" \
     KANBAN_ACTIVITY_LOG="$scen/activity.jsonl" \
     MOCK_SCEN_DIR="$scen" \
     PATH="$scen/bin:$PATH" \
@@ -179,6 +185,9 @@ test_transient_idle_then_reworking_then_answer() {
   note "scenario: transient idle blip, agent keeps working, answer arrives late"
   new_scenario
   printf 'idle\nworking\nworking\nidle\nidle\n' >"$SCEN/statuses"
+  cat >"$SCEN/on_call_1" <<EOF
+printf 'KANBAN_ACK_ID: test-card|wt|worker|attempt-1\n' > "$WT/.kanban-ack"
+EOF
   cat >"$SCEN/on_call_4" <<EOF
 printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\nFINAL ANSWER CONTENT\n' > "$WT/.kanban-answer.md"
 EOF
@@ -187,6 +196,9 @@ EOF
   assert_contains "stdout carries the real answer" "$OUT" "FINAL ANSWER CONTENT"
   assert_contains "correlation log records the card" "$(cat "$SCEN/activity.jsonl")" '"card_id":"test-card"'
   assert_contains "correlation log records pane and agent lifecycle" "$(cat "$SCEN/activity.jsonl")" '"event":"answer_accepted"'
+  assert_contains "explicit ACK is recorded" "$(cat "$SCEN/activity.jsonl")" '"event":"agent_acknowledged"'
+  assert_not_contains "initial prompt stays small" "$(cat "$SCEN/herdr.log")" "card body"
+  assert_contains "work order carries the real card" "$(cat "$SCEN/work-order.md")" "card body"
   assert_contains "correlation log records actual effort" "$(cat "$SCEN/activity.jsonl")" '"effort":"high"'
   assert_contains "first AI opens to the right of the secretary" "$(cat "$SCEN/herdr.log")" 'pane split --pane secretary --direction right'
   local calls
@@ -217,6 +229,7 @@ EOF
   run_worker "$SCEN" "$WT"
   assert_eq "still completes successfully" "$RC" "0"
   assert_contains "stdout carries the real answer" "$OUT" "ANSWER-2"
+  assert_contains "answer arrival is valid implicit ACK" "$(cat "$SCEN/activity.jsonl")" '"event":"agent_acknowledged"'
   if [[ -f "$SCEN/sendkeys.log" ]]; then
     bad "sent a key into a pane that only showed running-shell/error text: $(cat "$SCEN/sendkeys.log")"
   else
@@ -260,7 +273,7 @@ test_interactive_choice_fails_fast() {
   assert_eq "interactive choice exits immediately" "$RC" "1"
   assert_contains "interactive choice has a structured category" "$ERR" "KANBAN_INFRA_ERROR: agent_question"
   assert_matches "Claude cannot call AskUserQuestion" "$(cat "$SCEN/herdr.log")" '(^| )--disallowedTools AskUserQuestion( |$)'
-  assert_contains "initial prompt forbids interactive choices" "$(cat "$SCEN/herdr.log")" '対話式の選択肢を表示しない'
+  assert_contains "work order forbids interactive choices" "$(cat "$SCEN/work-order.md")" '対話式の選択肢を表示しない'
   rm -rf "$SCEN"
 }
 
@@ -270,11 +283,75 @@ test_idle_without_answer_times_out() {
   note "scenario: agent reports idle/done repeatedly but never writes an answer"
   new_scenario
   printf 'idle\n' >"$SCEN/statuses"
+  cat >"$SCEN/on_call_1" <<EOF
+printf 'KANBAN_ACK_ID: test-card|wt|worker|attempt-1\n' > "$WT/.kanban-ack"
+EOF
   MOCK_MAX_WAIT=0.5 run_worker "$SCEN" "$WT"
   assert_eq "exits non-zero (infrastructure error, not success)" "$RC" "1"
   assert_eq "stdout is empty -- no terminal-status-line stand-in for the answer" "$OUT" ""
   assert_contains "stderr explains the missing completion artifact" "$ERR" "missing_answer"
   assert_contains "close still runs (cleanup happens exactly once, on the way out)" "$(cat "$SCEN/close.log" 2>/dev/null || true)" "close"
+  rm -rf "$SCEN"
+}
+
+test_missing_ack_fails_before_the_general_timeout() {
+  note "scenario: prompted agent never acknowledges the work order"
+  new_scenario
+  printf 'working\n' >"$SCEN/statuses"
+  MOCK_ACK_GRACE=0.2 MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT"
+  assert_eq "missing ACK exits non-zero" "$RC" "1"
+  assert_contains "missing ACK is classified" "$ERR" "KANBAN_INFRA_ERROR: unacknowledged"
+  assert_eq "never sends missing-answer recovery before ACK" "$(wc -l <"$SCEN/prompt_calls" | tr -d ' ')" "1"
+  rm -rf "$SCEN"
+}
+
+test_slow_status_query_cannot_overrun_ack_deadline() {
+  note "scenario: agent status query hangs before ACK"
+  new_scenario
+  printf 'working\n' >"$SCEN/statuses"
+  printf '5\n' >"$SCEN/get_delay"
+  started=$(python3 -c 'import time; print(time.monotonic())')
+  MOCK_ACK_GRACE=0.2 MOCK_GET_TIMEOUT=5 MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT"
+  elapsed=$(python3 -c 'import sys,time; print(time.monotonic()-float(sys.argv[1]))' "$started")
+  assert_eq "hung status query becomes unacknowledged" "$RC" "1"
+  assert_contains "deadline failure is classified" "$ERR" "KANBAN_INFRA_ERROR: unacknowledged"
+  if python3 -c 'import sys; raise SystemExit(float(sys.argv[1]) >= 1.5)' "$elapsed"; then
+    ok "ACK deadline bounds a hung status query"
+  else
+    bad "ACK deadline took ${elapsed}s"
+  fi
+  rm -rf "$SCEN"
+}
+
+test_short_status_timeout_retries_until_ack_deadline() {
+  note "scenario: status query timeout is shorter than the ACK grace"
+  new_scenario
+  printf 'working\n' >"$SCEN/statuses"
+  printf '5\n' >"$SCEN/get_delay"
+  started=$(python3 -c 'import time; print(time.monotonic())')
+  MOCK_ACK_GRACE=1 MOCK_GET_TIMEOUT=0.2 MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT"
+  elapsed=$(python3 -c 'import sys,time; print(time.monotonic()-float(sys.argv[1]))' "$started")
+  assert_contains "eventually reports missing ACK" "$ERR" "KANBAN_INFRA_ERROR: unacknowledged"
+  if python3 -c 'import sys; v=float(sys.argv[1]); raise SystemExit(not (0.7 <= v < 2.0))' "$elapsed"; then
+    ok "per-query timeout does not shorten the ACK grace"
+  else
+    bad "ACK grace ended after ${elapsed}s"
+  fi
+  rm -rf "$SCEN"
+}
+
+test_ack_arriving_during_status_timeout_is_not_rejected() {
+  note "scenario: ACK arrives while the status query is hung"
+  new_scenario
+  printf 'working\n' >"$SCEN/statuses"
+  printf '5\n' >"$SCEN/get_delay"
+  cat >"$SCEN/on_call_1" <<EOF
+( sleep 0.3; printf 'KANBAN_ACK_ID: test-card|wt|worker|attempt-1\n' > "$WT/.kanban-ack" ) &
+EOF
+  MOCK_ACK_GRACE=2 MOCK_GET_TIMEOUT=0.5 MOCK_MAX_WAIT=3 run_worker "$SCEN" "$WT"
+  assert_contains "hung status remains an infra error" "$ERR" "KANBAN_INFRA_ERROR: agent_status_timeout"
+  assert_not_contains "valid in-flight ACK is not called missing" "$ERR" "unacknowledged"
+  assert_contains "in-flight ACK is recorded" "$(cat "$SCEN/activity.jsonl")" '"event":"agent_acknowledged"'
   rm -rf "$SCEN"
 }
 
@@ -301,6 +378,9 @@ test_missing_answer_is_reprompted_once() {
   note "scenario: completed agent forgot the answer file"
   new_scenario
   printf 'idle\nidle\nworking\nidle\nidle\n' >"$SCEN/statuses"
+  cat >"$SCEN/on_call_1" <<EOF
+printf 'KANBAN_ACK_ID: test-card|wt|worker|attempt-1\n' > "$WT/.kanban-ack"
+EOF
   cat >"$SCEN/on_prompt_2" <<EOF
 printf 'KANBAN_ANSWER_ID: test-card|wt|worker|attempt-1\nRECOVERED ANSWER\n' > "$WT/.kanban-answer.md"
 EOF
@@ -378,6 +458,10 @@ EOF
       run_worker "$SCEN" "$WT" "$role" "$backend"
       assert_eq "[$role/$backend] settles only once the answer lands" "$RC" "0"
       assert_contains "[$role/$backend] stdout carries the real answer" "$OUT" '"score": 90'
+      if [[ $role == operator && $backend == claude ]]; then
+        assert_contains "operator prompt permits the main checkout" "$(cat "$SCEN/work-order.md")" "本体checkout"
+        assert_not_contains "operator prompt has no worktree-only contradiction" "$(cat "$SCEN/work-order.md")" "カレントディレクトリ (worktree) 内だけ"
+      fi
       rm -rf "$SCEN"
 
       note "scenario: role=$role backend=$backend no-answer timeout"
@@ -403,6 +487,7 @@ EOF
   assert_eq "rejects stale answer with non-zero status" "$RC" "1"
   assert_contains "reports identity mismatch" "$ERR" "answer identity mismatch"
   assert_not_contains "does not emit stale answer body" "$OUT" "STALE CONTENT"
+  assert_not_contains "stale answer is not an implicit ACK" "$(cat "$SCEN/activity.jsonl")" '"event":"agent_acknowledged"'
   rm -rf "$SCEN"
 }
 
@@ -462,6 +547,10 @@ test_blocked_false_positive_running_shell
 test_blocked_true_permission_prompt
 test_interactive_choice_fails_fast
 test_idle_without_answer_times_out
+test_missing_ack_fails_before_the_general_timeout
+test_slow_status_query_cannot_overrun_ack_deadline
+test_short_status_timeout_retries_until_ack_deadline
+test_ack_arriving_during_status_timeout_is_not_rejected
 test_prompt_failure_is_immediate
 test_missing_answer_is_reprompted_once
 test_trust_recovery_waits_for_idle

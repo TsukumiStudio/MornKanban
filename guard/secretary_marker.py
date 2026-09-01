@@ -116,6 +116,9 @@ def append_audit(project_root, message):
 def project_root_from(start):
     """Walk up from `start` looking for a `.kanban` directory. None if absent."""
     d = os.path.realpath(start)
+    marker = os.sep + ".kanban" + os.sep + "wt" + os.sep
+    if marker in d:
+        d = d.split(marker, 1)[0]
     while True:
         if os.path.isdir(os.path.join(d, ".kanban")):
             return d

@@ -145,12 +145,27 @@ run_dispatcher_pane() {
 
   # One dispatcher must use one known-good wrapper version. The source
   # checkout may be updated while another project's dispatcher is alive.
-  runtime_dir=$(mktemp -d "$root/.kanban/wt/runtime.XXXXXX")
+  if ! runtime_dir=$(mktemp -d "$root/.kanban/wt/runtime.XXXXXX"); then
+    status=70
+    printf 'kanban-secretary: worker runtime snapshot could not be created\n' | tee -a "$log" >&2
+    "$REPO/herdr-notify-secretary.sh" dispatcher_failed "$log" "$status" >/dev/null 2>&1 || true
+    return "$status"
+  fi
   trap "rm -rf $(shell_quote "$runtime_dir")" EXIT
-  cp "$REPO/herdr-agent-worker.sh" "$REPO/activity_log.py" "$runtime_dir/"
+  if ! cp "$REPO/herdr-agent-worker.sh" "$REPO/activity_log.py" "$runtime_dir/"; then
+    status=70
+    printf 'kanban-secretary: worker runtime snapshot copy failed\n' | tee -a "$log" >&2
+    "$REPO/herdr-notify-secretary.sh" dispatcher_failed "$log" "$status" >/dev/null 2>&1 || true
+    return "$status"
+  fi
   runtime_worker=$runtime_dir/herdr-agent-worker.sh
   chmod +x "$runtime_worker"
-  bash -n "$runtime_worker" || die "worker runtime snapshot failed bash -n: $runtime_worker"
+  if ! bash -n "$runtime_worker"; then
+    status=70
+    printf 'kanban-secretary: worker runtime snapshot failed syntax validation\n' | tee -a "$log" >&2
+    "$REPO/herdr-notify-secretary.sh" dispatcher_failed "$log" "$status" >/dev/null 2>&1 || true
+    return "$status"
+  fi
   export KANBAN_WORKER_CMD=$runtime_worker
   export KANBAN_REVIEW_CMD="env KANBAN_HERDR_ROLE=reviewer $runtime_worker"
   export KANBAN_RESOLVE_CMD="env KANBAN_HERDR_ROLE=resolver $runtime_worker"

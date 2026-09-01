@@ -14,8 +14,6 @@ from setup_core import (  # noqa: E402
     check_deps,
     cli_installed,
     guard_status,
-    install_cli,
-    install_skills,
     local_version,
     REPO,
     run_setup,
@@ -28,17 +26,17 @@ import dashboard  # noqa: E402
 
 
 def cmd_install():
-    ok, cli_msg = install_cli()
-    print(cli_msg)
-    for msg in install_skills(force=True):
+    ok, messages = run_setup()
+    for msg in messages:
         print(msg)
     return ok
 
 
 def cmd_uninstall():
-    for msg in run_uninstall():
+    ok, messages = run_uninstall()
+    for msg in messages:
         print(msg)
-    return True
+    return ok
 
 
 def cmd_update():
@@ -117,10 +115,10 @@ def _interactive_install(status):
     if not _confirm("install"):
         print("中止しました。変更は行っていません。")
         return
-    messages = run_setup()
+    ok, messages = run_setup()
     for line in dashboard.build_summary(
         "install", messages,
-        ["kanban version", "Herdr pane で $kanban-dispatch 秘書として開始"],
+        ["kanban version", "Herdr pane で $kanban-dispatch 秘書として開始"] if ok else [],
     ):
         print(line)
 
@@ -145,10 +143,10 @@ def _interactive_uninstall(status):
     if not _confirm("uninstall"):
         print("中止しました。変更は行っていません。")
         return
-    messages = run_uninstall()
+    ok, messages = run_uninstall()
     for line in dashboard.build_summary(
         "uninstall", messages,
-        ["再導入する場合: kanban-setup.sh install"],
+        ["再導入する場合: kanban-setup.sh install"] if ok else [],
     ):
         print(line)
 

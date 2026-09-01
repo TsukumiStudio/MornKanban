@@ -954,6 +954,25 @@ class CardAddArgumentTests(unittest.TestCase):
             input="task", text=True, capture_output=True, check=False,
         )
 
+    def test_init_defaults_are_backend_neutral_and_preserve_gitignore(self):
+        config = (self.project / ".kanban" / "KANBAN.md").read_text(encoding="utf-8")
+        self.assertRegex(config, r"(?m)^default_model:\s*$")
+        self.assertRegex(config, r"(?m)^review_model:\s*$")
+        self.assertRegex(config, r"(?m)^resolve_model:\s*$")
+        for state in ("todo", "doing", "review", "resolving", "blocked", "done", "failed"):
+            self.assertTrue((self.project / ".kanban" / state / ".gitkeep").is_file())
+
+        ignore = self.project / ".kanban" / ".gitignore"
+        ignore.write_text(ignore.read_text(encoding="utf-8") + "user-entry\n", encoding="utf-8")
+        result = subprocess.run(
+            [str(KANBAN_SH), "init"], cwd=self.project,
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = ignore.read_text(encoding="utf-8")
+        self.assertIn("user-entry\n", text)
+        self.assertIn(".secretary-guard/\n", text)
+
     def test_help_and_invalid_arguments_never_create_cards(self):
         for args, expected_status, message in (
             (("--help",), 0, "usage: kanban add"),
@@ -975,6 +994,13 @@ class CardAddArgumentTests(unittest.TestCase):
         )
         self.assertEqual(outside.returncode, 0)
         self.assertIn("usage: kanban add", outside.stdout)
+
+    def test_invalid_threshold_is_rejected_before_card_creation(self):
+        for value in ("-1", "101", "not-a-number"):
+            result = self._run("task", "-t", value)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("threshold", result.stderr)
+        self.assertEqual(list((self.project / ".kanban" / "todo").glob("*.md")), [])
 
 
 class SecretaryBoardAdminTests(unittest.TestCase):
@@ -1230,6 +1256,28 @@ class WorkerParallelismTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn("Jobs: 1000000 (pinned", run.stdout)
 
+    def test_non_git_default_jobs_falls_back_to_sequential(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            subprocess.run([str(KANBAN_SH), "init"], cwd=project, check=True, capture_output=True, text=True)
+            subprocess.run(
+                [str(KANBAN_SH), "add", "plain project task", "--no-review"], cwd=project,
+                input="task", text=True, check=True, capture_output=True,
+            )
+            worker = Path(td) / "worker.sh"
+            worker.write_text("#!/usr/bin/env bash\ncat >/dev/null\nprintf 'done\\n'\n", encoding="utf-8")
+            worker.chmod(0o755)
+            env = {**os.environ, "KANBAN_WORKER_CMD": str(worker)}
+            env.pop("KANBAN_JOBS", None)
+            run = subprocess.run(
+                [str(KANBAN_SH), "run", "--once"], cwd=project, env=env,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("non-git sequential fallback", run.stdout)
+            self.assertEqual(len(list((project / ".kanban" / "done").glob("*.md"))), 1)
+
 
 class HerdrAgentWorkerBackendTests(unittest.TestCase):
     """herdr-agent-worker.sh must pick --kind claude|codex from the card's own
@@ -1414,6 +1462,19 @@ class HerdrAgentWorkerBackendTests(unittest.TestCase):
         start = self._start_call()
         self.assertIn("--kind codex", start)
 
+    def test_auto_codex_drops_legacy_claude_model(self):
+        self._write_fake_cli("codex")
+        result = self._run_worker({
+            "KANBAN_CARD_BACKEND": "auto",
+            "KANBAN_BACKEND_ORDER": "codex claude",
+            "KANBAN_CARD_MODEL": "sonnet",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = self._start_call()
+        self.assertIn("--kind codex", start)
+        self.assertNotIn("sonnet", start)
+        self.assertNotIn(" -m ", start)
+
     def test_unsupported_backend_fails_before_creating_a_pane(self):
         self._write_fake_cli("claude", "codex")
         result = self._run_worker({"KANBAN_CARD_BACKEND": "gpt-5.6-terra"})
@@ -1576,6 +1637,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 cat >/dev/null
                 test "$(pwd -P)" = "$(cd "$KANBAN_TEST_MAIN_ROOT" && pwd -P)"
                 printf '%s\n' "$KANBAN_TEST_MAIN_ROOT" > "$KANBAN_TEST_EVIDENCE"
+                printf 'OPERATION_OK: remote state verified\n'
                 """
             ),
         )
@@ -1612,6 +1674,153 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertIn("review_source: operation", text)
         self.assertIn("attempts: 1", text)
         self.assertNotIn("kanban/", self._git("branch", "--show-current").stdout)
+
+    def test_operator_without_explicit_success_is_blocked_not_done(self):
+        operator = self._write_script(
+            "uncertain-operator.sh",
+            "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'deploy command returned but remote state is unknown\\n'\n",
+        )
+        added = subprocess.run(
+            [str(KANBAN_SH), "add", "uncertain deploy", "--operate"], cwd=self.project,
+            input="deploy", text=True, capture_output=True, env=self.env, check=False,
+        )
+        self.assertEqual(added.returncode, 0, added.stderr)
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": "/usr/bin/false",
+            "KANBAN_OPERATION_CMD": str(operator),
+            "KANBAN_REVIEW_ENABLED": "false",
+            "KANBAN_JOBS": "1",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list((self.project / ".kanban" / "done").glob("*.md")), [])
+        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertEqual(len(blocked), 1, result.stdout)
+        self.assertIn("blocked_kind: operation_unknown", blocked[0].read_text(encoding="utf-8"))
+
+    def test_operator_infrastructure_error_is_never_auto_retried(self):
+        count = Path(self.temp.name) / "operation-infra-count"
+        operator = self._write_script(
+            "infra-operator.sh",
+            "#!/usr/bin/env bash\ncat >/dev/null\necho run >> \"$OPERATION_COUNT\"\nprintf 'KANBAN_INFRA_ERROR: pane_lost: answer unavailable\\n'\n",
+        )
+        subprocess.run(
+            [str(KANBAN_SH), "add", "infra publish", "--operate"], cwd=self.project,
+            input="publish", text=True, capture_output=True, env=self.env, check=True,
+        )
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": "/usr/bin/false", "KANBAN_OPERATION_CMD": str(operator),
+            "OPERATION_COUNT": str(count), "KANBAN_JOBS": "1",
+            "KANBAN_REVIEW_INFRA_MAX_RETRIES": "2", "KANBAN_REVIEW_INFRA_BACKOFF_SECONDS": "0",
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(count.read_text().splitlines(), ["run"])
+        card = next((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertIn("blocked_kind: operation_unknown", card.read_text(encoding="utf-8"))
+
+    def test_stranded_operation_is_not_automatically_reexecuted(self):
+        evidence = Path(self.temp.name) / "operation-reran"
+        operator = self._write_script(
+            "must-not-run.sh",
+            "#!/usr/bin/env bash\ntouch \"$KANBAN_TEST_EVIDENCE\"\nprintf 'OPERATION_OK: done\\n'\n",
+        )
+        added = subprocess.run(
+            [str(KANBAN_SH), "add", "publish once", "--operate"], cwd=self.project,
+            input="publish", text=True, capture_output=True, env=self.env, check=True,
+        )
+        card = Path(added.stdout.strip())
+        card.rename(self.project / ".kanban" / "doing" / card.name)
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": "/usr/bin/false",
+            "KANBAN_OPERATION_CMD": str(operator),
+            "KANBAN_REVIEW_ENABLED": "false",
+            "KANBAN_TEST_EVIDENCE": str(evidence),
+            "KANBAN_JOBS": "1",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(evidence.exists(), result.stdout + result.stderr)
+        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertEqual(len(blocked), 1)
+        self.assertIn("blocked_kind: operation_unknown", blocked[0].read_text(encoding="utf-8"))
+
+    def test_blocked_operation_is_not_replayed_and_notifies_secretary(self):
+        count = Path(self.temp.name) / "operation-count"
+        notifications = Path(self.temp.name) / "notifications"
+        operator = self._write_script(
+            "blocked-operator.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                cat >/dev/null
+                n=0
+                [[ -f "$OPERATION_COUNT" ]] && n=$(cat "$OPERATION_COUNT")
+                echo $((n + 1)) > "$OPERATION_COUNT"
+                printf 'BLOCKED: remote response was inconclusive\n'
+                """
+            ),
+        )
+        notify = self._write_script(
+            "notify.sh", "#!/usr/bin/env bash\nprintf '%s %s\\n' \"$1\" \"$2\" >> \"$NOTIFICATIONS\"\n",
+        )
+        added = subprocess.run(
+            [str(KANBAN_SH), "add", "uncertain publish", "--operate"], cwd=self.project,
+            input="publish", text=True, capture_output=True, env=self.env, check=True,
+        )
+        env = {
+            "KANBAN_WORKER_CMD": "/usr/bin/false", "KANBAN_OPERATION_CMD": str(operator),
+            "KANBAN_NOTIFY_CMD": str(notify), "OPERATION_COUNT": str(count),
+            "NOTIFICATIONS": str(notifications), "KANBAN_JOBS": "1",
+        }
+        first = self._run("run", "--once", env_overrides=env)
+        second = self._run("run", "--once", env_overrides=env)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(count.read_text().strip(), "1")
+        card = next((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertIn("blocked_kind: operation_unknown", card.read_text(encoding="utf-8"))
+        self.assertIn("blocked uncertain publish", notifications.read_text(encoding="utf-8"))
+
+        card_id = re.search(r"^id: (\S+)$", card.read_text(encoding="utf-8"), re.M).group(1)
+        resumed = self._run("resume", card_id, env_overrides=env)
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertIn("kanban operation", resumed.stdout + resumed.stderr)
+
+        resolved = self._run("operation", card_id, "done", env_overrides=env)
+        self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
+        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertEqual(count.read_text().strip(), "1")
+
+    def test_operation_retry_requires_explicit_resolution(self):
+        count = Path(self.temp.name) / "operation-retry-count"
+        operator = self._write_script(
+            "retry-operator.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                cat >/dev/null
+                n=0
+                [[ -f "$OPERATION_COUNT" ]] && n=$(cat "$OPERATION_COUNT")
+                n=$((n + 1)); echo "$n" > "$OPERATION_COUNT"
+                if [[ $n -eq 1 ]]; then printf 'BLOCKED: check remote\n'; else printf 'OPERATION_OK: verified\n'; fi
+                """
+            ),
+        )
+        added = subprocess.run(
+            [str(KANBAN_SH), "add", "retry publish", "--operate"], cwd=self.project,
+            input="publish", text=True, capture_output=True, env=self.env, check=True,
+        )
+        card_id = re.search(
+            r"^id: (\S+)$", Path(added.stdout.strip()).read_text(encoding="utf-8"), re.M
+        ).group(1)
+        env = {
+            "KANBAN_WORKER_CMD": "/usr/bin/false", "KANBAN_OPERATION_CMD": str(operator),
+            "OPERATION_COUNT": str(count), "KANBAN_JOBS": "1",
+        }
+        self.assertEqual(self._run("run", "--once", env_overrides=env).returncode, 0)
+        retry = self._run("operation", card_id, "retry", env_overrides=env)
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertEqual(self._run("run", "--once", env_overrides=env).returncode, 0)
+        self.assertEqual(count.read_text().strip(), "2")
+        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
 
     def _seed_conflict(self):
         (self.project / "file.txt").write_text("base\n", encoding="utf-8")
@@ -1666,6 +1875,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 set -eu
                 cat >/dev/null
                 printf 'merged change\\n' > file.txt
+                git add -A
                 """
             ),
         )
@@ -1693,6 +1903,69 @@ class DispatcherWorkflowTests(unittest.TestCase):
         branches = self._git("branch", "--list").stdout
         self.assertNotIn("kanban/", branches)
         self.assertNotIn("kanban-resolve/", branches)
+
+    @FULL_ONLY
+    def test_failed_resolver_cannot_merge_unresolved_content_without_review(self):
+        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8").replace("review_enabled: true", "review_enabled: false"),
+            encoding="utf-8",
+        )
+        self._seed_conflict()
+        worker = self._conflicting_worker()
+        resolve = self._write_script(
+            "broken-resolve.sh",
+            "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'resolver crashed\\n'\nexit 7\n",
+        )
+        self._add_card("resolver must not lie")
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": str(worker),
+            "KANBAN_RESOLVE_CMD": str(resolve),
+            "KANBAN_REVIEW_ENABLED": "false",
+            "KANBAN_JOBS": "1",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list((self.project / ".kanban" / "done").glob("*.md")), [])
+        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertEqual(len(blocked), 1, result.stdout)
+        self.assertIn("blocked_kind: review_infra", blocked[0].read_text(encoding="utf-8"))
+        self.assertNotIn("<<<<<<<", (self.project / "file.txt").read_text(encoding="utf-8"))
+
+    @FULL_ONLY
+    def test_noop_resolver_cannot_hide_binary_conflict(self):
+        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8").replace("review_enabled: true", "review_enabled: false"),
+            encoding="utf-8",
+        )
+        (self.project / "binary.dat").write_bytes(b"\0base\n")
+        self._git("add", "binary.dat")
+        self._git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "binary base")
+        worker = self._write_script(
+            "binary-worker.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                ( cd "$KANBAN_TEST_MAIN_ROOT" && printf '\\000main\\n' > binary.dat && \
+                  git add binary.dat && git -c user.email=t@t -c user.name=t commit -q -m "main binary" )
+                printf '\\000card\\n' > binary.dat
+                """
+            ),
+        )
+        resolver = self._write_script("noop-resolver.sh", "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
+        self._add_card("binary conflict")
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": str(worker), "KANBAN_RESOLVE_CMD": str(resolver),
+            "KANBAN_REVIEW_ENABLED": "false", "KANBAN_JOBS": "1",
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list((self.project / ".kanban" / "done").glob("*.md")), [])
+        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        self.assertEqual(len(failed), 1, result.stdout + result.stderr)
+        self.assertIn("failure_kind: resolve", failed[0].read_text(encoding="utf-8"))
+        self.assertEqual((self.project / "binary.dat").read_bytes(), b"\0main\n")
 
     @FULL_ONLY
     def test_resolver_retries_on_low_review_score_then_passes(self):
@@ -1730,6 +2003,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 set -eu
                 cat >/dev/null
                 printf 'merged change\\n' > file.txt
+                git add -A
                 """
             ),
         )
@@ -1787,6 +2061,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 set -eu
                 cat >/dev/null
                 printf 'still bad\\n' > file.txt
+                git add -A
                 """
             ),
         )
@@ -1837,6 +2112,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                   echo "card=$KANBAN_CARD_BRANCH"
                 }} > "{dump_file}"
                 printf 'merged change\\n' > file.txt
+                git add -A
                 """
             ),
         )
@@ -1871,6 +2147,154 @@ class DispatcherWorkflowTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already running", result.stdout + result.stderr)
+
+    def test_dispatcher_does_not_steal_pidless_initializing_lock(self):
+        (self.project / ".kanban" / ".dispatcher.lock").mkdir()
+        result = self._run("run", "--once", env_overrides={"KANBAN_WORKER_CMD": "/usr/bin/true"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("owner is unknown", result.stdout + result.stderr)
+
+    def test_bare_run_refuses_hidden_headless_agent_execution(self):
+        result = self._run("run", "--once")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kanban-secretary.sh dispatch", result.stdout + result.stderr)
+
+    def test_managed_git_inspection_disables_configured_helpers(self):
+        called = Path(self.temp.name) / "git-helper-called"
+        helper = self._write_script(
+            "git-helper.sh", "#!/usr/bin/env bash\ntouch \"$GIT_HELPER_CALLED\"\nexit 0\n",
+        )
+        self._git("config", "diff.external", str(helper))
+        self._git("config", "diff.evil.command", str(helper))
+        self._git("config", "filter.evil.clean", str(helper))
+        self._git("config", "filter.evil.required", "true")
+        self._git("config", "core.fsmonitor", str(helper))
+        (self.project / ".gitattributes").write_text("* filter=evil diff=evil\n", encoding="utf-8")
+        (self.project / "seed.txt").write_text("changed\n", encoding="utf-8")
+        env = {"GIT_HELPER_CALLED": str(called)}
+        diff = self._run("inspect", "diff", env_overrides=env)
+        status = self._run("inspect", "status", env_overrides=env)
+        self.assertEqual(diff.returncode, 0, diff.stdout + diff.stderr)
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn("changed", diff.stdout)
+        self.assertIn("raw files", diff.stderr)
+        self.assertIn("conservatively", status.stderr)
+        self.assertFalse(called.exists())
+
+        rejected = self._run("inspect", "show", "--output=/tmp/leak", env_overrides=env)
+        self.assertNotEqual(rejected.returncode, 0)
+        rejected_helper = self._run("inspect", "show", "--ext-diff", env_overrides=env)
+        self.assertNotEqual(rejected_helper.returncode, 0)
+
+    def test_managed_git_inspection_preserves_filemode_semantics(self):
+        path = self.project / "mode.txt"
+        path.write_text("mode\n", encoding="utf-8")
+        self._git("add", "mode.txt")
+        self._git("commit", "-m", "add mode file")
+        self._git("config", "core.filemode", "true")
+        path.chmod(0o755)
+
+        status = self._run("inspect", "status")
+
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn("mode.txt", status.stdout)
+
+    def _prepare_merge_pending_card(self, title):
+        card = self._add_card(title)
+        text = card.read_text(encoding="utf-8")
+        card_id = re.search(r"^id: (\S+)$", text, re.M).group(1)
+        text = text.replace("attempts: 0", "attempts: 1\nmerge_pending: 1\npass_result: 95")
+        card.write_text(text, encoding="utf-8")
+        branch = "kanban/%s" % card_id
+        wt = self.project / ".kanban" / "wt" / card_id
+        self._git("worktree", "add", "-q", "-b", branch, str(wt), "main")
+        (wt / "merge-pending.txt").write_text(title + "\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "prepared"], check=True,
+        )
+        card.rename(self.project / ".kanban" / "doing" / card.name)
+        return card_id, branch
+
+    @FULL_ONLY
+    def test_restart_resumes_merge_checkpoint_without_worker_or_review(self):
+        worker_called = Path(self.temp.name) / "worker-called"
+        self._prepare_merge_pending_card("resume merge")
+        worker = self._write_script(
+            "forbidden-worker.sh", "#!/usr/bin/env bash\ntouch \"$WORKER_CALLED\"\nexit 9\n",
+        )
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": str(worker), "WORKER_CALLED": str(worker_called),
+            "KANBAN_JOBS": "1",
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(worker_called.exists())
+        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertEqual((self.project / "merge-pending.txt").read_text(), "resume merge\n")
+
+    @FULL_ONLY
+    def test_restart_recognizes_merge_already_landed_before_card_move(self):
+        worker_called = Path(self.temp.name) / "worker-called"
+        _, branch = self._prepare_merge_pending_card("already merged")
+        self._git("merge", "--no-ff", "-q", "-m", "landed before crash", branch)
+        worker = self._write_script(
+            "forbidden-worker.sh", "#!/usr/bin/env bash\ntouch \"$WORKER_CALLED\"\nexit 9\n",
+        )
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": str(worker), "WORKER_CALLED": str(worker_called),
+            "KANBAN_JOBS": "1",
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(worker_called.exists())
+        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 1)
+        self.assertIn("merge was already present", result.stdout)
+
+    @FULL_ONLY
+    def test_branch_change_while_waiting_for_merge_lock_never_merges_wrong_branch(self):
+        cfg = self.project / ".kanban" / "KANBAN.md"
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8").replace("review_enabled: true", "review_enabled: false"),
+            encoding="utf-8",
+        )
+        self._git("branch", "switched")
+        ready = Path(self.temp.name) / "merge-lock-ready"
+        worker = self._write_script(
+            "lock-worker.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf 'card change\n' > lock-result.txt
+                mkdir "$KANBAN_TEST_MAIN_ROOT/.kanban/.merge.lock"
+                touch "$LOCK_READY"
+                """
+            ),
+        )
+        self._add_card("lock branch check")
+        env = self.env.copy()
+        env.update({
+            "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_ENABLED": "false",
+            "KANBAN_JOBS": "1", "LOCK_READY": str(ready),
+        })
+        proc = subprocess.Popen(
+            [str(KANBAN_SH), "run", "--once"], cwd=self.project, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.time() + 10
+        while not ready.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(ready.exists())
+        time.sleep(1.2)  # old ordering has now checked HEAD and is waiting on the lock
+        self._git("checkout", "-q", "switched")
+        (self.project / ".kanban" / ".merge.lock").rmdir()
+        stdout, stderr = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 0, stdout + stderr)
+        self.assertFalse((self.project / "lock-result.txt").exists())
+        blocked = list((self.project / ".kanban" / "blocked").glob("*.md"))
+        self.assertEqual(len(blocked), 1, stdout + stderr)
+        self.assertIn("blocked_kind: main_branch_changed", blocked[0].read_text(encoding="utf-8"))
 
     def _run_live_jobs_case(self, *, pinned):
         cfg = self.project / ".kanban" / "KANBAN.md"
@@ -1960,6 +2384,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
                 set -eu
                 cat >/dev/null
                 printf 'ok\\n' > out.txt
+                git add -A
                 """
             ),
         )
@@ -2100,6 +2525,63 @@ class DispatcherWorkflowTests(unittest.TestCase):
         self.assertIn("attempts: 1", card_text)
         self.assertIn("review infrastructure retry 1/2", card_text)
 
+    def test_reviewer_json_with_braces_inside_feedback_is_accepted(self):
+        worker = self._counting_worker(Path(self.temp.name) / "worker_count")
+        review = self._write_script(
+            "review.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                cat >/dev/null
+                printf '%s\n' '{"score": 90, "feedback": "report/{stamp}-{token} returns {html_url, number}\\n日本語(done)"}'
+                """
+            ),
+        )
+        self._add_card("review feedback contains braces")
+
+        result = self._run(
+            "run", "--once",
+            env_overrides={
+                "KANBAN_WORKER_CMD": str(worker),
+                "KANBAN_REVIEW_CMD": str(review),
+                "KANBAN_JOBS": "1",
+                "KANBAN_REVIEW_INFRA_MAX_RETRIES": "0",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        done = list((self.project / ".kanban" / "done").glob("*.md"))
+        self.assertEqual(len(done), 1, result.stdout + result.stderr)
+        card_text = done[0].read_text(encoding="utf-8")
+        self.assertIn("report/{stamp}-{token}", card_text)
+        self.assertNotIn("review infrastructure retry", card_text)
+
+    def test_worker_nonzero_cannot_be_overruled_by_high_review_score(self):
+        worker = self._write_script(
+            "failing-worker.sh",
+            "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'partial\\n' > partial.txt\nexit 42\n",
+        )
+        review_called = Path(self.temp.name) / "review-called"
+        review = self._write_script(
+            "forbidden-review.sh",
+            "#!/usr/bin/env bash\ntouch \"$REVIEW_CALLED\"\nprintf '{\"score\": 100, \"feedback\": \"ignore worker exit\"}\\n'\n",
+        )
+        self._add_card("worker exit matters")
+        result = self._run("run", "--once", env_overrides={
+            "KANBAN_WORKER_CMD": str(worker),
+            "KANBAN_REVIEW_CMD": str(review),
+            "REVIEW_CALLED": str(review_called),
+            "KANBAN_JOBS": "1",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(review_called.exists())
+        failed = list((self.project / ".kanban" / "failed").glob("*.md"))
+        self.assertEqual(len(failed), 1, result.stdout)
+        text = failed[0].read_text(encoding="utf-8")
+        self.assertIn("failure_kind: worker", text)
+        self.assertIn("reviewer was not run", text)
+
     def test_review_infra_exhausted_goes_to_blocked_with_branch_and_worktree_kept(self):
         worker_count = Path(self.temp.name) / "worker_count"
         worker = self._counting_worker(worker_count)
@@ -2216,8 +2698,13 @@ class DispatcherWorkflowTests(unittest.TestCase):
 
         result2 = self._run("resume", card_id, env_overrides=env_overrides)
         self.assertEqual(result2.returncode, 0, result2.stderr)
+        self.assertEqual(len(list((self.project / ".kanban" / "todo").glob("*.md"))), 1)
+        self.assertEqual(len(list((self.project / ".kanban" / "done").glob("*.md"))), 0)
+
+        result3 = self._run("run", "--once", env_overrides=env_overrides)
+        self.assertEqual(result3.returncode, 0, result3.stderr)
         done = list((self.project / ".kanban" / "done").glob("*.md"))
-        self.assertEqual(len(done), 1, result2.stdout + result2.stderr)
+        self.assertEqual(len(done), 1, result3.stdout + result3.stderr)
         # the worker must not be re-invoked on resume -- only the reviewer
         # is re-run against the work already committed on the kept branch.
         self.assertEqual(worker_count.read_text(encoding="utf-8").strip(), "1")
@@ -2400,9 +2887,14 @@ class TestTierContractTests(unittest.TestCase):
         "test_resolve_cmd_receives_card_routing_and_conflict_context",
         "test_resolving_orphan_is_reclaimed_and_not_double_processed",
         "test_operator_card_runs_once_in_main_checkout_without_review_or_merge",
+        "test_failed_resolver_cannot_merge_unresolved_content_without_review",
+        "test_restart_recognizes_merge_already_landed_before_card_move",
+        "test_restart_resumes_merge_checkpoint_without_worker_or_review",
+        "test_noop_resolver_cannot_hide_binary_conflict",
+        "test_branch_change_while_waiting_for_merge_lock_never_merges_wrong_branch",
     }
 
-    def test_full_only_membership_is_exactly_the_documented_seven(self):
+    def test_full_only_membership_is_exactly_the_documented_set(self):
         # FULL_ONLY's skipIf condition is frozen at decoration time (module
         # import), so re-patching KANBAN_TEST_TIER at test time cannot
         # retroactively toggle __unittest_skip__. Read the source instead:

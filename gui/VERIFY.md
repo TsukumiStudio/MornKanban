@@ -64,14 +64,14 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
 
 テスト対象:
 
-- 秘書 bootstrap が `.kanban/KANBAN.md` を初期化し、current Herdr agent を `secretary` として登録する
-- visible dispatcher が worker / reviewer / notify を一組で別 Herdr pane に渡す
+- 秘書 bootstrap が `.kanban/KANBAN.md` を初期化し、current Herdr agent をproject固有の`secretary-<slug>`名で登録する
+- visible dispatcher が worker / reviewer / resolver / operator / notify を一組で別 Herdr pane に渡す
 - visible worker がprompt拒否を即時失敗として記録し、folder trust後はidle/doneまで待ち、回答ファイル忘れを同じsessionへの一度の再要求で回収する
 - Herdr 外では秘書を開始せず、Herdr必須として失敗する
 - 同じスキルが Claude Code と Codex の両方へ導入され、checkout の実パスとバージョンが埋め込まれる
 - セマンティックバージョン比較 (`1.9.0` < `1.10.0` など、辞書順にならない)
 - `kanban.sh` がシンボリックリンク経由でも実体の `VERSION` / `gui/` を解決する
-- `kanban.sh install` / `uninstall` が `~/.local/bin/kanban` とスキルだけを導入・削除し、
+- `kanban.sh install` / `uninstall` が `~/.local/bin/kanban`、スキル、Claude秘書ガードを導入・削除し、
   リポジトリ本体とプロジェクトのボードは残す
 - `kanban.sh update` がGitを呼ばず、現在のcheckoutからCLIとスキルを再導入する
 - `kanban-setup.sh` が引数を `gui/setup_cli.py` へ確実に転送する
@@ -80,7 +80,7 @@ review on/off matrixなどの実結合はfullだけで網羅する。テスト�
   操作ガイドを表示してメニューへ戻る。TTY/非TTY・色・狭幅のfallback、導入状態、
   変更プレビュー、確認拒否時の無変更も維持する
 - 空registryを、本体セットアップ失敗の`未導入`として表示しない
-- dispatcher TUIが狭いpane内で固定ヘッダーを保ち、active表示件数、状態遷移、ログ、終了コードを正しく扱う
+- dispatcher TUIが狭いpane内で固定ヘッダーを保ち、active表示件数、状態遷移、ログ、終了コードを正しく扱い、親終了時に不可視childを残さない
 
 セットアップ画面の非TTY経路は次で確認する。ASCII枠付きダッシュボードと
 `VERSION:`を表示後、変更せず終了する。

@@ -33,6 +33,7 @@ STATE_REGISTERED = "登録あり"
 STATE_EMPTY = "登録なし"
 STATE_NEEDS_CHECK = "要確認"
 STATE_UNKNOWN = "不明"
+STATE_LOCAL_AHEAD = "ローカル先行"
 
 # state -> (color-name, ascii-symbol, unicode-symbol)
 _STATE_STYLE = {
@@ -43,6 +44,7 @@ _STATE_STYLE = {
     STATE_EMPTY: ("gray", "[--]", "○"),
     STATE_NEEDS_CHECK: ("red", "[!!]", "⚠"),
     STATE_UNKNOWN: ("gray", "[??]", "•"),
+    STATE_LOCAL_AHEAD: ("green", "[DEV]", "◆"),
 }
 
 _ANSI = {
@@ -232,7 +234,7 @@ def _version_detail():
     state = {
         "up-to-date": STATE_INSTALLED,
         "update-available": STATE_UPDATE,
-        "local-ahead": STATE_INSTALLED,
+        "local-ahead": STATE_LOCAL_AHEAD,
         "unknown": STATE_NEEDS_CHECK,
     }.get(report["state"], STATE_NEEDS_CHECK)
     report = dict(report)

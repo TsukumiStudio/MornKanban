@@ -66,7 +66,7 @@ def main(argv=None):
     elif tier == "full":
         steps = [
             ("full python", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], 180),
-            ("visible worker lifecycle", ["bash", "tests/test_herdr_agent_worker.sh"], 30),
+    ("visible worker lifecycle", ["bash", "tests/test_herdr_agent_worker.sh"], 45),
             ("skill validation", [
                 sys.executable,
                 os.path.expanduser("~/.codex/skills/.system/skill-creator/scripts/quick_validate.py"),

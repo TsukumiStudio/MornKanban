@@ -8,7 +8,7 @@ Invoked by kanban.sh as:
   python3 registry/cli.py projects show <alias>
   python3 registry/cli.py projects update <alias> <path>
   python3 registry/cli.py projects remove <alias>
-  python3 registry/cli.py send <alias> <title> [-b ...] [-m ...] [-e ...] [--depends-on ID] [-t ...] [--from PATH]
+  python3 registry/cli.py send <alias> <title> [-b ...] [-m ...] [-e ...] [--depends-on ID] [-t ...] [--diagnose|--operate] [--from PATH]
   python3 registry/cli.py secretary resolve <project-root>
 
 python3 standard library only (no pip dependencies), matching the rest of
@@ -184,7 +184,7 @@ def _card_state_by_id(kanban_dir, card_id):
 
 def _write_card_atomic(todo_dir, title, body, backend, model, effort, depends_on,
                         threshold, max_attempts,
-                        source_alias, source_path, diagnose=False,
+                        source_alias, source_path, task_kind="implementation",
                         diagnosis_target_minutes="5", diagnosis_max_minutes="10"):
     slug = _slugify(title)
     for _ in range(50):
@@ -221,8 +221,9 @@ def _write_card_atomic(todo_dir, title, body, backend, model, effort, depends_on
             "## Task\n\n%s\n\n## History\n"
         ) % (
             card_id, title, backend, model, effort, depends_on, threshold, max_attempts,
-            "false" if diagnose else "auto", "diagnose" if diagnose else "auto",
-            "diagnose" if diagnose else "implementation",
+            "false" if task_kind != "implementation" else "auto",
+            task_kind if task_kind != "implementation" else "auto",
+            task_kind,
             diagnosis_target_minutes, diagnosis_max_minutes, created,
             source_alias or "", source_path, body,
         )
@@ -275,10 +276,8 @@ def cmd_send(args):
     threshold = args.threshold if args.threshold is not None else defaults["threshold"]
     max_attempts = defaults["max_attempts"]
 
-    if sys.stdin.isatty():
-        body = args.title
-    else:
-        body = sys.stdin.read()
+    body = args.title if sys.stdin.isatty() else (sys.stdin.read() or args.title)
+    task_kind = "diagnose" if args.diagnose else "operation" if args.operate else "implementation"
 
     source_alias, source_path = _resolve_source(args.__dict__.get("from_path"))
 
@@ -286,7 +285,7 @@ def cmd_send(args):
         dest = _write_card_atomic(
             todo_dir, args.title, body, backend, model, effort, depends_on,
             threshold, max_attempts,
-            source_alias, source_path, diagnose=args.diagnose,
+            source_alias, source_path, task_kind=task_kind,
             diagnosis_target_minutes=defaults["diagnosis_target_minutes"],
             diagnosis_max_minutes=defaults["diagnosis_max_minutes"],
         )
@@ -356,8 +355,11 @@ def build_parser():
     send_p.add_argument("-e", "--effort", default=None)
     send_p.add_argument("--depends-on", default=None, metavar="CARD_ID")
     send_p.add_argument("-t", "--threshold", default=None)
-    send_p.add_argument("--diagnose", action="store_true",
-                        help="file a read-only 5/10-minute diagnosis card")
+    kind = send_p.add_mutually_exclusive_group()
+    kind.add_argument("--diagnose", action="store_true",
+                      help="file a read-only 5/10-minute diagnosis card")
+    kind.add_argument("--operate", action="store_true",
+                      help="file a serialized external-operation card")
     send_p.add_argument("--from", dest="from_path", default=None,
                          help="record this path as the send origin instead of cwd")
     send_p.set_defaults(func=cmd_send)

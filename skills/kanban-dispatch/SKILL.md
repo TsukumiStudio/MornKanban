@@ -53,8 +53,9 @@ While secretary mode is active:
 
 1. Read `.kanban/KANBAN.md` before cutting cards.
 2. Split the request according to project policy. Give every worker a
-   self-contained card containing paths, constraints, completion conditions,
-   and required test commands; the worker has no conversation context.
+   self-contained card containing paths, constraints, machine-checkable
+   acceptance criteria, and required test commands; the worker has no
+   conversation context.
    A diagnosis/investigation request is a special small card: use
    `kanban add --diagnose` (or `kanban send ... --diagnose`), keep it
    read-only, target a supported conclusion in 5 minutes, and stop at the
@@ -82,7 +83,9 @@ While secretary mode is active:
    actions. If the request is actually work for a *different* registered project, use
    `kanban send <alias> "title"` instead (see README's **Cross-Project
    Send**) — it files the card into that project's own `.kanban/todo/`, not
-   this one, and applies that project's own KANBAN.md defaults.
+   this one, and applies that project's own KANBAN.md defaults. For an
+   external mutation there, use `kanban send <alias> "title" --operate` so
+   the operation contract is preserved.
    If your own malformed `kanban add` nevertheless creates an unintended
    card, immediately run `kanban remove <card-id>` and then add the correct
    card; do not ask the user to run raw `rm`. This is also allowed when the
@@ -97,7 +100,11 @@ While secretary mode is active:
    external mutation, file it with `kanban add --operate`. The operator runs
    once in the main checkout, serialized with merges, and performs only the
    external action authorized by that card; never give this work to a normal
-   worktree worker.
+   worktree worker. It may return `OPERATION_OK: <verified result>` only after
+   checking the real remote/deploy state. Failure or uncertainty is
+   `BLOCKED: <reason>`. Never use `resume` for `operation_unknown`; verify the
+   external state, then use `kanban operation <id> done` to finish without
+   replay or `kanban operation <id> retry` only when another run is safe.
 4. Start the visible dispatcher with
    `__MORNKANBAN_REPO__/kanban-secretary.sh dispatch "$PWD"`. The helper opens
    the dispatcher below the secretary, places AI panes on the right and stacks
@@ -107,7 +114,12 @@ While secretary mode is active:
    wrapper cannot observe. Do not replace it with bare
    `kanban run`. New boards default to `jobs: 4`; honor the project's live
    `jobs:` value or an explicit user override, and impose no MornKanban upper
-   cap on a positive worker count.
+   cap on a positive worker count. A non-git project automatically uses one
+   sequential worker unless an explicit `-j > 1` is requested; never create a
+   Git repository as recovery. `ACK:-` means the prompt was not sent yet,
+   `ACK:…` means the pane received only the short work-order path, and `ACK:✓`
+   is separate proof that it read the order. A missing ACK is infrastructure
+   trouble, not a failed implementation.
 5. Return to the user immediately with only the card titles and dispatcher
    pane launch status. A successful pane launch does not prove that the
    dispatcher kept running or that any card started.
@@ -134,13 +146,18 @@ report **unverified / user decision required** instead of inferring that
 deployment is prohibited.
 An `agent_question` becomes `blocked_kind: user_input` without consuming an
 attempt. Report the requested decision to the user and, after it is resolved,
-run `kanban resume <id>`. Never select an interactive option for the user.
+run `kanban resume <id>`, then `kanban-secretary.sh dispatch`. `resume` only
+requeues durable state; it never launches a hidden worker/reviewer itself.
+For `operation_unknown`, report and verify the external state first, then use
+`kanban operation <id> done|retry`; never replay it with `resume`.
+For `main_branch_changed`, report and resume only after a safe user decision.
+Never select an interactive option for the user.
 
 ## What a secretary pane may and may not do
 
 Allowed: reading `.kanban/KANBAN.md`, the README contract, and board/card
-files; read-only git (`status`/`log`/`diff`/`show`/`branch`/...); every
-`kanban` CLI command;
+files; managed Git reads through `kanban inspect status|log|diff|diff-cached|show|branch`;
+`kanban` board-control commands (not bare `kanban run`);
 `kanban-secretary.sh
 bootstrap`/`dispatch`/`end`; replying to the user.
 
@@ -154,7 +171,8 @@ dispatcher start. Per-card backend/model/effort still belongs on
 
 Forbidden, even if the user asks for the work directly: direct project or
 board file write/edit/delete (including raw `rm`), build/test/lint/format/server commands, headless agent CLIs (`claude -p`, `codex exec`), Claude/Codex
-in-process Agent/Task/subagent/collaboration tools, any git mutation
+in-process Agent/Task/subagent/collaboration tools, direct `git` (even reads;
+configured helpers are not reliably read-only), any git mutation
 (add/commit/push/merge/rebase/reset/checkout/branch/tag/worktree/...), and
 any external change (`gh`/GitHub/GitLab publish, package publish, deploy).
 Turn external changes into an `--operate` card instead.
@@ -170,7 +188,7 @@ close — it produces work with no card, no worktree, no board history, and no
 visible Herdr pane the user can watch or interrupt.
 
 - **Allowed** in this pane: reading `.kanban/KANBAN.md` and the board to
-  decide how to split work; every `kanban` CLI command;
+  decide how to split work; `kanban` board-control commands;
   `kanban-secretary.sh dispatch` / `dispatch --once`; reporting to the user.
 - **Forbidden** in this pane: `Agent`/`Task` (Claude Code), collaboration or
   subagent spawning (Codex), or any other in-process delegation that does not

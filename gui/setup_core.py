@@ -23,7 +23,7 @@ SKILL_TARGETS = {
 LEGACY_SKILL_TARGETS = {
     "Codex": os.path.expanduser("~/.codex/skills/kanban-dispatch"),
 }
-TIMEOUT = 30
+TIMEOUT = 3
 
 # --- secretary direct-action guard -------------------------------------------
 # Claude Code has a real PreToolUse hook we can deny through (settings.json,
@@ -193,7 +193,7 @@ def _guard_command():
 
 
 def _is_guard_hook(hook):
-    return hook.get("type") == "command" and GUARD_HOOK_SCRIPT in hook.get("command", "")
+    return hook.get("type") == "command" and hook.get("command", "").strip() == _guard_command()
 
 
 def _read_json_settings(path):
@@ -318,11 +318,17 @@ def guard_status(settings_path=None):
     return {"claude": claude_guard_state(settings_path), "codex": "partial"}
 
 
+def _messages_ok(messages):
+    failures = ("失敗", "refus", "中止", "not a symlink", "残しました")
+    return not any(any(word in message for word in failures) for message in messages)
+
+
 def run_setup():
     if in_worktree():
-        return ["refused: kanban worktree 内"]
-    _, cli_msg = install_cli()
-    return [cli_msg] + install_skills(force=True) + [install_claude_guard()]
+        return False, ["refused: kanban worktree 内"]
+    cli_ok, cli_msg = install_cli()
+    messages = [cli_msg] + install_skills(force=True) + [install_claude_guard()]
+    return cli_ok and _messages_ok(messages), messages
 
 
 def _uninstall_cli():
@@ -365,11 +371,12 @@ def _remove_legacy_skills():
 
 def run_uninstall():
     if in_worktree():
-        return ["refused: kanban worktree 内"]
-    return [_uninstall_cli()] + [
+        return False, ["refused: kanban worktree 内"]
+    messages = [_uninstall_cli()] + [
         _uninstall_skill(name, directory)
         for name, directory in SKILL_TARGETS.items()
     ] + _remove_legacy_skills() + [uninstall_claude_guard()]
+    return _messages_ok(messages), messages
 
 
 # --- update (reinstall from current checkout) --------------------------------
@@ -377,6 +384,4 @@ def run_uninstall():
 
 def run_update():
     """Reinstall CLI/skills/guard from this checkout without Git operations."""
-    if in_worktree():
-        return False, ["refused: kanban worktree 内"]
-    return True, run_setup()
+    return run_setup()

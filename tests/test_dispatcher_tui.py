@@ -3,8 +3,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import signal
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -69,8 +71,16 @@ class DispatcherTuiTests(unittest.TestCase):
             dispatcher_tui.scan_board(str(self.root)), [], width=100
         )
         self.assertTrue(
-            any("AI:claude  MODEL:sonnet  EFFORT:high" in line for line in lines)
+            any("ACK:…  AI:claude  MODEL:sonnet  EFFORT:high" in line for line in lines)
         )
+
+        acknowledged = dict(started, event="agent_acknowledged")
+        with activity.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(acknowledged) + "\n")
+        lines = dispatcher_tui.render_header(
+            dispatcher_tui.scan_board(str(self.root)), [], width=100
+        )
+        self.assertTrue(any("ACK:✓" in line for line in lines))
 
         finished = dict(started, event="answer_accepted")
         with activity.open("a", encoding="utf-8") as handle:
@@ -81,6 +91,7 @@ class DispatcherTuiTests(unittest.TestCase):
         self.assertTrue(
             any("AI:unknown  MODEL:unknown  EFFORT:unknown" in line for line in lines)
         )
+        self.assertTrue(any("ACK:-" in line for line in lines))
 
     def test_board_move_becomes_a_timestamped_transition(self):
         card = self.card("todo", "c1", "表示を修正")
@@ -123,6 +134,33 @@ class DispatcherTuiTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
         self.assertIn("dispatcher child output", result.stdout)
         self.assertIn("dispatcher child output", log.read_text(encoding="utf-8"))
+
+    def test_terminating_plain_tui_also_terminates_dispatcher_child(self):
+        log = self.root / ".kanban" / "wt" / "dispatcher.log"
+        child_pid = self.root / "child.pid"
+        process = subprocess.Popen(
+            [
+                sys.executable, str(REPO / "dispatcher_tui.py"),
+                "--root", str(self.root), "--log", str(log), "--",
+                sys.executable, "-c",
+                "import os,time; open(%r,'w').write(str(os.getpid())); time.sleep(30)" % str(child_pid),
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
+        )
+        try:
+            for _ in range(100):
+                if child_pid.exists():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(child_pid.exists())
+            pid = int(child_pid.read_text())
+            process.send_signal(signal.SIGTERM)
+            process.wait(timeout=5)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
 
     def test_retired_monitor_command_is_absent_from_cli(self):
         result = subprocess.run(

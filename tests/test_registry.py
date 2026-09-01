@@ -222,6 +222,29 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("diagnosis_target_minutes: 5", content)
         self.assertIn("diagnosis_max_minutes: 10", content)
 
+    def test_send_operation_preserves_external_mutation_contract(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        r = self._run("send", "project-b", "deploy", "--operate", input_text="push main")
+        content = Path(r.stdout.strip()).read_text(encoding="utf-8")
+        self.assertIn("task_kind: operation", content)
+        self.assertIn("review_enabled: false", content)
+        self.assertIn("review_source: operation", content)
+
+    def test_send_rejects_multiple_task_kinds(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        r = self._run(
+            "send", "project-b", "bad", "--diagnose", "--operate",
+            input_text="x", check=False,
+        )
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self._card_files(self.b), [])
+
+    def test_send_empty_stdin_falls_back_to_title(self):
+        self._run("projects", "add", "project-b", str(self.b))
+        r = self._run("send", "project-b", "fallback task", input_text="")
+        content = Path(r.stdout.strip()).read_text(encoding="utf-8")
+        self.assertIn("## Task\n\nfallback task\n", content)
+
     def test_send_to_unregistered_alias_fails(self):
         r = self._run("send", "no-such-alias", "t", input_text="b", check=False)
         self.assertNotEqual(r.returncode, 0)

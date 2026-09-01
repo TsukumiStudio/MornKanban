@@ -130,7 +130,7 @@ def _active_agents(path):
                 card_id = event.get("card_id")
                 if not card_id:
                     continue
-                if event.get("event") == "agent_started":
+                if event.get("event") in ("agent_started", "agent_acknowledged"):
                     active[card_id] = event
                 elif event.get("event") in ("answer_accepted", "infra_error"):
                     current = active.get(card_id)
@@ -167,6 +167,11 @@ def scan_board(root):
                 "backend": agent.get("backend") or "unknown",
                 "model": agent.get("model") or "unknown",
                 "effort": agent.get("effort") or "unknown",
+                "ack": (
+                    "acknowledged" if agent.get("event") == "agent_acknowledged"
+                    else "pending" if agent.get("event") == "agent_started"
+                    else "not-started"
+                ),
             }
     active = sorted(
         (card for card in cards.values() if card["state"] in ACTIVE_STATES),
@@ -216,9 +221,10 @@ def render_header(snapshot, transitions, width, max_lines=10, status="RUNNING", 
         for card in visible_active:
             attempts = "%d/%d" % (card["attempts"], card["max_attempts"] or 0)
             lines.append(
-                "%s %-7s [%s] AI:%s  MODEL:%s  EFFORT:%s │ %s"
+                "%s %-7s [%s] ACK:%s  AI:%s  MODEL:%s  EFFORT:%s │ %s"
                 % (
                     STATE_MARK[card["state"]], STATE_LABEL[card["state"]], attempts,
+                    {"acknowledged": "✓", "pending": "…", "not-started": "-"}[card["ack"]],
                     card["backend"], card["model"], card["effort"], card["title"],
                 )
             )
@@ -264,13 +270,18 @@ def _start(command, root):
 def run_plain(root, log_path, command):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     process = _start(command, root)
-    with open(log_path, "w", encoding="utf-8") as log:
-        for line in process.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            log.write(line)
-            log.flush()
-    return process.wait()
+    try:
+        with open(log_path, "w", encoding="utf-8") as log:
+            for line in process.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log.write(line)
+                log.flush()
+        return process.wait()
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        _stop_process(process)
 
 
 def _stop_process(process):
@@ -404,9 +415,17 @@ def main(argv=None):
         and size.columns >= 40
         and size.lines >= 10
     )
-    if not use_tui:
-        return run_plain(root, log_path, command)
-    return curses.wrapper(run_tui, root, log_path, command)
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        if not use_tui:
+            return run_plain(root, log_path, command)
+        return curses.wrapper(run_tui, root, log_path, command)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

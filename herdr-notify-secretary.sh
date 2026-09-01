@@ -32,13 +32,15 @@ case $state in
     msg="カード「${title}」が failed になった。failed は作業プロセスの失敗であり、製品の検証不合格とは限らない。kanban show で failure_kind と History を確認し、製品不具合・インフラ障害・未検証を区別してユーザーへ報告して。"
     ;;
   blocked)
-    msg="カード「${title}」が blocked になった。kanban show で blocked_kind を確認して。dependency は依存先doneまで待機、review_infra は未検証としてユーザー判断が必要であり、デプロイ不可と推測しない。"
+    msg="カード「${title}」が blocked になった。kanban show で blocked_kind を確認して。dependency は依存先doneまで待機、review_infra は未検証として報告しデプロイ不可と推測しない。user_input/scope_timebox/operation_unknown/main_branch_changed は理由をユーザーへ報告し、勝手に再実行しない。"
     ;;
   *)
     msg="カード「${title}」が done (マージ済み) になった。盤面が全て決着していれば結果を簡潔に報告して。"
     ;;
 esac
-if ! err=$(herdr agent prompt "$sec" "$msg" 2>&1 >/dev/null); then
-  echo "herdr-notify-secretary: failed to notify '$sec': ${err:-herdr agent prompt failed}" >&2
-  exit 1
-fi
+for attempt in 1 2 3; do
+  if err=$(herdr agent prompt "$sec" "$msg" 2>&1 >/dev/null); then exit 0; fi
+  [[ $attempt -eq 3 ]] || sleep "$attempt"
+done
+echo "herdr-notify-secretary: failed to notify '$sec' after 3 attempts: ${err:-herdr agent prompt failed}" >&2
+exit 1

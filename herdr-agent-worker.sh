@@ -83,16 +83,26 @@ case $role in
   resolver) model=${KANBAN_RESOLVE_MODEL:-} ;;
   *) model=${KANBAN_CARD_MODEL:-} ;;
 esac
+# Old boards stored Claude's `sonnet` while leaving the backend on `auto`.
+# If auto resolves to Codex, do not pass that provider-specific name through.
+case "$backend:$model" in
+  codex:sonnet|codex:opus|codex:haiku) model="" ;;
+  claude:gpt-*|claude:o[0-9]*) model="" ;;
+esac
 if [[ $backend == claude && -z $model ]]; then model=sonnet; fi
 effort=${KANBAN_CARD_EFFORT:-}
 
 tmp=$(mktemp -d)
 pane=""
+ans=""
+ack=""
 pane_lock="${activity_log:-/tmp/mornkanban-${HERDR_TAB_ID:-tab}}.pane-layout.lock"
 pane_lock_owned=false
 cleanup() {
   if $pane_lock_owned; then rm -f "$pane_lock"; fi
   if [[ -n $pane ]]; then herdr pane close "$pane" >/dev/null 2>&1 || true; fi
+  [[ -n $ans ]] && rm -f "$ans"
+  [[ -n $ack ]] && rm -f "$ack"
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -121,10 +131,24 @@ card_id=${KANBAN_CARD_ID:-unknown}
 attempt=${KANBAN_CARD_ATTEMPT:-0}
 worktree=$(basename "$PWD")
 ident_line="KANBAN_ANSWER_ID: ${card_id}|${worktree}|${role}|${attempt}"
+ack_line="KANBAN_ACK_ID: ${card_id}|${worktree}|${role}|${attempt}"
 ans="$PWD/.kanban-answer.md"
-rm -f "$ans"
-printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にも書き込むこと。ファイルの1行目は必ず次の識別行そのままにし、2行目以降に回答本体を続けること: %s\nこの書き込みが完了するまでは応答を終えないこと。作業・編集はカレントディレクトリ (worktree) 内だけで行い、リポジトリ本体のチェックアウトを絶対パスで触らないこと。\n' \
-  "$ans" "$ident_line" >>"$tmp/prompt.md"
+ack="$PWD/.kanban-ack"
+rm -f "$ans" "$ack"
+if [[ $role == operator ]]; then
+  boundary='外部操作は現在の本体checkout内で行うこと。カード外の実装変更へ広げないこと。'
+else
+  boundary='作業・編集はカレントディレクトリ (worktree) 内だけで行い、リポジトリ本体のチェックアウトを絶対パスで触らないこと。'
+fi
+printf '\n\n追加指示: 最終回答 (レビューなら JSON オブジェクトそのもの) を、チャット出力だけでなくファイル %s にも書き込むこと。ファイルの1行目は必ず次の識別行そのままにし、2行目以降に回答本体を続けること: %s\nこの書き込みが完了するまでは応答を終えないこと。%s\n' \
+  "$ans" "$ident_line" "$boundary" >>"$tmp/prompt.md"
+printf 'この作業指示書を読んだ直後、作業開始前に %s へ次の1行をそのまま書くこと: %s\n' \
+  "$ack" "$ack_line" >>"$tmp/prompt.md"
+if [[ $role != reviewer ]]; then
+  cat >>"$tmp/prompt.md" <<'EOF'
+完了報告は、必要な先頭行 (BLOCKED/OPERATION_OK) の後に `## Summary`、`## Acceptance Criteria & Evidence`、`## Verification`、`## Changes`、`## Deviations & Decisions`、`## Follow-ups` の順で書くこと。実行したコマンドと結果を記し、未実施の検証を成功扱いしないこと。
+EOF
+fi
 
 jget() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1]))' "$1"; }
 
@@ -241,7 +265,7 @@ prompt_agent() {
   fi
 }
 
-prompt_agent "$(cat "$tmp/prompt.md")"
+prompt_agent "次の作業指示書を読み、ACK後に実行してください。WORK_ORDER: $tmp/prompt.md"
 log_activity agent_started running
 
 # A blocked status is only a real permission/question dialog when the visible
@@ -266,13 +290,13 @@ looks_like_agent_question() {
 # the agent is gone) before that happens, that is an infrastructure error,
 # not a completion.
 answer_stable() {
-  local f=$1 s1 s2
+  local f=$1 digest1 digest2
   [[ -s $f ]] || return 1
-  s1=$(wc -c <"$f" 2>/dev/null) || return 1
+  digest1=$(cksum <"$f" 2>/dev/null) || return 1
   sleep "$STABLE_SLEEP"
   [[ -s $f ]] || return 1
-  s2=$(wc -c <"$f" 2>/dev/null) || return 1
-  [[ $s1 == "$s2" ]]
+  digest2=$(cksum <"$f" 2>/dev/null) || return 1
+  [[ $digest1 == "$digest2" ]]
 }
 
 POLL_INTERVAL=${KANBAN_HERDR_POLL_INTERVAL:-3}
@@ -280,26 +304,87 @@ SETTLE_CHECKS=${KANBAN_HERDR_SETTLE_CHECKS:-2}
 STABLE_SLEEP=${KANBAN_HERDR_STABLE_SLEEP:-2}
 MAX_WAIT_SECS=${KANBAN_HERDR_ANSWER_WAIT_SECS:-${KANBAN_CARD_TIMEBOX_SECS:-1500}}
 MISSING_ANSWER_GRACE_SECS=${KANBAN_HERDR_MISSING_ANSWER_GRACE_SECS:-60}
+ACK_GRACE_SECS=${KANBAN_HERDR_ACK_GRACE_SECS:-180}
+GET_TIMEOUT_SECS=${KANBAN_HERDR_GET_TIMEOUT_SECS:-10}
 max_iters=$(python3 -c 'import math,sys; print(max(1, math.ceil(float(sys.argv[1]) / float(sys.argv[2]))))' "$MAX_WAIT_SECS" "$POLL_INTERVAL") ||
   infra_error wrapper_error "invalid poll/timeout settings: interval=$POLL_INTERVAL timeout=$MAX_WAIT_SECS"
 missing_answer_grace_iters=$(python3 -c 'import math,sys; print(max(1, math.ceil(float(sys.argv[1]) / float(sys.argv[2]))))' "$MISSING_ANSWER_GRACE_SECS" "$POLL_INTERVAL") ||
   infra_error wrapper_error "invalid missing-answer grace: interval=$POLL_INTERVAL grace=$MISSING_ANSWER_GRACE_SECS"
+timing_ms=$(python3 -c 'import sys; v=[float(x) for x in sys.argv[1:]]; assert all(x > 0 for x in v); print(*(max(1, round(x*1000)) for x in v))' "$ACK_GRACE_SECS" "$GET_TIMEOUT_SECS") ||
+  infra_error wrapper_error "invalid ACK/get timeout: ack=$ACK_GRACE_SECS get=$GET_TIMEOUT_SECS"
+read -r ack_grace_ms get_timeout_ms <<<"$timing_ms"
+monotonic_ms() { python3 -c 'import time; print(round(time.monotonic()*1000))'; }
+agent_get_with_timeout() { # agent_get_with_timeout <milliseconds>
+  python3 - "$name" "$1" <<'PY'
+import os, signal, subprocess, sys
+proc = subprocess.Popen(
+    ["/bin/bash", "-c", 'exec herdr agent get "$1"', "mornkanban", sys.argv[1]],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    encoding="utf-8", errors="replace", start_new_session=True,
+)
+try:
+    out, err = proc.communicate(timeout=int(sys.argv[2]) / 1000)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (PermissionError, ProcessLookupError):
+        proc.kill()
+    proc.wait()
+    print("herdr agent get timed out", file=sys.stderr)
+    raise SystemExit(124)
+sys.stdout.write(out)
+sys.stderr.write(err)
+raise SystemExit(proc.returncode)
+PY
+}
+prompted_ms=$(monotonic_ms) || infra_error wrapper_error "could not read monotonic clock"
+ack_deadline_ms=$((prompted_ms + ack_grace_ms))
 
 settle_count=0
 lost=0
 answer_ready=0
 answer_reprompted=0
 answer_reprompt_iter=0
+acknowledged=0
+acknowledge_if_present() {
+  if [[ $acknowledged -eq 0 && -s $ack && $(head -n 1 "$ack") == "$ack_line" ]]; then
+    acknowledged=1
+    log_activity agent_acknowledged running
+  fi
+}
 i=0
 while ((i < max_iters)); do
   i=$((i + 1))
-  get_out=$(herdr agent get "$name" 2>"$tmp/agent-get.err") || {
+  acknowledge_if_present
+  now_ms=$(monotonic_ms) || infra_error wrapper_error "could not read monotonic clock"
+  current_get_timeout_ms=$get_timeout_ms
+  if [[ $acknowledged -eq 0 ]]; then
+    remaining_ack_ms=$((ack_deadline_ms - now_ms))
+    if ((remaining_ack_ms <= 0)); then
+      infra_error unacknowledged "role=$role card=$card_id: agent did not acknowledge the work order within ${ACK_GRACE_SECS}s"
+    fi
+    ((remaining_ack_ms < current_get_timeout_ms)) && current_get_timeout_ms=$remaining_ack_ms
+  fi
+  get_status=0
+  get_out=$(agent_get_with_timeout "$current_get_timeout_ms" 2>"$tmp/agent-get.err") || get_status=$?
+  if ((get_status != 0)); then
     get_err=$(tail -n 1 "$tmp/agent-get.err" 2>/dev/null || true)
+    if [[ $get_status -eq 124 ]]; then
+      acknowledge_if_present
+      now_ms=$(monotonic_ms) || infra_error wrapper_error "could not read monotonic clock"
+      if [[ $acknowledged -eq 0 && $now_ms -lt $ack_deadline_ms ]]; then
+        i=$((i - 1))
+        continue
+      elif [[ $acknowledged -eq 0 ]]; then
+        infra_error unacknowledged "role=$role card=$card_id: agent did not acknowledge the work order within ${ACK_GRACE_SECS}s"
+      fi
+      infra_error agent_status_timeout "role=$role: ${get_err:-herdr agent get timed out}"
+    fi
     if grep -qiE "not found|no such (pane|agent)" <<<"$get_out"; then
       infra_error agent_not_found "role=$role: ${get_err:-agent was lost}"
     fi
     infra_error agent_not_found "role=$role: agent was lost (${get_err:-herdr agent get failed})"
-  }
+  fi
   st=$(jget 'd["result"]["agent"]["agent_status"]' <<<"$get_out" 2>/dev/null) || {
     infra_error wrapper_error "role=$role: could not parse agent status from herdr agent get"
   }
@@ -330,7 +415,7 @@ while ((i < max_iters)); do
       answer_ready=1
       break
     fi
-    if [[ ! -s $ans ]]; then
+    if [[ $acknowledged -eq 1 && ! -s $ans ]]; then
       if [[ $answer_reprompted -eq 0 ]]; then
         prompt_agent "作業本体は再実行せず、先ほどの最終回答ファイルの欠落だけを修復してください。$ans の1行目へ次の識別行をそのまま書き、2行目以降へ先ほどの最終回答（reviewerならJSONオブジェクトのみ）を書いてください: $ident_line"
         log_activity answer_reprompted running
@@ -365,12 +450,15 @@ fi
 # verified answer, never in place of one.
 first_line=$(head -n 1 "$ans")
 body=$(tail -n +2 "$ans")
-rm -f "$ans"   # keep it out of the card's git commit / merge
+rm -f "$ans" "$ack"   # keep protocol files out of the card's git commit / merge
 if [[ $first_line != "$ident_line" ]]; then
   infra_error stale_answer "role=$role: answer identity mismatch (expected ${ident_line}; got ${first_line:0:120})"
 fi
 if [[ -z $body ]]; then
   infra_error empty_answer "role=$role: answer body was empty after a valid identity line"
+fi
+if [[ $acknowledged -eq 0 ]]; then
+  log_activity agent_acknowledged implicit
 fi
 log_activity answer_accepted ok
 echo ""
