@@ -16,6 +16,7 @@ DEFAULT_MAX_ATTEMPTS=3
 DEFAULT_RESOLVE_MAX_ATTEMPTS=2
 DEFAULT_BACKEND=auto
 DEFAULT_MODEL=""
+DEFAULT_JOBS=4
 BACKENDS="claude codex"
 # A reviewer/resolver-reviewer that never returns a valid score (pane lost,
 # agent_not_found, timeout, wrapper/tool error) is an infrastructure failure,
@@ -314,7 +315,7 @@ resolve_max_attempts: 2
 review_infra_max_retries: 2
 review_infra_backoff_seconds: 2
 review_enabled: true
-jobs: 2
+jobs: 4
 diagnosis_target_minutes: 5
 diagnosis_max_minutes: 10
 # 既定は無制限権限 (worker/reviewer/resolver 共通)。
@@ -406,6 +407,7 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 
 - 秘書開始時は `$kanban-dispatch 秘書として開始` を使う。スキルが環境を実測し、以後の会話では対話エージェント自身が実装しない
 - カード追加後は `~/git/MornKanban/kanban-secretary.sh dispatch` を使う。bare `kanban run` へ置き換えない
+- worker並列数は既定4。`jobs:` / `KANBAN_JOBS` / `-j` は正の整数ならMornKanban側の上限なし（実機・API・Herdrの容量だけが制約）
 - Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
 - (例) failed カードは秘書がユーザーへ即報告する。resolving/blocked は実行側が
   自律的に処理するので、秘書は failed に落ちた時だけ介入する
@@ -1333,7 +1335,7 @@ cmd_run() {
     jobs_max=$jobs_env
     jobs_pinned=true
   else
-    jobs_max=$(fm_get "$KB/KANBAN.md" jobs 1)
+    jobs_max=$(fm_get "$KB/KANBAN.md" jobs "$DEFAULT_JOBS")
   fi
   while [[ $# -gt 0 ]]; do
     case $1 in

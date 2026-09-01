@@ -34,7 +34,7 @@ A secretary agent is started with **`$kanban-dispatch 秘書として開始`** (
 
 1. Run `kanban-secretary.sh bootstrap` from the MornKanban checkout. It runs `kanban init` when needed, verifies the current Herdr pane, and registers this agent as the notification target. It never overwrites an existing `KANBAN.md`.
 2. Read `.kanban/KANBAN.md` and the Dialogue-Agent Contract below.
-3. Reply with **one short line** (e.g. 「秘書モード開始。課題を待機中 (worker=claude/sonnet, -j 2)」) — no plan dumps.
+3. Reply with **one short line** (e.g. 「秘書モード開始。課題を待機中 (worker=claude/sonnet, -j 4)」) — no plan dumps.
 4. Treat the bootstrap request as active for the rest of the conversation. For each subsequent user request: split it into cards per policy, start the visible dispatcher, reply briefly, and return to waiting. Never implement in the dialogue session.
 5. React to card-settlement pushes (`KANBAN_NOTIFY_CMD`) per policy: inspect `failure_kind`/`blocked_kind` and History, distinguish product failure from infrastructure failure or unverified work, and summarize when the board settles.
 
@@ -220,10 +220,10 @@ A project's own explicit `claude_perms`/`codex_sandbox`/`codex_full_bypass`/`cod
 
 ## Dispatcher Behavior
 
-`kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel. Without `-j` or `KANBAN_JOBS`, the dispatcher uses `.kanban/KANBAN.md`'s `jobs:` value and re-reads it while running. Raising it fills new slots; lowering it keeps current jobs alive and only pauses new starts. In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:
+`kanban run [-j N] [--once]` processes `todo/`; `-j N` runs N cards in parallel. New boards default to `jobs: 4`. Any positive integer is accepted: MornKanban imposes no artificial upper limit, though the machine's process, memory, API, and Herdr capacity still apply. Without `-j` or `KANBAN_JOBS`, the dispatcher uses `.kanban/KANBAN.md`'s `jobs:` value and re-reads it while running. Raising it fills new slots; lowering it keeps current jobs alive and only pauses new starts. In a git repository every card gets its own worktree, so parallel cards never touch the same checkout:
 
 1. Create branch `kanban/<id>` and worktree `.kanban/wt/<id>` from the branch checked out at dispatch start.
-2. Pipe the card body (task + accumulated rework instructions) into the worker backend (a headless CLI or the visible Herdr wrapper) inside the worktree; commit the result on the card's branch.
+2. Pipe the task plus only the latest rework feedback into the worker backend (a headless CLI or the visible Herdr wrapper) inside the worktree; commit the result on the card's branch. Accumulated History stays on disk and is not resent.
 3. A separate review agent inspects the worktree itself (it must not trust the worker's claims) and outputs `{"score": 0-100, "feedback": "..."}`.
 4. `score >= threshold` (default 80) → merge into the base branch (merges are serialized by a lock), delete the branch and worktree, card → `done`. Below threshold, the feedback is appended and the worker retries **in the same worktree**; after `max_attempts` (default 3) the card moves to `failed` and the branch is kept for inspection.
 5. A merge conflict does **not** fail the card immediately. The card moves to `resolving` and a dedicated resolver role takes over — see below.
@@ -297,7 +297,7 @@ Each has a `KANBAN.md` frontmatter counterpart except the last three; the enviro
 | `KANBAN_CODEX_SANDBOX` | Codex worker/reviewer/resolver `-s` mode, used only when `KANBAN_CODEX_FULL_BYPASS=false` (default `danger-full-access`) |
 | `KANBAN_CODEX_FULL_BYPASS` | `true` (default) → `--dangerously-bypass-approvals-and-sandbox`; `false` → `-s <sandbox> -a <approval>` |
 | `KANBAN_CODEX_APPROVAL` | Codex worker/reviewer/resolver `-a` approval policy, used only when `KANBAN_CODEX_FULL_BYPASS=false` (default `never`) |
-| `KANBAN_JOBS` | Default parallelism for `kanban run` (overridden by `-j`) |
+| `KANBAN_JOBS` | Parallelism for `kanban run` (default 4; overridden by `-j`; any positive integer, no MornKanban upper cap) |
 | `KANBAN_DISPATCH_POLL_INTERVAL` | Dispatcher scheduling/config-refresh interval in seconds (default `1`; tests may use a smaller decimal value) |
 | `KANBAN_REVIEW_ENABLED` | `true`/`false` (aliases: `1`/`0`, `yes`/`no`, `on`/`off`); overrides `KANBAN.md`'s `review_enabled`, but a card's own explicit `--review`/`--no-review` still wins — see **Review on/off** above |
 | `KANBAN_WORKER_CMD` / `KANBAN_REVIEW_CMD` / `KANBAN_RESOLVE_CMD` | Full command overrides; use mock scripts to test state transitions without spending tokens |

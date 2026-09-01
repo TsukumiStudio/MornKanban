@@ -930,6 +930,38 @@ class PromptProjectionTests(unittest.TestCase):
                 self.assertNotIn("FEEDBACK_SENTINEL", prompt)
 
 
+class WorkerParallelismTests(unittest.TestCase):
+    def test_default_is_four_and_large_explicit_job_count_has_no_product_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            init = subprocess.run(
+                [str(KANBAN_SH), "init"], cwd=project,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(init.returncode, 0, init.stderr)
+            policy = (project / ".kanban" / "KANBAN.md").read_text(encoding="utf-8")
+            self.assertIn("jobs: 4", policy)
+            self.assertIn("worker並列数は既定4", policy)
+            skill = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("default to `jobs: 4`", skill)
+            self.assertIn("no MornKanban upper", skill)
+            _init_git_repo(project)
+            env = {
+                **os.environ,
+                "KANBAN_WORKER_CMD": "/usr/bin/true",
+                "KANBAN_REVIEW_ENABLED": "false",
+            }
+
+            run = subprocess.run(
+                [str(KANBAN_SH), "run", "--once", "-j", "1000000"], cwd=project,
+                text=True, capture_output=True, env=env, check=False,
+            )
+
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("Jobs: 1000000 (pinned", run.stdout)
+
+
 class HerdrAgentWorkerBackendTests(unittest.TestCase):
     """herdr-agent-worker.sh must pick --kind claude|codex from the card's own
     routing (KANBAN_CARD_BACKEND / KANBAN_REVIEWER), never a hardcoded
@@ -1525,7 +1557,7 @@ class DispatcherWorkflowTests(unittest.TestCase):
     def _run_live_jobs_case(self, *, pinned):
         cfg = self.project / ".kanban" / "KANBAN.md"
         text = cfg.read_text(encoding="utf-8")
-        text = text.replace("jobs: 2", "jobs: 1")
+        text = text.replace("jobs: 4", "jobs: 1")
         text = text.replace("review_enabled: true", "review_enabled: false")
         cfg.write_text(text, encoding="utf-8")
         events = Path(self.temp.name) / ("pinned-events" if pinned else "live-events")

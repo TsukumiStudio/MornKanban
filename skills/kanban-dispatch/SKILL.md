@@ -85,7 +85,9 @@ While secretary mode is active:
    `__MORNKANBAN_REPO__/kanban-secretary.sh dispatch "$PWD"`. The helper opens
    a separate Herdr dispatcher pane and binds the visible worker, reviewer,
    resolver, and secretary notification commands. Do not replace it with bare
-   `kanban run`.
+   `kanban run`. New boards default to `jobs: 4`; honor the project's live
+   `jobs:` value or an explicit user override, and impose no MornKanban upper
+   cap on a positive worker count.
 5. Return to the user immediately with only the card titles and dispatcher
    status.
 
