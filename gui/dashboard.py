@@ -463,8 +463,8 @@ GUIDE_FLOWS = [
     ),
     (
         "monitor 一時起動",
-        "どこからでも",
-        "kanban monitor",
+        "MornKanban checkout (kanban monitor はどこからでも)",
+        "./kanban-monitor.sh (kanban monitor と同じ)",
         "読み取り専用の監視サーバをフォアグラウンドで起動し、http://127.0.0.1:8787/ で閲覧可能にする (Ctrl+C で停止)",
         "何も変更しない (読み取り専用)",
         "すべての project board、registry、CLI/スキルの導入状態",

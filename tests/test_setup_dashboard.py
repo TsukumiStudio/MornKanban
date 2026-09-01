@@ -175,6 +175,8 @@ class DashboardModuleTests(unittest.TestCase):
             "send による別 project への投函", "monitor 一時起動", "monitor 常駐化",
         ):
             self.assertIn(expected, titles)
+        monitor_flow = next(flow for flow in self.dashboard.GUIDE_FLOWS if flow[0] == "monitor 一時起動")
+        self.assertIn("kanban-monitor.sh", monitor_flow[2])
 
 
 def _fake_status():

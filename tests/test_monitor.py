@@ -418,6 +418,13 @@ class LaunchAgentTest(unittest.TestCase):
 
 
 class KanbanShDispatchTest(unittest.TestCase):
+    def test_monitor_launcher_forwards_to_monitor_cli(self):
+        launcher = os.path.join(REPO, "kanban-monitor.sh")
+        self.assertTrue(os.access(launcher, os.X_OK))
+        result = subprocess.run([launcher, "--help"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage: kanban monitor run", result.stdout)
+
     def test_monitor_subcommand_listed_in_usage(self):
         result = subprocess.run(["bash", os.path.join(REPO, "kanban.sh"), "bogus-command"],
                                  capture_output=True, text=True)
