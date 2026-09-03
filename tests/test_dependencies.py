@@ -119,9 +119,14 @@ class DependencyWorkflowTests(unittest.TestCase):
 
     def test_discovered_dependency_uses_ordering_block_without_review_or_attempt(self):
         review_log = Path(self.temp.name) / "review.log"
+        notifications = Path(self.temp.name) / "notifications"
         worker = self._script("blocked-worker.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'BLOCKED: waiting for upstream\\n'\n")
         reviewer = self._script("forbidden-reviewer.sh", f"#!/usr/bin/env bash\ntouch '{review_log}'\n")
-        env = {**self.env, "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_CMD": str(reviewer)}
+        notify = self._script("notify.sh", "#!/usr/bin/env bash\nprintf '%s %s\\n' \"$1\" \"$2\" >> \"$NOTIFICATIONS\"\n")
+        env = {
+            **self.env, "KANBAN_WORKER_CMD": str(worker), "KANBAN_REVIEW_CMD": str(reviewer),
+            "KANBAN_NOTIFY_CMD": str(notify), "NOTIFICATIONS": str(notifications),
+        }
         self._add("discovered dependency")
 
         result = self._run("run", "--once", env=env)
@@ -133,6 +138,7 @@ class DependencyWorkflowTests(unittest.TestCase):
         self.assertIn("blocked_kind: ordering", text)
         self.assertIn("attempts: 0", text)
         self.assertFalse(review_log.exists())
+        self.assertIn("blocked discovered dependency", notifications.read_text(encoding="utf-8"))
 
     def test_model_start_error_is_unverified_block_without_attempt_or_review(self):
         review_log = Path(self.temp.name) / "review.log"

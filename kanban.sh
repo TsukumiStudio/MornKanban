@@ -1750,7 +1750,8 @@ process_card_seq() { # serialized operation cards run in the main checkout
     move_card "$file" blocked >/dev/null
     echo "    BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
     case $blocked_kind in
-      user_input|scope_timebox|operation_unknown|main_branch_changed) notify_result blocked "$title" ;;
+      dependency) : ;;
+      *) notify_result blocked "$title" ;;
     esac
     return
   fi
@@ -1871,7 +1872,8 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         move_card "$file" blocked >/dev/null
         echo "$tag BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
         case $blocked_kind in
-          user_input|scope_timebox|operation_unknown|main_branch_changed) notify_result blocked "$title" ;;
+          dependency) : ;;
+          *) notify_result blocked "$title" ;;
         esac
         return
       fi
