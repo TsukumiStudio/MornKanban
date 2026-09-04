@@ -129,10 +129,6 @@ def skill_status():
     }
 
 
-def skill_installed():
-    return all(skill_status().values())
-
-
 def in_worktree():
     return "/.git/kanban/wt/" in REPO
 
