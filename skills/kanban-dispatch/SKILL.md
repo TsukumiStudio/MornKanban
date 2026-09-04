@@ -97,8 +97,8 @@ While secretary mode is active:
    card, immediately run `kanban remove <card-id>` and then add the correct
    card; do not ask the user to run raw `rm`. This is also allowed when the
    user explicitly asks to discard an unstarted card. `kanban remove` is
-   intentionally limited to `backlog`/Ready and must never be used to erase execution
-   history.
+   intentionally limited to `backlog`/Ready/ordering blocked and must never
+   be used to erase execution history.
    Cards must never ask a visible worker to choose interactively. State a
    decision in the card when policy already answers it; otherwise require
    `BLOCKED: <needed decision and reason>` instead of `AskUserQuestion` or a
