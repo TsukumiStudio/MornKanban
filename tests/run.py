@@ -107,10 +107,15 @@ def main(argv=None):
         print("unknown tier %r (targeted|fast|full)" % tier, file=sys.stderr)
         return 2
 
+    results = []
     for label, command, timeout in steps:
         rc = run_step(label, command, timeout, env)
-        if rc:
-            return rc
+        results.append((label, rc))
+
+    failed = [label for label, rc in results if rc]
+    if failed:
+        print("FAILED steps: %s" % ", ".join(failed), file=sys.stderr)
+        return 1
     return 0
 
 
