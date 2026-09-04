@@ -836,6 +836,7 @@ EOF
 OPERATOR CONTRACT
 - You run in the project's main checkout, not a card worktree.
 - Perform only the Git, publish, deploy, or other external mutation explicitly authorized by this card.
+- Before pushing the parent repository, confirm every submodule's unpublished commits have been published to its remote.
 - Do not change implementation or create unrelated commits. Verify and report the actual remote/deploy result.
 - After verifying the real remote/deploy state, make the answer's first line: OPERATION_OK: <verified result>
 - Never ask an interactive question. On failure, uncertainty, or missing authority, make the answer's first line: BLOCKED: <reason>
@@ -1386,10 +1387,15 @@ preserve_submodule_objects() { # preserve_submodule_objects <worktree-path> -> f
   done < <(find "$modules_root" -type d -name objects 2>/dev/null)
 }
 
-verify_submodule_gitlinks() { # verify_submodule_gitlinks <topic-branch> <base-branch> -> 0 if every gitlink topic changed vs base is reachable in the shared modules/ store; else 1 with VERIFY_SUBMODULE_REASON set
-  local topic=$1 base=$2 mb common sha path
-  VERIFY_SUBMODULE_REASON=""
+submodule_gitlink_diff() { # submodule_gitlink_diff <topic-branch> <base-branch> -> "sha\tpath" lines for every gitlink topic changed vs their merge-base with base; no output if there is no common ancestor
+  local topic=$1 base=$2 mb
   mb=$(git -C "$ROOT" merge-base "$topic" "$base" 2>/dev/null) || return 0
+  git -C "$ROOT" diff --raw --no-abbrev "$mb" "$topic" -- 2>/dev/null | awk '$2=="160000"{print $4"\t"$NF}'
+}
+
+verify_submodule_gitlinks() { # verify_submodule_gitlinks <topic-branch> <base-branch> -> 0 if every gitlink topic changed vs base is reachable in the shared modules/ store; else 1 with VERIFY_SUBMODULE_REASON set
+  local topic=$1 base=$2 common sha path
+  VERIFY_SUBMODULE_REASON=""
   common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir) || return 0
   while IFS=$'\t' read -r sha path; do
     [[ -n $sha && -n $path ]] || continue
@@ -1399,8 +1405,33 @@ verify_submodule_gitlinks() { # verify_submodule_gitlinks <topic-branch> <base-b
       VERIFY_SUBMODULE_REASON="submodule '$path' gitlink $sha is unreachable in the shared object store ($common/modules/$path)"
       return 1
     fi
-  done < <(git -C "$ROOT" diff --raw --no-abbrev "$mb" "$topic" -- 2>/dev/null | awk '$2=="160000"{print $4"\t"$NF}')
+  done < <(submodule_gitlink_diff "$topic" "$base")
   return 0
+}
+
+submodule_publish_card_pending() { # submodule_publish_card_pending <path> -> 0 if an undispatched (backlog/todo) publish card already exists for that submodule path
+  local path=$1 f
+  for f in "$KB"/backlog/*.md "$KB"/todo/*.md; do
+    [[ -e $f ]] || continue
+    [[ $(fm_get "$f" title "") == "Publish submodule: $path" ]] && return 0
+  done
+  return 1
+}
+
+enqueue_submodule_publish_cards() { # enqueue_submodule_publish_cards <topic-branch> <base-branch> -> files an --operate backlog card per gitlink topic changed vs base, unless an undispatched card for that path already exists; merge is never blocked by this (best-effort, failures are logged and swallowed)
+  local topic=$1 base=$2 sha path
+  while IFS=$'\t' read -r sha path; do
+    [[ -n $sha && -n $path ]] || continue
+    submodule_publish_card_pending "$path" && continue
+    if ! printf 'packaged/non-packaged の判定と公開手順は ~/docs/morn/submodule-commit.md を参照する。\n' |
+      ( cmd_add "Publish submodule: $path" --operate --type operation \
+          --goal "submodule $path の commit を remote へ publish し、親リポの gitlink 参照切れを防ぐ" \
+          --ac "submodule $path の commit $sha が remote へ push されている" \
+          --scope "submodule $path の publish のみ。他のsubmoduleや親リポの実装変更は対象外" \
+          --context "path: $path / new sha: $sha" >/dev/null ); then
+      echo "warning: failed to enqueue submodule publish card for $path (sha $sha)" >&2
+    fi
+  done < <(submodule_gitlink_diff "$topic" "$base")
 }
 
 kanban_remove_worktree() { # kanban_remove_worktree <worktree-path> -> preserve submodule objects, then remove
@@ -1714,6 +1745,7 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
     merge_secs=$((SECONDS - merge_t0))
     fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
     echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
+    enqueue_submodule_publish_cards "$resolve_branch" "$base_branch"
     kanban_remove_worktree "$resolve_wt"
     git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
@@ -2034,6 +2066,7 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     merge_secs=$((SECONDS - merge_t0))
     fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
     echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
+    enqueue_submodule_publish_cards "$branch" "$base_branch"
     kanban_remove_worktree "$wt"
     git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
     rm -f "$KB/wt/$id.log"
