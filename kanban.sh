@@ -842,6 +842,16 @@ OPERATOR CONTRACT
 - Never ask an interactive question. On failure, uncertainty, or missing authority, make the answer's first line: BLOCKED: <reason>
 
 EOF
+  elif [[ -f $ROOT/.gitmodules ]]; then
+    cat <<'EOF'
+SUBMODULE CONTRACT
+- This project has submodules. If you change files inside a submodule, commit inside that submodule first.
+- Then, in the parent repo, explicitly `git add <submodule-path>` and commit the gitlink bump. Never use `git add -A` or `git add .`.
+- Do not push any submodule to its remote; publishing is a separate operator card's job.
+- A submodule with package.json (or src/package.json) at its root is packaged: it cannot be pushed directly to main (branch protection). You do not need to act on this now, but say in your answer that it happened.
+- In your answer, explicitly list every submodule you changed and how.
+
+EOF
   fi
   card_task "$file"
   feedback=$(latest_rework_feedback "$file")

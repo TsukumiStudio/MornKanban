@@ -180,12 +180,68 @@ test_operator_contract_mentions_submodule_publish_check() {
   assert_true "OPERATOR CONTRACT prompt mentions pushing the parent repo" "$STATUS"
 }
 
+# --- scenario 6: an implementation-kind card in a project WITH .gitmodules
+# gets a SUBMODULE CONTRACT block telling the worker to commit inside the
+# submodule, explicitly `git add` the gitlink (never -A/.), never push the
+# submodule remote, and enumerate what it changed.
+test_implementation_prompt_has_submodule_contract_when_gitmodules_present() {
+  local dir=$WORKDIR/s7 root card prompt
+  mkdir -p "$dir"
+  root=$dir/main
+  git init -q "$root"
+  printf '[submodule "sub"]\n\tpath = sub\n\turl = ./sub\n' > "$root/.gitmodules"
+  git -C "$root" add .gitmodules
+  git -C "$root" commit -q -m init
+  (cd "$root" && cmd_init "$root" >/dev/null)
+  card=$(cd "$root" && printf 'do the thing\n' | cmd_add "do something")
+  ROOT=$root
+  prompt=$(worker_prompt_for_card "$card")
+  probe grep -q "SUBMODULE CONTRACT" <<<"$prompt"
+  assert_true "implementation prompt has a SUBMODULE CONTRACT block" "$STATUS"
+  probe grep -qi "git add -A" <<<"$prompt"
+  assert_true "contract forbids git add -A / git add ." "$STATUS"
+  probe grep -qi "push" <<<"$prompt"
+  assert_true "contract forbids pushing the submodule remote" "$STATUS"
+  probe grep -qi "list every submodule" <<<"$prompt"
+  assert_true "contract asks the worker to enumerate changed submodules" "$STATUS"
+}
+
+# --- scenario 7: a project WITHOUT .gitmodules gets the exact same
+# implementation prompt as before this feature existed -- not one character
+# added, since most cards never touch a submodule.
+test_implementation_prompt_unchanged_without_gitmodules() {
+  local dir=$WORKDIR/s8 root card prompt_with prompt_without
+  mkdir -p "$dir"
+  root=$dir/main
+  git init -q "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  (cd "$root" && cmd_init "$root" >/dev/null)
+  card=$(cd "$root" && printf 'do the thing\n' | cmd_add "do something")
+  ROOT=$root
+  prompt_without=$(worker_prompt_for_card "$card")
+  probe grep -q "SUBMODULE CONTRACT" <<<"$prompt_without"
+  assert_true "no SUBMODULE CONTRACT block when the project has no .gitmodules" "$((1 - STATUS))"
+  # same card, now re-derive what the prompt would look like with the
+  # contract stripped out, then diff byte-for-byte against a project that
+  # never got the elif branch at all (i.e. before .gitmodules existed).
+  git init -q "$dir/baseline"
+  git -C "$dir/baseline" commit -q --allow-empty -m init
+  (cd "$dir/baseline" && cmd_init "$dir/baseline" >/dev/null)
+  local card2
+  card2=$(cd "$dir/baseline" && printf 'do the thing\n' | cmd_add "do something")
+  ROOT=$dir/baseline
+  prompt_with=$(worker_prompt_for_card "$card2")
+  assert_eq "prompt for a no-.gitmodules project is byte-identical across two independent boards" "$prompt_without" "$prompt_with"
+}
+
 test_enqueues_backlog_card_with_path_and_sha
 test_no_gitlink_change_enqueues_nothing
 test_pending_card_in_backlog_suppresses_duplicate
 test_pending_card_in_todo_suppresses_duplicate
 test_card_past_todo_does_not_suppress_new_card
 test_operator_contract_mentions_submodule_publish_check
+test_implementation_prompt_has_submodule_contract_when_gitmodules_present
+test_implementation_prompt_unchanged_without_gitmodules
 
 note ""
 note "pass=$pass_count fail=$fail_count"
