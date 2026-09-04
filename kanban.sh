@@ -1359,6 +1359,12 @@ merge_lock() { # merge_lock <acquire|release>
   fi
 }
 
+init_submodules() { # init_submodules <worktree-path> <log-file> -> git submodule update --init --recursive if the worktree has .gitmodules; no-op (and cheap) otherwise
+  local wt=$1 log=$2
+  [[ -f $wt/.gitmodules ]] || return 0
+  git -C "$wt" submodule update --init --recursive >>"$log" 2>&1
+}
+
 preserve_submodule_objects() { # preserve_submodule_objects <worktree-path> -> fetch worktree-local submodule commits into the shared modules/ store before the worktree is destroyed; no-op without submodules
   local wt=$1 wt_git_dir modules_root common objdir sub_gitdir rel target head
   [[ -d $wt ]] || return 0
@@ -1525,11 +1531,26 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   local initial_merge_error=false
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$resolve_branch" && [[ -d $resolve_wt ]]; then
     echo "$tag resuming existing resolve worktree/branch"
+    if ! init_submodules "$resolve_wt" "$KB/wt/$id.log"; then
+      echo "resolve submodule init failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
+      git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
+      fail_card "$file" infrastructure >/dev/null
+      echo "$tag FAIL resolve submodule init failed -> failed"
+      notify_result failed "$title"
+      return
+    fi
   elif ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
     echo "resolve worktree add failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
     git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
     fail_card "$file" infrastructure >/dev/null
     echo "$tag FAIL resolve worktree add failed -> failed"
+    notify_result failed "$title"
+    return
+  elif ! init_submodules "$resolve_wt" "$KB/wt/$id.log"; then
+    echo "resolve submodule init failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
+    git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
+    fail_card "$file" infrastructure >/dev/null
+    echo "$tag FAIL resolve submodule init failed -> failed"
     notify_result failed "$title"
     return
   else
@@ -1840,6 +1861,13 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
     echo "worktree add failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
     fail_card "$file" infrastructure >/dev/null
     echo "$tag FAIL worktree add failed -> failed"
+    notify_result failed "$title"
+    return
+  fi
+  if ! init_submodules "$wt" "$KB/wt/$id.log"; then
+    echo "submodule init failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
+    fail_card "$file" infrastructure >/dev/null
+    echo "$tag FAIL submodule init failed -> failed"
     notify_result failed "$title"
     return
   fi
