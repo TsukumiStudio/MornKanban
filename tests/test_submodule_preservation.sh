@@ -248,6 +248,35 @@ test_init_submodules_reports_and_logs_failure() {
   assert_true "init_submodules logs the failure instead of swallowing it" "$STATUS"
 }
 
+# --- scenario 9: the actual incident this card fixes -- a commit preserved
+# into the shared store (never pushed to the submodule's own origin) must be
+# checkoutable in a *new* worktree created after the original one is gone.
+# Before this card's fix, init_submodules only ran a plain `submodule update
+# --init`, which fetches from origin alone and never sees the shared store,
+# so the checkout failed with "unable to read tree" even though the object
+# was safe in COMMON/modules/subdir.
+test_checkout_in_new_worktree_after_recreation() {
+  local dir=$WORKDIR/s10 root wt gitlink wt2 log
+  mkdir -p "$dir"
+  read -r root wt gitlink < <(build_fixture "$dir")
+  ROOT=$root
+  # preserve, then destroy the worktree that holds the only copy of the
+  # commit -- the submodule's own origin never received it.
+  kanban_remove_worktree "$wt"
+  probe test ! -d "$wt"
+  assert_true "original worktree is gone" "$STATUS"
+
+  # a later card gets a brand new worktree on the same branch (the gitlink
+  # commit that points at $gitlink is already on kanban/wt1).
+  wt2=$dir/wt2
+  git -C "$root" worktree add -q "$wt2" kanban/wt1
+  log=$dir/init2.log
+  probe init_submodules "$wt2" "$log"
+  assert_true "init_submodules succeeds in the new worktree using the preserved commit" "$STATUS"
+  probe bash -c "[[ \$(git -C '$wt2/subdir' rev-parse HEAD 2>/dev/null) == '$gitlink' ]]"
+  assert_true "new worktree's submodule is checked out at the preserved gitlink sha" "$STATUS"
+}
+
 test_preserve_survives_worktree_removal
 test_without_preserve_object_is_lost
 test_kanban_remove_worktree_preserves_automatically
@@ -257,6 +286,7 @@ test_noop_without_submodules
 test_init_submodules_populates_after_worktree_add
 test_init_submodules_noop_without_gitmodules
 test_init_submodules_reports_and_logs_failure
+test_checkout_in_new_worktree_after_recreation
 
 note ""
 note "pass=$pass_count fail=$fail_count"

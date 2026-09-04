@@ -1360,10 +1360,29 @@ merge_lock() { # merge_lock <acquire|release>
   fi
 }
 
-init_submodules() { # init_submodules <worktree-path> <log-file> -> git submodule update --init --recursive if the worktree has .gitmodules; no-op (and cheap) otherwise
+init_submodules() { # init_submodules <worktree-path> <log-file> -> git submodule update --init --recursive if the worktree has .gitmodules; no-op (and cheap) otherwise. On failure, repairs each worktree-local submodule gitdir from any refs/kanban-preserve/* preserve_submodule_objects left in the shared store and retries once -- a commit only reachable there (never pushed to origin) can't be cloned by the plain update, but is now checkoutable once fetched in.
   local wt=$1 log=$2
   [[ -f $wt/.gitmodules ]] || return 0
+  git -C "$wt" submodule update --init --recursive >>"$log" 2>&1 && return 0
+  restore_preserved_submodule_refs "$wt" "$log"
   git -C "$wt" submodule update --init --recursive >>"$log" 2>&1
+}
+
+restore_preserved_submodule_refs() { # restore_preserved_submodule_refs <worktree-path> <log-file> -> best-effort: for each submodule gitdir the worktree already has (partially initialized by the failed update above), fetch refs/kanban-preserve/* from the shared modules/ store into it. Never fails the caller -- a shared-store fetch miss just leaves the plain origin path as-is for the caller's retry.
+  local wt=$1 log=$2 wt_git_dir common modules_root sub_gitdir rel target
+  wt_git_dir=$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 0
+  modules_root=$wt_git_dir/modules
+  [[ -d $modules_root ]] || return 0
+  common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir) || return 0
+  while IFS= read -r sub_gitdir; do
+    rel=${sub_gitdir#"$modules_root"/}
+    target=$common/modules/$rel
+    [[ -d $target ]] || continue
+    git -C "$target" for-each-ref --format='%(refname)' 'refs/kanban-preserve/' 2>/dev/null | grep -q . || continue
+    git -C "$sub_gitdir" fetch -q "$target" '+refs/kanban-preserve/*:refs/kanban-preserve/*' >>"$log" 2>&1 ||
+      echo "warning: failed to fetch preserved submodule refs for $rel from shared store $target" >>"$log"
+  done < <(find "$modules_root" -type d -name objects 2>/dev/null | sed 's#/objects$##')
+  return 0
 }
 
 preserve_submodule_objects() { # preserve_submodule_objects <worktree-path> -> fetch worktree-local submodule commits into the shared modules/ store before the worktree is destroyed; no-op without submodules
