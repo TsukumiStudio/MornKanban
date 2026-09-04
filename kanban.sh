@@ -62,12 +62,8 @@ cmd_install() { python3 "$SETUP_CLI" install; }
 cmd_update() { python3 "$SETUP_CLI" update; }
 cmd_uninstall() { python3 "$SETUP_CLI" uninstall; }
 
-find_root() {
-  kanban_project_root "$PWD"
-}
-
 require_root() {
-  ROOT=$(find_root) || die "Git repository required"
+  ROOT=$(kanban_project_root "$PWD") || die "Git repository required"
   KB=$(kanban_board_dir "$ROOT") || die "could not resolve the Git common directory"
   [[ -d $KB ]] || die "no board at $KB (run: kanban init)"
   load_project_config
