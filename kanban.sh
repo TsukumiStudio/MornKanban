@@ -1596,6 +1596,78 @@ record_resolve_attempt() { # record_resolve_attempt <card> <threshold> -> increm
   if $accepted; then printf 'outcome: accept\nscore: %s\n' "$ATT_SCORE" | append_history "$file" "accepted (resolve)"; fi
 }
 
+fail_wt_setup() { # fail_wt_setup <card> <id> <title> <reason> [extra_delete_branch]
+  # shared by process_card_wt / process_resolve_wt for worktree/submodule setup
+  # failures; extra_delete_branch is only passed by the resolver (to drop the
+  # original card_branch it was invoked with).
+  local file=$1 id=$2 title=$3 reason=$4 extra_branch=${5:-}
+  echo "$reason; see .git/kanban/wt/$id.log" | append_history "$file" "error"
+  [[ -n $extra_branch ]] && { git -C "$ROOT" branch -q -D "$extra_branch" 2>/dev/null || true; }
+  fail_card "$file" infrastructure >/dev/null
+  echo "[$title] FAIL $reason -> failed"
+  notify_result failed "$title"
+}
+
+merge_guard_main_branch() { # merge_guard_main_branch <card> <base_branch> <phase_desc>
+  # Shared by process_card_wt / process_resolve_wt: verifies the main
+  # checkout hasn't moved off base_branch since the merge lock was acquired.
+  # On mismatch does the blocked bookkeeping and returns 1; caller still owns
+  # its own status echo + notify_result (wording differs per caller).
+  local file=$1 base_branch=$2 phase_desc=$3
+  local current_branch
+  current_branch=$(git -C "$ROOT" symbolic-ref --short HEAD 2>/dev/null || true)
+  [[ $current_branch == "$base_branch" ]] && return 0
+  merge_lock release
+  fm_set "$file" blocked_kind main_branch_changed
+  printf 'main checkout branch changed from %s to %s before %s; no merge was attempted.\n' \
+    "$base_branch" "${current_branch:-detached}" "$phase_desc" | append_history "$file" "blocked (main branch changed)"
+  move_card "$file" blocked >/dev/null
+  return 1
+}
+
+merge_guard_submodule_gitlinks() { # merge_guard_submodule_gitlinks <card> <merge_branch> <base_branch> <kept_clause>
+  # kept_clause already carries correct is/are agreement, e.g. "branch foo is
+  # kept" or "resolve branch foo and original card branch bar are kept".
+  local file=$1 merge_branch=$2 base_branch=$3 kept_clause=$4
+  verify_submodule_gitlinks "$merge_branch" "$base_branch" && return 0
+  merge_lock release
+  printf '%s\n%s for manual inspection.\n' "$VERIFY_SUBMODULE_REASON" "$kept_clause" |
+    append_history "$file" "submodule objects unreachable"
+  fail_card "$file" merge >/dev/null
+  return 1
+}
+
+finish_already_merged() { # finish_already_merged <card> <wt> <base_branch> <branch...>
+  # Common bookkeeping when the target branch is already an ancestor of
+  # base_branch. Caller still handles anything asymmetric (e.g. process_card_wt
+  # additionally removes its log file here; the resolver does not).
+  local file=$1 wt=$2 base_branch=$3; shift 3
+  merge_lock release
+  kanban_remove_worktree "$wt"
+  git -C "$ROOT" branch -q -D "$@" 2>/dev/null || true
+  fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
+  echo "merge was already present on $base_branch" | append_history "$file" "merged"
+  move_card "$file" done >/dev/null
+}
+
+record_merge_duration() { # record_merge_duration <card> <merge_secs>
+  local file=$1 merge_secs=$2
+  fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
+  echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
+}
+
+finish_merge_cleanup() { # finish_merge_cleanup <card> <wt> <base_branch> <log_file> <branch...>
+  # First branch is the one just merged (enqueue target); all listed branches
+  # are deleted. Shared by process_card_wt / process_resolve_wt on merge success.
+  local file=$1 wt=$2 base_branch=$3 log_file=$4; shift 4
+  local merged_branch=$1
+  enqueue_submodule_publish_cards "$merged_branch" "$base_branch"
+  kanban_remove_worktree "$wt"
+  git -C "$ROOT" branch -q -D "$@" 2>/dev/null || true
+  rm -f "$log_file"
+  move_card "$file" done >/dev/null
+}
+
 process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <card_wt> <conflict_files>
   # Called when a card passed review but its branch conflicts with base at
   # merge time. Dedicated resolver role: never discards either side, keeps
@@ -1629,26 +1701,14 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$resolve_branch" && [[ -d $resolve_wt ]]; then
     echo "$tag resuming existing resolve worktree/branch"
     if ! init_submodules "$resolve_wt" "$KB/wt/$id.log"; then
-      echo "resolve submodule init failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
-      git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
-      fail_card "$file" infrastructure >/dev/null
-      echo "$tag FAIL resolve submodule init failed -> failed"
-      notify_result failed "$title"
+      fail_wt_setup "$file" "$id" "$title" "resolve submodule init failed" "$card_branch"
       return
     fi
   elif ! git -C "$ROOT" worktree add -q -b "$resolve_branch" "$resolve_wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
-    echo "resolve worktree add failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
-    git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
-    fail_card "$file" infrastructure >/dev/null
-    echo "$tag FAIL resolve worktree add failed -> failed"
-    notify_result failed "$title"
+    fail_wt_setup "$file" "$id" "$title" "resolve worktree add failed" "$card_branch"
     return
   elif ! init_submodules "$resolve_wt" "$KB/wt/$id.log"; then
-    echo "resolve submodule init failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
-    git -C "$ROOT" branch -q -D "$card_branch" 2>/dev/null || true
-    fail_card "$file" infrastructure >/dev/null
-    echo "$tag FAIL resolve submodule init failed -> failed"
-    notify_result failed "$title"
+    fail_wt_setup "$file" "$id" "$title" "resolve submodule init failed" "$card_branch"
     return
   else
     if ! git -C "$resolve_wt" merge --no-ff -q -m "kanban: merge $card_branch for conflict resolution" "$card_branch" \
@@ -1772,36 +1832,21 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   fi
 
   local merge_t0=$SECONDS merge_secs
-  local current_branch
   merge_lock acquire
-  current_branch=$(git -C "$ROOT" symbolic-ref --short HEAD 2>/dev/null || true)
-  if [[ $current_branch != "$base_branch" ]]; then
-    merge_lock release
-    fm_set "$file" blocked_kind main_branch_changed
-    printf 'main checkout branch changed from %s to %s before resolve merge; no merge was attempted.\n' "$base_branch" "${current_branch:-detached}" |
-      append_history "$file" "blocked (main branch changed)"
-    move_card "$file" blocked >/dev/null
+  if ! merge_guard_main_branch "$file" "$base_branch" "resolve merge"; then
     echo "$tag BLOCKED main branch changed -> blocked (resolve branch kept)"
     notify_result blocked "$title"
     return
   fi
   preserve_submodule_objects "$resolve_wt"
-  if ! verify_submodule_gitlinks "$resolve_branch" "$base_branch"; then
-    merge_lock release
-    printf '%s\nresolve branch %s and original card branch %s are kept for manual inspection.\n' \
-      "$VERIFY_SUBMODULE_REASON" "$resolve_branch" "$card_branch" | append_history "$file" "submodule objects unreachable"
-    fail_card "$file" merge >/dev/null
+  if ! merge_guard_submodule_gitlinks "$file" "$resolve_branch" "$base_branch" \
+    "resolve branch $resolve_branch and original card branch $card_branch are kept"; then
     echo "$tag FAIL submodule gitlink unreachable -> failed (branches $resolve_branch, $card_branch kept)"
     notify_result failed "$title"
     return
   fi
   if git -C "$ROOT" merge-base --is-ancestor "$resolve_branch" HEAD 2>/dev/null; then
-    merge_lock release
-    kanban_remove_worktree "$resolve_wt"
-    git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
-    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
-    echo "merge was already present on $base_branch" | append_history "$file" "merged"
-    move_card "$file" done >/dev/null
+    finish_already_merged "$file" "$resolve_wt" "$base_branch" "$resolve_branch" "$card_branch"
     echo "$tag PASS resolve -> done (merge was already present on $base_branch)"
     notify_result done "$title"
     return
@@ -1809,13 +1854,8 @@ process_resolve_wt() { # process_resolve_wt <card> <base_branch> <card_branch> <
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title (conflict resolved)" "$resolve_branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
     merge_secs=$((SECONDS - merge_t0))
-    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
-    echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
-    enqueue_submodule_publish_cards "$resolve_branch" "$base_branch"
-    kanban_remove_worktree "$resolve_wt"
-    git -C "$ROOT" branch -q -D "$resolve_branch" "$card_branch" 2>/dev/null || true
-    rm -f "$KB/wt/$id.log"
-    move_card "$file" done >/dev/null
+    record_merge_duration "$file" "$merge_secs"
+    finish_merge_cleanup "$file" "$resolve_wt" "$base_branch" "$KB/wt/$id.log" "$resolve_branch" "$card_branch"
     if [[ $review_enabled == true ]]; then
       echo "$tag PASS resolve score=$ATT_SCORE -> done (merged into $base_branch)"
     else
@@ -1964,17 +2004,11 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$branch" && [[ -d $wt ]]; then
     echo "$tag resuming existing worktree/branch after restart"
   elif ! git -C "$ROOT" worktree add -q -b "$branch" "$wt" "$base_branch" 2>>"$KB/wt/$id.log"; then
-    echo "worktree add failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
-    fail_card "$file" infrastructure >/dev/null
-    echo "$tag FAIL worktree add failed -> failed"
-    notify_result failed "$title"
+    fail_wt_setup "$file" "$id" "$title" "worktree add failed"
     return
   fi
   if ! init_submodules "$wt" "$KB/wt/$id.log"; then
-    echo "submodule init failed; see .git/kanban/wt/$id.log" | append_history "$file" "error"
-    fail_card "$file" infrastructure >/dev/null
-    echo "$tag FAIL submodule init failed -> failed"
-    notify_result failed "$title"
+    fail_wt_setup "$file" "$id" "$title" "submodule init failed"
     return
   fi
 
@@ -2108,37 +2142,21 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   fi
 
   local merge_t0=$SECONDS merge_secs
-  local current_branch
   merge_lock acquire
-  current_branch=$(git -C "$ROOT" symbolic-ref --short HEAD 2>/dev/null || true)
-  if [[ $current_branch != "$base_branch" ]]; then
-    merge_lock release
-    fm_set "$file" blocked_kind main_branch_changed
-    printf 'main checkout branch changed from %s to %s before merge; no merge was attempted.\n' "$base_branch" "${current_branch:-detached}" |
-      append_history "$file" "blocked (main branch changed)"
-    move_card "$file" blocked >/dev/null
+  if ! merge_guard_main_branch "$file" "$base_branch" "merge"; then
     echo "$tag BLOCKED main branch changed -> blocked (branch $branch kept)"
     notify_result blocked "$title"
     return
   fi
   preserve_submodule_objects "$wt"
-  if ! verify_submodule_gitlinks "$branch" "$base_branch"; then
-    merge_lock release
-    printf '%s\nbranch %s is kept for manual inspection.\n' "$VERIFY_SUBMODULE_REASON" "$branch" |
-      append_history "$file" "submodule objects unreachable"
-    fail_card "$file" merge >/dev/null
+  if ! merge_guard_submodule_gitlinks "$file" "$branch" "$base_branch" "branch $branch is kept"; then
     echo "$tag FAIL submodule gitlink unreachable -> failed (branch $branch kept)"
     notify_result failed "$title"
     return
   fi
   if git -C "$ROOT" merge-base --is-ancestor "$branch" HEAD 2>/dev/null; then
-    merge_lock release
-    kanban_remove_worktree "$wt"
-    git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
+    finish_already_merged "$file" "$wt" "$base_branch" "$branch"
     rm -f "$KB/wt/$id.log"
-    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
-    echo "merge was already present on $base_branch" | append_history "$file" "merged"
-    move_card "$file" done >/dev/null
     echo "$tag PASS -> done (merge was already present on $base_branch)"
     notify_result done "$title"
     return
@@ -2146,13 +2164,8 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
   if git -C "$ROOT" merge --no-ff -q -m "kanban: $title" "$branch" 2>>"$KB/wt/$id.log"; then
     merge_lock release
     merge_secs=$((SECONDS - merge_t0))
-    fm_set "$file" merged_at "$(date '+%Y-%m-%dT%H:%M:%S')"
-    echo "phase durations: merge=${merge_secs}s" | append_history "$file" "merged"
-    enqueue_submodule_publish_cards "$branch" "$base_branch"
-    kanban_remove_worktree "$wt"
-    git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
-    rm -f "$KB/wt/$id.log"
-    move_card "$file" done >/dev/null
+    record_merge_duration "$file" "$merge_secs"
+    finish_merge_cleanup "$file" "$wt" "$base_branch" "$KB/wt/$id.log" "$branch"
     if [[ $review_enabled == true ]]; then
       echo "$tag PASS score=$ATT_SCORE -> done (merged into $base_branch)"
     else
