@@ -11,6 +11,11 @@
 # directly) against real git repositories and worktrees. No mocks.
 set -euo pipefail
 
+# fixtures below use file:// submodule URLs (local sibling dirs); git blocks
+# that transport by default, so allow it for this test process only -- real
+# projects submodule over https/ssh and never touch this.
+export GIT_ALLOW_PROTOCOL=file
+
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 KANBAN_SH="$REPO/kanban.sh"
 
@@ -171,12 +176,87 @@ test_noop_without_submodules() {
   assert_true "verify_submodule_gitlinks no-ops without submodules" "$STATUS"
 }
 
+# --- fixture: a main repo with a submodule added, but *not* initialized
+# anywhere -- mirrors the state `git worktree add` leaves a fresh card
+# worktree in, before init_submodules runs.
+build_uninitialized_fixture() { # build_uninitialized_fixture <scenario-dir> -> echoes "root_repo worktree"
+  local dir=$1 sub main wt
+  sub=$dir/sub
+  main=$dir/main
+  git init -q "$sub"
+  git -C "$sub" commit -q --allow-empty -m "sub init"
+  git init -q "$main"
+  git -C "$main" commit -q --allow-empty -m "main init"
+  git -C "$main" -c protocol.file.allow=always submodule add -q "$sub" subdir
+  git -C "$main" commit -q -m "add submodule"
+  rm -rf "$main/.git/modules/subdir"
+  wt=$dir/wt1
+  git -C "$main" -c protocol.file.allow=always worktree add -q -b kanban/wt1 "$wt" master
+  printf '%s %s\n' "$main" "$wt"
+}
+
+# --- scenario 6: init_submodules, run right after `git worktree add` (the
+# real call sites in process_card_wt / process_resolve_wt), populates the
+# submodule directory in a project that has .gitmodules.
+test_init_submodules_populates_after_worktree_add() {
+  local dir=$WORKDIR/s7 root wt log
+  mkdir -p "$dir"
+  read -r root wt < <(build_uninitialized_fixture "$dir")
+  log=$dir/init.log
+  probe test -z "$(ls -A "$wt/subdir" 2>/dev/null)"
+  assert_true "submodule dir is empty right after worktree add (baseline)" "$STATUS"
+  probe init_submodules "$wt" "$log"
+  assert_true "init_submodules succeeds for a project with .gitmodules" "$STATUS"
+  probe test -n "$(ls -A "$wt/subdir" 2>/dev/null)"
+  assert_true "init_submodules populates the submodule directory" "$STATUS"
+}
+
+# --- scenario 7: a project without .gitmodules pays nothing -- no git
+# process spawned, no log written, early return.
+test_init_submodules_noop_without_gitmodules() {
+  local dir=$WORKDIR/s8 root wt log
+  mkdir -p "$dir"
+  root=$dir/main
+  git init -q "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  wt=$dir/wt1
+  git -C "$root" worktree add -q -b kanban/wt1 "$wt" master
+  log=$dir/init.log
+  probe init_submodules "$wt" "$log"
+  assert_true "init_submodules no-ops without .gitmodules" "$STATUS"
+  probe test ! -e "$log"
+  assert_true "init_submodules writes nothing when it no-ops" "$STATUS"
+}
+
+# --- scenario 8: init failure is surfaced (non-zero exit) and captured in
+# the log, not swallowed -- this is what call sites route into an
+# infrastructure fail_card.
+test_init_submodules_reports_and_logs_failure() {
+  local dir=$WORKDIR/s9 root wt log
+  mkdir -p "$dir"
+  read -r root wt < <(build_uninitialized_fixture "$dir")
+  log=$dir/init.log
+  # break the recorded submodule URL so `submodule update --init` fails.
+  # `submodule add` wrote submodule.subdir.url into the superproject's
+  # .git/config too (shared with this worktree) -- that takes precedence
+  # over .gitmodules, so both must be corrupted for the fetch to actually fail.
+  git -C "$wt" config -f "$wt/.gitmodules" submodule.subdir.url "$dir/does-not-exist"
+  git -C "$wt" config submodule.subdir.url "$dir/does-not-exist"
+  probe init_submodules "$wt" "$log"
+  assert_false "init_submodules reports failure when the submodule can't be fetched" "$STATUS"
+  probe test -s "$log"
+  assert_true "init_submodules logs the failure instead of swallowing it" "$STATUS"
+}
+
 test_preserve_survives_worktree_removal
 test_without_preserve_object_is_lost
 test_kanban_remove_worktree_preserves_automatically
 test_verify_gate_reflects_preservation_state
 test_verify_gate_passes_when_preserved
 test_noop_without_submodules
+test_init_submodules_populates_after_worktree_add
+test_init_submodules_noop_without_gitmodules
+test_init_submodules_reports_and_logs_failure
 
 note ""
 note "pass=$pass_count fail=$fail_count"
