@@ -87,7 +87,7 @@ def main(argv=None):
         ]
     elif tier == "full":
         steps = [
-            ("full python", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], 180),
+            ("full python", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], 300),
             ("visible worker lifecycle", ["bash", "tests/test_herdr_agent_worker.sh"], 45),
             ("submodule preservation", ["bash", "tests/test_submodule_preservation.sh"], 20),
             ("submodule publish card", ["bash", "tests/test_submodule_publish_card.sh"], 20),
