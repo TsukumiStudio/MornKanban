@@ -78,25 +78,6 @@ COMMANDS = {
 }
 
 
-def status_summary():
-    """Plain compatibility summary for callers that import it directly."""
-    lines = []
-    deps = check_deps()
-    lines.append(
-        "deps: " + ", ".join("%s=%s" % (k, "OK" if v else "NG") for k, v in deps.items())
-    )
-    lines.append("kanban CLI: %s" % ("導入済み" if cli_installed() else "未導入"))
-    for name, installed in skill_status().items():
-        lines.append("%s スキル: %s" % (name, "導入済み" if installed else "未導入"))
-    guard = guard_status()
-    lines.append(
-        "秘書ガード (直接実装/検証/Git変更/外部公開/in-process delegation の拒否): claude=%s, codex=%s"
-        % (guard["claude"], guard["codex"])
-    )
-    lines.append("導入後は『$kanban-dispatch 秘書として開始』または『$kanban-report 今日』")
-    return "\n".join(lines)
-
-
 def prompt(text):
     try:
         return input(text)
