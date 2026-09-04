@@ -11,7 +11,9 @@ REPO = Path(__file__).resolve().parents[1]
 KANBAN = REPO / "kanban.sh"
 
 
-class DependencyWorkflowTests(unittest.TestCase):
+class KanbanBoardTestCase(unittest.TestCase):
+    """Shared board fixture; holds no test_* methods of its own."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
@@ -66,6 +68,15 @@ class DependencyWorkflowTests(unittest.TestCase):
     def _cards(self, state):
         return list((self.project / ".git" / "kanban" / state).glob("*.md"))
 
+    def _find_by_id(self, card_id):
+        for state in ("backlog", "todo", "doing", "review", "resolving", "blocked", "done", "failed"):
+            for f in (self.project / ".git" / "kanban" / state).glob("*.md"):
+                if self._id(f) == card_id:
+                    return f
+        return None
+
+
+class DependencyWorkflowTests(KanbanBoardTestCase):
     def test_declared_dependency_waits_without_attempt_then_auto_resumes_on_done(self):
         upstream = self._add("upstream")
         downstream = self._add("downstream", "--depends-on", self._id(upstream))
@@ -182,6 +193,147 @@ class DependencyWorkflowTests(unittest.TestCase):
         failed = self._cards("failed")
         self.assertEqual(len(failed), 1)
         self.assertIn("failure_kind: review", failed[0].read_text(encoding="utf-8"))
+
+
+class OrderingStallTests(KanbanBoardTestCase):
+    """Ordering blocks that never resolve must stop being re-dispatched, without
+    catching legitimate ordering waits that clear up on their own (see
+    kanban.sh record_ordering_block / DEFAULT_ORDERING_STALL_REPEATS)."""
+
+    def setUp(self):
+        super().setUp()
+        self.env["KANBAN_ORDERING_STALL_REPEATS"] = "3"
+
+    def test_same_reason_repeated_to_threshold_stalls_and_stops_being_reclaimed(self):
+        worker = self._script("always-blocked.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'BLOCKED: no diagnosis target specified\\n'\n")
+        env = {**self.env, "KANBAN_WORKER_CMD": str(worker)}
+        card = self._add("probe with no target")
+        card_id = self._id(card)
+
+        for _ in range(3):
+            result = self._run("run", "--once", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        blocked = self._find_by_id(card_id)
+        self.assertIsNotNone(blocked)
+        text = blocked.read_text(encoding="utf-8")
+        self.assertIn("blocked_kind: ordering_stalled", text)
+        self.assertIn("ordering_block_repeat: 3", text)
+        self.assertEqual(self.worker_log.exists(), False)
+
+        # A further dispatch must not reclaim or re-run the stalled card.
+        before_mtime = blocked.stat().st_mtime_ns
+        result = self._run("run", "--once", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        still_blocked = self._find_by_id(card_id)
+        self.assertIsNotNone(still_blocked)
+        self.assertEqual(still_blocked, blocked)
+        self.assertEqual(still_blocked.stat().st_mtime_ns, before_mtime)
+
+    def test_changed_reason_resets_repeat_count_and_never_stalls(self):
+        counter = Path(self.temp.name) / "reason.count"
+        worker = self._script(
+            "changing-reason.sh",
+            "#!/usr/bin/env bash\ncat >/dev/null\n"
+            "n=$(($(cat \"$COUNTER_FILE\" 2>/dev/null || echo 0) + 1))\n"
+            "echo \"$n\" > \"$COUNTER_FILE\"\n"
+            "if [ \"$n\" -le 2 ]; then printf 'BLOCKED: reason-a\\n'; else printf 'BLOCKED: reason-b\\n'; fi\n",
+        )
+        env = {**self.env, "KANBAN_WORKER_CMD": str(worker), "COUNTER_FILE": str(counter)}
+        card = self._add("flip-flopping reason")
+        card_id = self._id(card)
+
+        for _ in range(4):
+            result = self._run("run", "--once", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        blocked = self._find_by_id(card_id)
+        self.assertIsNotNone(blocked)
+        text = blocked.read_text(encoding="utf-8")
+        self.assertIn("blocked_kind: ordering\n", text)
+        self.assertIn("ordering_block_repeat: 2", text)
+
+    def test_legit_ordering_wait_resolves_before_stall_threshold(self):
+        counter = Path(self.temp.name) / "attempt.count"
+        worker = self._script(
+            "resolves-on-third.sh",
+            "#!/usr/bin/env bash\ncat >/dev/null\n"
+            "n=$(($(cat \"$COUNTER_FILE\" 2>/dev/null || echo 0) + 1))\n"
+            "echo \"$n\" > \"$COUNTER_FILE\"\n"
+            "if [ \"$n\" -le 2 ]; then printf 'BLOCKED: waiting for upstream to merge\\n'; "
+            "else printf '%s\\n' \"$KANBAN_CARD_TITLE\" >> \"$WORKER_LOG\"; fi\n",
+        )
+        env = {**self.env, "KANBAN_WORKER_CMD": str(worker), "COUNTER_FILE": str(counter)}
+        card = self._add("downstream waiting on a real merge")
+        card_id = self._id(card)
+
+        for _ in range(3):
+            result = self._run("run", "--once", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        done = self._find_by_id(card_id)
+        self.assertIsNotNone(done)
+        self.assertTrue(str(done).endswith(f"done/{done.name}") or done.parent.name == "done")
+        self.assertEqual(self.worker_log.read_text(encoding="utf-8").strip(), "downstream waiting on a real merge")
+
+    def test_resume_clears_stalled_ordering_block_and_repeat_count(self):
+        worker = self._script("always-blocked.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'BLOCKED: no diagnosis target specified\\n'\n")
+        env = {**self.env, "KANBAN_WORKER_CMD": str(worker)}
+        card = self._add("stuck probe")
+        card_id = self._id(card)
+        for _ in range(3):
+            self.assertEqual(self._run("run", "--once", env=env).returncode, 0)
+        self.assertIn("blocked_kind: ordering_stalled", self._find_by_id(card_id).read_text(encoding="utf-8"))
+
+        result = self._run("resume", card_id)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        card_after = self._find_by_id(card_id)
+        self.assertEqual(card_after.parent.name, "todo")
+        text = card_after.read_text(encoding="utf-8")
+        self.assertIn("blocked_kind: \n", text)
+        self.assertIn("ordering_block_repeat: 0", text)
+
+    def test_remove_deletes_an_ordering_blocked_card(self):
+        worker = self._script("always-blocked.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'BLOCKED: waiting for upstream\\n'\n")
+        env = {**self.env, "KANBAN_WORKER_CMD": str(worker)}
+        card = self._add("disposable ordering block")
+        card_id = self._id(card)
+        self.assertEqual(self._run("run", "--once", env=env).returncode, 0)
+        blocked = self._find_by_id(card_id)
+        self.assertEqual(blocked.parent.name, "blocked")
+
+        result = self._run("remove", card_id)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(self._find_by_id(card_id))
+
+    def test_list_marks_stalled_ordering_card_as_needing_user_judgment(self):
+        worker = self._script("always-blocked.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'BLOCKED: no diagnosis target specified\\n'\n")
+        env = {**self.env, "KANBAN_WORKER_CMD": str(worker)}
+        self._add("stalled and visible")
+        for _ in range(3):
+            self.assertEqual(self._run("run", "--once", env=env).returncode, 0)
+
+        result = self._run("list")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ordering_stalled", result.stdout)
+        self.assertIn("user judgment needed", result.stdout)
+
+    def test_ordering_blocked_card_with_no_repeats_yet_is_not_stalled_and_stays_dispatchable(self):
+        worker = self._script("always-blocked.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf 'BLOCKED: waiting for upstream\\n'\n")
+        env = {**self.env, "KANBAN_WORKER_CMD": str(worker)}
+        self._add("first block only")
+
+        result = self._run("run", "--once", env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        blocked = self._cards("blocked")
+        self.assertEqual(len(blocked), 1)
+        text = blocked[0].read_text(encoding="utf-8")
+        self.assertIn("blocked_kind: ordering\n", text)
+        self.assertIn("ordering_block_repeat: 1", text)
 
 
 if __name__ == "__main__":

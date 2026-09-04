@@ -27,6 +27,11 @@ DEFAULT_REVIEW_INFRA_MAX_RETRIES=2
 DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=2
 DEFAULT_DIAGNOSIS_TARGET_MINUTES=5
 DEFAULT_DIAGNOSIS_MAX_MINUTES=10
+# A worker-reported `ordering` block that repeats the identical reason this
+# many times in a row never resolves on its own (e.g. a probe card with no
+# body); it is parked as `ordering_stalled` instead of being reclaimed to
+# todo forever. A changed reason resets the count -- see record_ordering_block.
+DEFAULT_ORDERING_STALL_REPEATS=3
 # review_enabled priority: card override > environment > project policy > true.
 PROJECT_REVIEW_ENABLED=""
 
@@ -81,6 +86,7 @@ load_project_config() { # .git/kanban/KANBAN.md frontmatter -> defaults (env sti
   if [[ ! -f $cfg ]]; then
     [[ -n ${KANBAN_REVIEW_INFRA_MAX_RETRIES:-} ]] && DEFAULT_REVIEW_INFRA_MAX_RETRIES=$KANBAN_REVIEW_INFRA_MAX_RETRIES
     [[ -n ${KANBAN_REVIEW_INFRA_BACKOFF_SECONDS:-} ]] && DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=$KANBAN_REVIEW_INFRA_BACKOFF_SECONDS
+    [[ -n ${KANBAN_ORDERING_STALL_REPEATS:-} ]] && DEFAULT_ORDERING_STALL_REPEATS=$KANBAN_ORDERING_STALL_REPEATS
     [[ -z ${KANBAN_REVIEW_MODEL:-} ]] && export KANBAN_REVIEW_MODEL=$DEFAULT_REVIEW_MODEL
     return 0
   fi
@@ -97,6 +103,7 @@ load_project_config() { # .git/kanban/KANBAN.md frontmatter -> defaults (env sti
   # useful to override ad hoc, e.g. from a test or a CI job).
   [[ -n ${KANBAN_REVIEW_INFRA_MAX_RETRIES:-} ]] && DEFAULT_REVIEW_INFRA_MAX_RETRIES=$KANBAN_REVIEW_INFRA_MAX_RETRIES
   [[ -n ${KANBAN_REVIEW_INFRA_BACKOFF_SECONDS:-} ]] && DEFAULT_REVIEW_INFRA_BACKOFF_SECONDS=$KANBAN_REVIEW_INFRA_BACKOFF_SECONDS
+  [[ -n ${KANBAN_ORDERING_STALL_REPEATS:-} ]] && DEFAULT_ORDERING_STALL_REPEATS=$KANBAN_ORDERING_STALL_REPEATS
   cfg_env "$cfg" backend_order KANBAN_BACKEND_ORDER
   cfg_env "$cfg" reviewer KANBAN_REVIEWER
   cfg_env "$cfg" review_model KANBAN_REVIEW_MODEL
@@ -367,6 +374,19 @@ fail_card() { # fail_card <card> <infrastructure|worker|review|resolve|merge|dis
   move_card "$1" failed
 }
 
+record_ordering_block() { # record_ordering_block <card> <reason> -> echoes consecutive same-reason count
+  local file=$1 reason=$2 prev_reason prev_count count
+  prev_reason=$(fm_get "$file" ordering_block_reason "")
+  prev_count=$(fm_get "$file" ordering_block_repeat 0)
+  if [[ -n $prev_reason && $reason == "$prev_reason" ]]; then
+    count=$((prev_count + 1))
+  else
+    count=1
+  fi
+  fm_update "$file" ordering_block_reason "$reason" ordering_block_repeat "$count"
+  echo "$count"
+}
+
 cmd_init() {
   local target=${1:-$PWD} base
   ROOT=$(kanban_project_root "$target") || die "Git repository required; initialize Git yourself before kanban init"
@@ -502,12 +522,14 @@ resolver ロールも同じ `claude_perms` / `codex_*` キーを使い、worker/
 - worker並列数は既定4。`jobs:` / `KANBAN_JOBS` / `-j` は正の整数ならMornKanban側の上限なし（実機・API・Herdrの容量だけが制約）
 - 秘書はユーザー指示による運用変更を `kanban config set jobs|default_backend|default_model|reviewer|review_model|resolver|resolve_model <value>` で行ってよい。project/boardファイルを直接編集しない
 - 秘書は `kanban` のboard管理コマンドを実行してよい。`kanban run` だけは使わずvisible dispatchを使う。push/deploy等の直接実行はせず、`--operate` カードへ渡す
-- 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはbacklog/Ready以外を拒否する
+- 秘書自身が誤作成したカード、またはユーザーが破棄を指示した未着手カードは `kanban remove <id>` で即座に回収する。このコマンドはbacklog/todo/ordering (`ordering`/`ordering_stalled`) blocked 以外を拒否する
 - Herdr は必須。実行モードを質問せず、利用不能なら停止・報告する。headless へフォールバックしない
 - `dispatcher pane started` はペインへの起動要求が通っただけ。`dispatcher_failed` 通知時は `.git/kanban/wt/dispatcher.log` を読み、実際の終了理由を報告する。復旧目的でも `git init` / `commit` 等を勝手に行わない
 - failed は秘書が即報告する。`blocked_kind: dependency` は自動再開、`user_input` / `scope_timebox` /
   `review_infra` は判断・復旧後に `kanban resume <id>` してdispatchする。`operation_unknown` は外部状態を確認し、
-  成功済みなら `kanban operation <id> done`、安全に再試行できる時だけ `kanban operation <id> retry` を使う
+  成功済みなら `kanban operation <id> done`、安全に再試行できる時だけ `kanban operation <id> retry` を使う。
+  `ordering` は同じ理由で既定3回繰り返すと `ordering_stalled` になりdispatch対象から外れる
+  (`kanban list` に "user judgment needed" と出る)。`kanban resume <id>` で再投入するか `kanban remove <id>` で処分する
 
 ## 秘書ペインの許可/禁止 (技術的ガード付き、詳細は MornKanban README の Secretary Guard)
 
@@ -778,7 +800,14 @@ cmd_remove() {
   [[ ${#hits[@]} -eq 1 ]] || die "'$wanted' matches multiple cards; use the full id"
   file=${hits[0]}
   state=$(basename "$(dirname "$file")")
-  [[ $state == backlog || $state == todo ]] || die "only todo cards or backlog cards can be removed (card is $state)"
+  if [[ $state == blocked ]]; then
+    case $(fm_get "$file" blocked_kind "") in
+      ordering|ordering_stalled) ;;
+      *) die "only todo cards, backlog cards, or ordering-blocked cards can be removed (card is $state)" ;;
+    esac
+  elif [[ $state != backlog && $state != todo ]]; then
+    die "only todo cards or backlog cards can be removed (card is $state)"
+  fi
   id=$(fm_get "$file" id "?")
   title=$(fm_get "$file" title "?")
   rm "$file"
@@ -871,10 +900,18 @@ cmd_list() {
     [[ -e ${files[0]} ]] || continue
     echo "[$s]"
     for f in "${files[@]}"; do
-      local review_value review_label
+      local review_value review_label blocked_note=""
       review_value=$(effective_review_enabled "$f")
       if [[ $review_value == false ]]; then review_label="Review: OFF (fast iteration)"; else review_label="Review: ON"; fi
-      printf '  %s  %s (attempts: %s) [%s]\n' "$(fm_get "$f" id ?)" "$(fm_get "$f" title ?)" "$(fm_get "$f" attempts 0)" "$review_label"
+      if [[ $s == blocked ]]; then
+        local bkind
+        bkind=$(fm_get "$f" blocked_kind "?")
+        blocked_note="  blocked: $bkind"
+        if [[ $bkind == ordering_stalled ]]; then
+          blocked_note="$blocked_note (user judgment needed; kanban resume or kanban remove)"
+        fi
+      fi
+      printf '  %s  %s (attempts: %s) [%s]%s\n' "$(fm_get "$f" id ?)" "$(fm_get "$f" title ?)" "$(fm_get "$f" attempts 0)" "$review_label" "$blocked_note"
     done
   done
 }
@@ -1825,9 +1862,17 @@ process_card_seq() { # serialized operation cards run in the main checkout
     return
   fi
   if [[ -n $ATT_BLOCKED_REASON ]]; then
-    local blocked_kind=${ATT_BLOCKED_KIND:-ordering}
+    local blocked_kind=${ATT_BLOCKED_KIND:-ordering} ordering_note=""
+    if [[ $blocked_kind == ordering ]]; then
+      local ordering_repeat
+      ordering_repeat=$(record_ordering_block "$file" "$ATT_BLOCKED_REASON")
+      if [[ $ordering_repeat -ge $DEFAULT_ORDERING_STALL_REPEATS ]]; then
+        blocked_kind=ordering_stalled
+        ordering_note=" same reason repeated ${ordering_repeat}x with no progress; not re-dispatched. Use kanban resume or kanban remove."
+      fi
+    fi
     fm_set "$file" blocked_kind "$blocked_kind"
-    printf 'worker stopped without consuming an attempt (kind: %s):%s\n' "$blocked_kind" "$ATT_BLOCKED_REASON" |
+    printf 'worker stopped without consuming an attempt (kind: %s):%s\n%s\n' "$blocked_kind" "$ATT_BLOCKED_REASON" "$ordering_note" |
       append_history "$file" "blocked"
     move_card "$file" blocked >/dev/null
     echo "    BLOCKED kind=$blocked_kind ->$ATT_BLOCKED_REASON"
@@ -1952,10 +1997,18 @@ process_card_wt() { # git mode: own worktree/branch, retries in place, merge on 
         break
       fi
       if [[ -n $ATT_BLOCKED_REASON ]]; then
-        local blocked_kind=${ATT_BLOCKED_KIND:-ordering}
+        local blocked_kind=${ATT_BLOCKED_KIND:-ordering} ordering_note=""
+        if [[ $blocked_kind == ordering ]]; then
+          local ordering_repeat
+          ordering_repeat=$(record_ordering_block "$file" "$ATT_BLOCKED_REASON")
+          if [[ $ordering_repeat -ge $DEFAULT_ORDERING_STALL_REPEATS ]]; then
+            blocked_kind=ordering_stalled
+            ordering_note=" same reason repeated ${ordering_repeat}x with no progress; not re-dispatched. Use kanban resume or kanban remove."
+          fi
+        fi
         fm_set "$file" blocked_kind "$blocked_kind"
-        printf 'worker stopped without consuming an attempt (kind: %s):%s\nworktree is discarded.\n' \
-          "$blocked_kind" "$ATT_BLOCKED_REASON" | append_history "$file" "blocked"
+        printf 'worker stopped without consuming an attempt (kind: %s):%s\nworktree is discarded.\n%s\n' \
+          "$blocked_kind" "$ATT_BLOCKED_REASON" "$ordering_note" | append_history "$file" "blocked"
         kanban_remove_worktree "$wt"
         git -C "$ROOT" branch -q -D "$branch" 2>/dev/null || true
         move_card "$file" blocked >/dev/null
@@ -2241,9 +2294,12 @@ cmd_run() {
       # waits for `kanban resume`, while the latter is refreshed below and
       # returns to todo only after its declared dependency reaches done.
       # Review-infra worktree/branch/commits are the whole point of keeping them.
-      # Worker-reported ordering blocks are still reclaimed on restart.
+      # Worker-reported ordering blocks are still reclaimed on restart --
+      # unless the same reason has already repeated past the stall
+      # threshold (ordering_stalled), which parks like review_infra/user_input
+      # so a never-resolving card stops burning a dispatch slot every restart.
       case $(fm_get "$orphan" blocked_kind "") in
-        review_infra|review_decision|dependency|user_input|scope_timebox|operation_unknown|main_branch_changed) continue ;;
+        review_infra|review_decision|dependency|user_input|scope_timebox|operation_unknown|main_branch_changed|ordering_stalled) continue ;;
       esac
       local bid
       bid=$(fm_get "$orphan" id "?")
@@ -2354,6 +2410,7 @@ cmd_resume() { # cmd_resume <id-substring> [-m decision] -> resume a supported p
   kind=$(fm_get "$file" blocked_kind "")
   case $kind in
     review_infra|review_decision|user_input|scope_timebox|main_branch_changed) ;;
+    ordering|ordering_stalled) ;;
     operation_unknown) die "operation outcome is unknown; verify remote state, then use: kanban operation $pat done|retry" ;;
     *) die "card is blocked (kind: ${kind:-unknown}); this block kind is not manually resumable" ;;
   esac
@@ -2361,6 +2418,9 @@ cmd_resume() { # cmd_resume <id-substring> [-m decision] -> resume a supported p
   fm_set "$file" review_infra_retries 0
   fm_set "$file" worker_infra_retries 0
   fm_set "$file" blocked_kind ""
+  if [[ $kind == ordering || $kind == ordering_stalled ]]; then
+    fm_update "$file" ordering_block_reason "" ordering_block_repeat 0
+  fi
   if [[ -n $decision ]]; then
     printf '%s\n' "$decision" | append_history "$file" "user decision"
   fi
