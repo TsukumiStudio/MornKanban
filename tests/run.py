@@ -9,6 +9,20 @@ import time
 
 
 REPO = Path(__file__).resolve().parents[1]
+
+WIRED_SH_TESTS = {
+    "tests/test_herdr_agent_worker.sh",
+    "tests/test_submodule_preservation.sh",
+    "tests/test_submodule_publish_card.sh",
+    "tests/test_review_prompt_injection.sh",
+}
+
+
+def find_unwired_sh_tests():
+    found = {str(p.relative_to(REPO)) for p in (REPO / "tests").glob("test_*.sh")}
+    return sorted(found - WIRED_SH_TESTS)
+
+
 FAST_TESTS = [
     "tests.test_activity_log",
     "tests.test_dispatcher_tui",
@@ -53,6 +67,11 @@ def main(argv=None):
     env = os.environ.copy()
     env.setdefault("KANBAN_DISPATCH_POLL_INTERVAL", "0.05")
 
+    unwired = find_unwired_sh_tests()
+    if unwired:
+        print("UNWIRED bash tests (add to tests/run.py tiers): %s" % ", ".join(unwired), file=sys.stderr)
+        return 1
+
     if tier == "targeted":
         if not argv:
             print("usage: python3 tests/run.py targeted <unittest-name> [...]", file=sys.stderr)
@@ -61,12 +80,18 @@ def main(argv=None):
 
     if tier == "fast":
         steps = [
+            ("submodule preservation", ["bash", "tests/test_submodule_preservation.sh"], 20),
+            ("submodule publish card", ["bash", "tests/test_submodule_publish_card.sh"], 20),
+            ("review prompt injection", ["bash", "tests/test_review_prompt_injection.sh"], 10),
             ("fast python", [sys.executable, "-m", "unittest", "-q"] + FAST_TESTS, 45),
         ]
     elif tier == "full":
         steps = [
             ("full python", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], 180),
-    ("visible worker lifecycle", ["bash", "tests/test_herdr_agent_worker.sh"], 45),
+            ("visible worker lifecycle", ["bash", "tests/test_herdr_agent_worker.sh"], 45),
+            ("submodule preservation", ["bash", "tests/test_submodule_preservation.sh"], 20),
+            ("submodule publish card", ["bash", "tests/test_submodule_publish_card.sh"], 20),
+            ("review prompt injection", ["bash", "tests/test_review_prompt_injection.sh"], 10),
             ("skill validation", [
                 sys.executable,
                 os.path.expanduser("~/.codex/skills/.system/skill-creator/scripts/quick_validate.py"),
