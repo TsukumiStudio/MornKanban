@@ -43,7 +43,30 @@ class TempProjectMixin:
 
 # --- command_classify.py: allowlist and bypass attempts ---------------------
 
-class TestCommandClassify(unittest.TestCase):
+class ManagedKanbanOnPathMixin:
+    # command_classify's managed-executable check resolves bare "kanban" /
+    # "kanban-secretary.sh" via PATH and compares against this repo's own
+    # kanban.sh / kanban-secretary.sh. When the suite runs from a worktree
+    # checkout (e.g. a dispatched card), the ambient PATH's "kanban" points
+    # at whichever checkout is actually installed (usually the main repo),
+    # not this worktree, so the comparison mismatches for reasons unrelated
+    # to the guard logic under test. Pin PATH to this repo's own scripts,
+    # matching the isolation pattern used by TestSecretaryScriptMarkerLifecycle.
+    def setUp(self):
+        super().setUp()
+        self.fake_bin = tempfile.mkdtemp(prefix="mornkanban-guard-path-")
+        self.addCleanup(shutil.rmtree, self.fake_bin, ignore_errors=True)
+        os.symlink(os.path.join(REPO, "kanban.sh"), os.path.join(self.fake_bin, "kanban"))
+        os.symlink(
+            os.path.join(REPO, "kanban-secretary.sh"),
+            os.path.join(self.fake_bin, "kanban-secretary.sh"),
+        )
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.fake_bin + os.pathsep + old_path
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
+
+
+class TestCommandClassify(ManagedKanbanOnPathMixin, unittest.TestCase):
     def allow(self, cmd):
         allowed, reason = classify.classify(cmd)
         self.assertTrue(allowed, "expected allow for %r, got deny: %s" % (cmd, reason))
@@ -90,7 +113,7 @@ class TestCommandClassify(unittest.TestCase):
 
     def test_allows_secretary_dispatcher_commands(self):
         for cmd in [
-            "~/git/MornKanban/kanban-secretary.sh dispatch",
+            os.path.join(REPO, "kanban-secretary.sh") + " dispatch",
             os.path.join(REPO, "kanban-secretary.sh") + " bootstrap",
             os.path.join(REPO, "kanban-secretary.sh") + " dispatch --once",
             os.path.join(REPO, "kanban-secretary.sh") + " end",
@@ -232,7 +255,7 @@ class TestCommandClassify(unittest.TestCase):
 
 # --- claude_secretary_guard.py: pane/tool decision ---------------------------
 
-class TestGuardDecision(TempProjectMixin, unittest.TestCase):
+class TestGuardDecision(ManagedKanbanOnPathMixin, TempProjectMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
         marker.write_marker(self.root, "pane-secretary", "secretary-project")
