@@ -62,6 +62,8 @@ class TestCommandClassify(unittest.TestCase):
             "kanban list",
             "kanban init",
             "kanban migrate",
+            "kanban ready 20260901-172101-5531",
+            "kanban ready --check 20260901-172101-5531",
             "kanban --version",
             'kanban send alias "title"',
             "kanban remove 20260901-172101-5531",
