@@ -157,7 +157,7 @@ The secretary may maintain its own board through the validated CLI, never by edi
 ```sh
 kanban ready --check <card-id>                # validate Definition of Ready
 kanban ready <card-id>                        # backlog -> Ready (todo)
-kanban remove <card-id>                       # delete one unstarted backlog/Ready card
+kanban remove <card-id>                       # delete one backlog/todo/ordering-blocked card
 kanban config set jobs 8                      # live dispatcher concurrency
 kanban config set default_backend codex       # defaults for newly created cards
 kanban config set default_model gpt-5.6-sol
@@ -167,7 +167,7 @@ kanban config set resolver claude
 kanban config set resolve_model sonnet
 ```
 
-Use `kanban remove` immediately when the secretary itself accidentally created a malformed card, or when the user explicitly asks to discard an unstarted card; it refuses every state except `backlog` and Ready (`todo`). `kanban config set` accepts only the seven keys shown above. A running dispatcher re-reads `jobs` live; card defaults affect newly created cards, while reviewer/resolver routing changes take effect on the next dispatcher start. These commands do not authorize project-file edits, Git mutations, builds, tests, or deployment.
+Use `kanban remove` immediately when the secretary itself accidentally created a malformed card, or when the user explicitly asks to discard an unstarted card; it refuses every state except `backlog`, Ready (`todo`), and ordering blocked (`ordering`/`ordering_stalled`). `kanban config set` accepts only the seven keys shown above. A running dispatcher re-reads `jobs` live; card defaults affect newly created cards, while reviewer/resolver routing changes take effect on the next dispatcher start. These commands do not authorize project-file edits, Git mutations, builds, tests, or deployment.
 
 ## Secretary Guard (technical enforcement, not just instructions)
 

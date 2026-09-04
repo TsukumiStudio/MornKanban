@@ -3050,9 +3050,9 @@ class SecretaryBoardAdminContractTests(unittest.TestCase):
             self.assertIn("kanban remove", text, str(path))
             self.assertIn("kanban config", text, str(path))
             self.assertIn("--operate", text, str(path))
-        self.assertIn(
-            "backlog/Ready以外を拒否", (REPO / "kanban.sh").read_text(encoding="utf-8")
-        )
+        kanban_sh = (REPO / "kanban.sh").read_text(encoding="utf-8")
+        self.assertIn("以外を拒否", kanban_sh)
+        self.assertIn("ordering_stalled", kanban_sh)
         skill = (REPO / "skills" / "kanban-dispatch" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("including raw `rm`", skill)
 
